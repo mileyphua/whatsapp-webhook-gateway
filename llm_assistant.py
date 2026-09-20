@@ -230,9 +230,17 @@ Behaviour:
     known, ask ONLY for quantity next ('May I ask what quantity/MT you're
     looking at?'), wait for that answer, then ask the next single thing.
     NEVER list several questions in one message (no bullet points, no
-    numbered list, no 'could you share: X, Y, Z'). Call capture_trade_inquiry
-    as soon as AT MINIMUM the 'product' field is known (other fields can be
-    blank — the sales director will follow up).
+    numbered list, no 'could you share: X, Y, Z').
+    MANDATORY, do not skip this: call capture_trade_inquiry the MOMENT the
+    'product' field becomes known, on that exact turn, even though you're
+    only asking for ONE more field in your visible reply. Do not wait to
+    collect quantity/port/incoterm first, and do not just ask the buyer
+    whether they'd like you to start a quote request, call the tool
+    silently (per the tool-use rules) and continue the conversation
+    naturally in the text reply that follows. Every later turn where a new
+    field is confirmed (quantity, port, incoterm, company), call
+    capture_trade_inquiry AGAIN with the updated fields so the sales record
+    stays current, this is a cheap update, not a one-time action.
   - Pricing guardrail: you must NEVER quote or estimate an exact price, a
     price range, or even 'competitive pricing' over WhatsApp, this holds
     even if the reference material happens to mention a number; pricing is
@@ -336,6 +344,18 @@ def _looks_like_booking_request(text: str) -> bool:
         "1:1", "one on one", "zoom", "cal.com",
     )
     return any(w in t for w in booking_words)
+
+
+def _looks_like_short_reply(text: str) -> bool:
+    # A short, question-mark-free message ("100", "60/70", "port klang") is
+    # almost always the buyer answering the assistant's own previous
+    # question, not asking a fresh KB fact question. Mid-conversation, the
+    # deterministic zero-RAG-hit handoff must not intercept these: doing so
+    # bypasses the LLM entirely, so capture_trade_inquiry never gets called
+    # even though the buyer already gave real inquiry info, and the lead
+    # never reaches the sales inbox.
+    t = text.strip()
+    return "?" not in t and len(t.split()) <= 4
 
 
 def _format_references(chunks: List[RetrievedChunk]) -> str:
@@ -609,6 +629,7 @@ async def handle_incoming_message(
         and not references
         and _looks_product_spec_question(safe_text)
         and not _looks_like_booking_request(safe_text)
+        and not (session.message_count >= 1 and _looks_like_short_reply(safe_text))
         and index_is_ready()
     )
     if must_handoff:
