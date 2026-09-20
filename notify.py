@@ -257,6 +257,14 @@ async def _send_if_configured(
     subject: str,
     html_body: str,
 ) -> bool:
+    # NOTIFY_DRY_RUN=1 prints the email instead of sending it — use this for any
+    # local/manual test run (curl scripts, python -c smoke tests, persona
+    # testing, etc.) so test traffic never lands in the real sales inbox.
+    # Set it in your local shell / .env, NOT on Render, where real emails
+    # must actually go out.
+    if os.getenv("NOTIFY_DRY_RUN", "").strip().lower() in ("1", "true", "yes"):
+        print(f"[notify] DRY RUN (NOTIFY_DRY_RUN set) — would have sent: {subject!r}")
+        return True
     cfg = _load_config()
     if not cfg.is_configured:
         print(
