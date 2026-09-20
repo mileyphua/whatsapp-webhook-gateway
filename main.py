@@ -2,7 +2,7 @@ import os
 from typing import Any, Dict
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, Request, HTTPException, status
+from fastapi import FastAPI, Request, HTTPException, Query, status
 from fastapi.responses import JSONResponse, PlainTextResponse
 
 load_dotenv()
@@ -31,9 +31,9 @@ async def root() -> JSONResponse:
 
 @app.get("/webhook")
 async def verify_webhook(
-    hub_mode: str = None,
-    hub_verify_token: str = None,
-    hub_challenge: str = None,
+    hub_mode: str = Query(default=None, alias="hub.mode"),
+    hub_verify_token: str = Query(default=None, alias="hub.verify_token"),
+    hub_challenge: str = Query(default=None, alias="hub.challenge"),
 ) -> Any:
     if not VERIFY_TOKEN:
         raise HTTPException(
