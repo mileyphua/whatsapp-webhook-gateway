@@ -76,20 +76,22 @@ async def receive_webhook(request: Request) -> JSONResponse:
             detail="Invalid JSON payload",
         )
 
-    if payload.get("object") != "whatsapp_business_account":
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid webhook object type",
-        )
+    obj = payload.get("object")
+    if obj != "whatsapp_business_account":
+        print(f"[WARN] Received webhook with unexpected object={obj!r} — still acking 200")
 
-    entries = payload.get("entry", [])
-    for entry in entries:
-        changes = entry.get("changes", [])
-        for change in changes:
-            value = change.get("value", {})
-            messages = value.get("messages", [])
-            for message in messages:
-                _process_message(message)
+    try:
+        entries = payload.get("entry", [])
+        for entry in entries:
+            changes = entry.get("changes", [])
+            for change in changes:
+                value = change.get("value", {})
+                for message in value.get("messages", []) or []:
+                    _process_message(message)
+                for st in value.get("statuses", []) or []:
+                    _process_status(st)
+    except Exception as exc:  # pragma: no cover - defensive, never fail the webhook ack
+        print(f"[ERROR] Failed while processing webhook payload: {exc!r}")
 
     return JSONResponse(
         content={"status": "success", "message": "EVENT_RECEIVED"},
@@ -110,6 +112,27 @@ def _process_message(message: Dict[str, Any]) -> None:
     print(
         f"[MESSAGE] id={message_id} from={from_number} "
         f"type={message_type} ts={timestamp} body={text_body!r}"
+    )
+
+
+def _process_status(status: Dict[str, Any]) -> None:
+    status_id = status.get("id")
+    recipient = status.get("recipient_id")
+    status_value = status.get("status")
+    timestamp = status.get("timestamp")
+    conversation = (status.get("conversation") or {}).get("origin", {}).get("type")
+
+    errors = None
+    err_list = status.get("errors") or []
+    if err_list:
+        errors = "; ".join(
+            f"#{e.get('code')} {e.get('title')}" for e in err_list
+        ) or None
+
+    print(
+        f"[STATUS] id={status_id} to={recipient} "
+        f"status={status_value} origin={conversation!r} ts={timestamp}"
+        + (f" errors=[{errors}]" if errors else "")
     )
 
 
