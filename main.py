@@ -86,41 +86,41 @@ def _looks_like_human_escalation(text: str) -> bool:
 _NONTEXT_MEDIA_REPLY: dict[str, str] = {
     "document": (
         "Thanks, I've received your document and forwarded it to the "
-        "Petrobind trading desk for their review. They'll reply directly "
+        "Petrobind sales director for their review. They'll reply directly "
         "here with any comments. Quick clarifier: is this for a specific "
         "product grade (e.g. Bitumen 60/70) and destination port?"
     ),
     "image": (
-        "Got the image and passed it to our trading desk. If this is a photo "
+        "Got the image and passed it to our sales director. If this is a photo "
         "of a delivery/QC issue, just reply with the product, shipment date, "
         "and any notes and the team can action it. Otherwise: which grade or "
         "product is it related to?"
     ),
     "audio": (
-        "Got your voice note, I've flagged it for the Petrobind trading desk "
+        "Got your voice note, I've flagged it for the Petrobind sales director "
         "and they'll listen and revert. To speed things up: is it regarding a "
         "quote request, logistics, or an existing shipment?"
     ),
     "voice": (
-        "Got your voice note, flagged it for the trading desk. To speed "
+        "Got your voice note, flagged it for the sales director. To speed "
         "things up: is it regarding a quote request, logistics, or an existing "
         "shipment?"
     ),
     "video": (
-        "Got the video, forwarded to the trading desk. One quick thing: "
+        "Got the video, forwarded to the sales director. One quick thing: "
         "which product and destination port is this for, so the right person "
         "reviews it first?"
     ),
     "sticker": "",  # ignore — no reply needed (silent receipt)
     "reaction": "",  # ignore — no reply needed
     "contacts": (
-        "Got the contact card, forwarded to our desk. Quick question: which "
+        "Got the contact card, forwarded to our sales director. Quick question: which "
         "Petrobind product and destination port should we associate with this "
         "contact?"
     ),
     "location": (
         "Got the location. If this is a destination port or a pickup point, "
-        "let me know the target product + volume and I'll have the desk prep "
+        "let me know the target product + volume and I'll have the sales director prep "
         "the next steps around it."
     ),
     "interactive": "",  # button reply etc → Meta will forward the button text; leave to the text branch
@@ -845,15 +845,24 @@ async def _instant_handoff_reply(
 
     Used when the buyer types P0.4 instant-escalation keywords ("human", "urgent",
     "manager", etc.) or when a non-text media message arrives. Always sends
-    (a) a short WhatsApp confirmation + (b) the handoff email in parallel.
+    (a) a short WhatsApp confirmation, offering to book a call with the buyer
+    when they're free, + (b) the handoff email to admin in parallel.
     Never raises — best-effort.
     """
-    reply = (
-        "Of course, let me get back to you on that shortly. In the meantime, "
-        "it'll help if you can share the target product (e.g. Bitumen "
-        "60/70), destination port, and roughly how much volume you need per "
-        "shipment. Thank you!"
-    )
+    if booking.is_configured():
+        reply = (
+            "Of course, let me get back to you on that shortly. If you're "
+            "free, it's often quickest to grab a short call with our sales "
+            "director so we can understand your requirement properly: "
+            + booking.get_booking_link()
+        )
+    else:
+        reply = (
+            "Of course, let me get back to you on that shortly. In the meantime, "
+            "it'll help if you can share the target product (e.g. Bitumen "
+            "60/70), destination port, and roughly how much volume you need per "
+            "shipment. Thank you!"
+        )
     try:
         res = await send_whatsapp_text(
             to=from_number,

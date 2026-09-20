@@ -68,7 +68,7 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
                 "formal quote request (at minimum a target product). Also call it "
                 "if a buyer explicitly asks for a quote, pricing, or samples. "
                 "Filling every field is NOT required — send what you have. "
-                "Calling this tool triggers an email to the human sales desk, "
+                "Calling this tool triggers an email to the human sales director, "
                 "who will follow up directly."
             ),
             "parameters": {
@@ -100,7 +100,7 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
                 "human; (c) the buyer wants exact spot / current pricing or "
                 "custom quote terms. DO NOT guess facts not present in the "
                 "retrieved references. Calling this tool sends an email to the "
-                "human sales desk to take over the conversation personally."
+                "human sales director to take over the conversation personally."
             ),
             "parameters": {
                 "type": "object",
@@ -185,9 +185,9 @@ Behaviour:
     has stated what they need, and only if it's actually useful context.
   - Answer buyer questions ONLY from the "Retreived reference material" block
     included with the current turn. If a question is not directly answered by
-    that block, you MUST call request_sales_handoff and tell the buyer a
-    specialist will confirm the details — NEVER guess, infer, or rely on general
-    world knowledge about bitumen grades / logistics / pricing.
+    that block, you MUST call request_sales_handoff and tell the buyer our
+    sales director will confirm the details — NEVER guess, infer, or rely on
+    general world knowledge about bitumen grades / logistics / pricing.
   - When discussing a specific product, include its source URL ONCE inside your
     reply (the URL is inside each retrieved chunk).
   - If the buyer shows purchasing interest, move CONVERSATIONALLY toward the
@@ -199,19 +199,19 @@ Behaviour:
     NEVER list several questions in one message (no bullet points, no
     numbered list, no 'could you share: X, Y, Z'). Call capture_trade_inquiry
     as soon as AT MINIMUM the 'product' field is known (other fields can be
-    blank — the sales desk will follow up).
+    blank — the sales director will follow up).
   - Pricing guardrail: you must NEVER quote or estimate an exact price, a
-    price range, or even 'competitive pricing' over WhatsApp — this holds
+    price range, or even 'competitive pricing' over WhatsApp, this holds
     even if the reference material happens to mention a number; pricing is
     always withheld from chat regardless of source. Price is only ever
     discussed once a call or face-to-face meeting is booked, and even then
-    it's a human trader who gives it personally, never this assistant. If the
-    buyer asks about pricing, call capture_trade_inquiry (if you have a
-    product) and, once you have enough context (product + rough
-    quantity/volume), proactively offer to set up that call — call
-    share_booking_link and say something like 'Our trading desk can confirm
-    current pricing on a quick call — want me to share a booking link?'
-    Otherwise fall back to request_sales_handoff.
+    it's the sales director who gives it personally, never this assistant. If the
+    buyer asks about pricing: call capture_trade_inquiry (if you have a
+    product), AND call request_sales_handoff (reason: pricing not
+    disclosed over chat), AND call share_booking_link IN THE SAME ROUND so
+    the reply can include the real link directly (don't just ask if they
+    want it, offer it outright) — e.g. 'Pricing gets confirmed on a call
+    with our sales director. Here's a link if you're free: <link>'.
   - Buyer intent (Part 3.4): for vague / one-liner inquiries ('just checking
     prices', 'bitumen price?') ask a light qualifying question FIRST ('Which
     grade are you targeting, and roughly what volume per month?') before
@@ -236,13 +236,20 @@ Tool-use rules:
     ONLY thing in your reply if you are calling a tool — do NOT also write
     text content alongside tool calls; the wrapper will send a short
     confirmation back to the buyer after the tool side-effect runs.
-  - Calling capture_trade_inquiry sends an email to the sales desk. After
+  - Calling capture_trade_inquiry sends an email to the sales director. After
     calling it, tell the buyer something like: 'Thank you, I've recorded your
-    inquiry and our trading desk will reach out directly to you on WhatsApp
+    inquiry and our sales director will reach out directly to you on WhatsApp
     within the next business hours.'
-  - Calling request_sales_handoff also emails the sales desk. After calling it
-    tell the buyer you've escalated their question to a human specialist who
-    will reply personally. Never apologise excessively.
+  - Calling request_sales_handoff also emails the sales director (the admin
+    always gets notified whenever a handoff happens, no exceptions). After
+    calling it, do NOT say 'escalated' or 'specialist has been paged', that
+    reads as robotic. Instead say something like you'll check on it and get
+    back to them personally, and IN THE SAME REPLY invite them to book a
+    quick call if they're free, using share_booking_link so you can include
+    the real link, e.g. 'Let me check on that and get back to you. If you're
+    free, happy to jump on a quick call so we can go through it properly:
+    <link>'. Only skip the booking offer if they already have a call booked
+    this session or explicitly said they don't want one.
 """
 
 
@@ -304,7 +311,7 @@ def _nudge_if_needed(session: ConversationSession) -> Optional[str]:
     return (
         "\n\n(Quick question: would you like me to put together a quote "
         "request for your team, share a time slot for a quick call, or "
-        "pass you to a human trader on our desk?)"
+        "pass you to our sales director?)"
     )
 
 
@@ -359,8 +366,8 @@ async def _run_tool(name: str, args: dict, *, session: ConversationSession) -> O
             return (
                 "Tool result: request_sales_handoff completed. "
                 f"Handoff reason: {reason!r}. Summary: {summary!r}. "
-                "Reply: tell the buyer a specialist from the Petrobind trading desk "
-                "has been notified and will reply personally on WhatsApp."
+                "Reply: tell the buyer our sales director has been notified "
+                "and will reply personally on WhatsApp."
             )
         if name == "share_booking_link":
             link = booking.get_booking_link(message=args.get("message"))
@@ -372,7 +379,7 @@ async def _run_tool(name: str, args: dict, *, session: ConversationSession) -> O
                 return (
                     "Tool result: share_booking_link — Cal.com booking URL is not "
                     "configured yet in this environment. Fallback: instead tell the "
-                    "buyer you'll have the trading desk reach out with a booking link, "
+                    "buyer you'll have the sales director reach out with a booking link, "
                     "then call request_sales_handoff with a note that a booking was requested."
                 )
             return f"Tool result: share_booking_link succeeded. Reply with this EXACT URL (do not modify it): {link}"
@@ -537,7 +544,7 @@ async def handle_incoming_message(
             reply = (
                 "Good question, let me check on that and get right back to "
                 "you. While I confirm the details, want to grab a quick call "
-                "with our trading desk so we can go through everything "
+                "with our sales director so we can go through everything "
                 "properly? " + booking.get_booking_link()
             )
         else:
@@ -568,14 +575,14 @@ async def handle_incoming_message(
             fallback = (
                 "Thanks for reaching out, let me get back to you on this "
                 "shortly. In the meantime, feel free to grab a quick call "
-                "with our trading desk so we can go through your requirement "
+                "with our sales director so we can go through your requirement "
                 "properly: " + booking.get_booking_link()
             )
         else:
             fallback = (
                 "Thanks for reaching out, let me get back to you on this "
                 "shortly. Which product are you interested in, and roughly "
-                "what quantity per shipment, so our trading desk can prepare?"
+                "what quantity per shipment, so our sales director can prepare?"
             )
         # Only call this once per session to avoid spam.
         if not session.handoff_notified:
