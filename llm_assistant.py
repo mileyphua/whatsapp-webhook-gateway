@@ -208,10 +208,12 @@ Behaviour:
     it's the sales director who gives it personally, never this assistant. If the
     buyer asks about pricing: call capture_trade_inquiry (if you have a
     product), AND call request_sales_handoff (reason: pricing not
-    disclosed over chat), AND call share_booking_link IN THE SAME ROUND so
-    the reply can include the real link directly (don't just ask if they
-    want it, offer it outright) — e.g. 'Pricing gets confirmed on a call
-    with our sales director. Here's a link if you're free: <link>'.
+    disclosed over chat), AND call share_booking_link, all in the same
+    tool-call round (no text alongside them, per the tool-use rules below).
+    Once their results come back, write ONE reply that includes the exact
+    URL string share_booking_link returned, offered outright, not asked as
+    a yes/no question, e.g. 'Pricing gets confirmed on a call with our
+    sales director, here's a link if you're free: ' followed by that URL.
   - Buyer intent (Part 3.4): for vague / one-liner inquiries ('just checking
     prices', 'bitumen price?') ask a light qualifying question FIRST ('Which
     grade are you targeting, and roughly what volume per month?') before
@@ -232,24 +234,27 @@ Behaviour:
     or service are you looking into?') and move back on-topic.
 
 Tool-use rules:
-  - You can call one or more tools in a single reply. Tool calls should be the
-    ONLY thing in your reply if you are calling a tool — do NOT also write
-    text content alongside tool calls; the wrapper will send a short
-    confirmation back to the buyer after the tool side-effect runs.
+  - You can call one or more tools in a single round. When you call a tool
+    (or several at once), that round's reply must be ONLY the tool call(s),
+    no text content alongside them. The tool results come back to you
+    immediately after, and THEN you write your one text reply to the buyer
+    using those results.
+  - When request_sales_handoff fires, also call share_booking_link in the
+    same round (unless the buyer already has a call booked this session or
+    explicitly said they don't want one). Once you have its result, write a
+    reply that: (a) does NOT say 'escalated' or 'specialist has been
+    paged', that reads as robotic, say instead that you'll check on it and
+    get back to them personally; and (b) includes the booking invite using
+    the EXACT URL string the share_booking_link tool result gave you, e.g.
+    'Let me check on that and get back to you. If you're free, happy to
+    jump on a quick call so we can go through it properly: ' followed
+    directly by that URL. NEVER write the literal characters '<link>' or
+    any other placeholder, if you have not actually received a URL string
+    back from share_booking_link yet, do not mention a link at all.
   - Calling capture_trade_inquiry sends an email to the sales director. After
     calling it, tell the buyer something like: 'Thank you, I've recorded your
     inquiry and our sales director will reach out directly to you on WhatsApp
     within the next business hours.'
-  - Calling request_sales_handoff also emails the sales director (the admin
-    always gets notified whenever a handoff happens, no exceptions). After
-    calling it, do NOT say 'escalated' or 'specialist has been paged', that
-    reads as robotic. Instead say something like you'll check on it and get
-    back to them personally, and IN THE SAME REPLY invite them to book a
-    quick call if they're free, using share_booking_link so you can include
-    the real link, e.g. 'Let me check on that and get back to you. If you're
-    free, happy to jump on a quick call so we can go through it properly:
-    <link>'. Only skip the booking offer if they already have a call booked
-    this session or explicitly said they don't want one.
 """
 
 
@@ -598,6 +603,7 @@ async def handle_incoming_message(
 
     # 5. Post-processing: WhatsApp formatting adjustments + Q&A cap nudge.
     cleaned = _clean_for_whatsapp(text)
+    cleaned = _fix_placeholder_link(cleaned)
     nudge = _nudge_if_needed(session)
     if nudge:
         cleaned = (cleaned + nudge).strip()
@@ -626,6 +632,23 @@ async def handle_incoming_message(
 # --------------------------- WHATSAPP FORMAT CLEANUP ------------------------
 
 _WHATSAPP_FORBIDDEN = re.compile(r"[`#>*_\-]{3,}")  # markdown-ish noise
+
+_PLACEHOLDER_LINK_RE = re.compile(r"<\s*(link|url|booking[_ ]?link)\s*>", re.IGNORECASE)
+
+
+def _fix_placeholder_link(text: str) -> str:
+    """Safety net: the model is instructed never to write a literal '<link>'
+    placeholder, but if it slips through anyway, swap it for the real
+    Cal.com URL (or drop the dangling placeholder if booking isn't
+    configured) rather than showing the buyer a broken '<link>' token."""
+    if not _PLACEHOLDER_LINK_RE.search(text):
+        return text
+    real_link = booking.get_booking_link() if booking.is_configured() else ""
+    if real_link:
+        return _PLACEHOLDER_LINK_RE.sub(real_link, text)
+    print(f"[llm] WARN: model emitted a placeholder link with booking unconfigured: {text[:200]!r}")
+    return _PLACEHOLDER_LINK_RE.sub("", text).strip()
+
 
 def _clean_for_whatsapp(text: str) -> str:
     # Strip any accidental markdown headings / fences the model might emit.
