@@ -85,7 +85,7 @@ def _looks_like_human_escalation(text: str) -> bool:
 # asks exactly 1 clarifying question so the buyer doesn't feel ignored.
 _NONTEXT_MEDIA_REPLY: dict[str, str] = {
     "document": (
-        "Thanks — I've received your document and forwarded it to the "
+        "Thanks, I've received your document and forwarded it to the "
         "Petrobind trading desk for their review. They'll reply directly "
         "here with any comments. Quick clarifier: is this for a specific "
         "product grade (e.g. Bitumen 60/70) and destination port?"
@@ -97,24 +97,24 @@ _NONTEXT_MEDIA_REPLY: dict[str, str] = {
         "product is it related to?"
     ),
     "audio": (
-        "Got your voice note — I've flagged it for the Petrobind trading desk "
-        "and they'll listen + revert. To speed things up: is it regarding a "
+        "Got your voice note, I've flagged it for the Petrobind trading desk "
+        "and they'll listen and revert. To speed things up: is it regarding a "
         "quote request, logistics, or an existing shipment?"
     ),
     "voice": (
-        "Got your voice note — flagged it for the trading desk. To speed "
+        "Got your voice note, flagged it for the trading desk. To speed "
         "things up: is it regarding a quote request, logistics, or an existing "
         "shipment?"
     ),
     "video": (
-        "Got the video — forwarded to the trading desk. One quick thing: "
-        "which product + destination port is this for, so the right person "
+        "Got the video, forwarded to the trading desk. One quick thing: "
+        "which product and destination port is this for, so the right person "
         "reviews it first?"
     ),
     "sticker": "",  # ignore — no reply needed (silent receipt)
     "reaction": "",  # ignore — no reply needed
     "contacts": (
-        "Got the contact card — forwarded to our desk. Quick question: which "
+        "Got the contact card, forwarded to our desk. Quick question: which "
         "Petrobind product and destination port should we associate with this "
         "contact?"
     ),
@@ -808,8 +808,7 @@ async def _llm_reply(
 
     if not reply_text:
         reply_text = (
-            "Thanks for your message to Petrobind Global — a member of the "
-            "trading desk will reply to you shortly."
+            "Thanks for your message, let me get back to you on that shortly."
         )
 
     try:
@@ -850,11 +849,10 @@ async def _instant_handoff_reply(
     Never raises — best-effort.
     """
     reply = (
-        "Of course — a Petrobind trading specialist has been paged directly "
-        "and will be with you here on WhatsApp within the next business hours. "
-        "To make the conversation faster, feel free to reply in the meantime "
-        "with: the target product (e.g. Bitumen 60/70), destination port, "
-        "and approximate volume per shipment. Thank you!"
+        "Of course, let me get back to you on that shortly. In the meantime, "
+        "it'll help if you can share the target product (e.g. Bitumen "
+        "60/70), destination port, and roughly how much volume you need per "
+        "shipment. Thank you!"
     )
     try:
         res = await send_whatsapp_text(
