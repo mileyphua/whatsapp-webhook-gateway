@@ -7,7 +7,10 @@ send_handoff_email; when Cal.com booking fires via /cal-webhook, send_booking_em
 Provider support (tested with configs below):
   - **Spacemail** by Namecheap (formerly "Private Email"):
       Mailbox admin portal:  https://www.spacemail.com/
-      SMTP_HOST=mail.privateemail.com   (unchanged — SMTP hostname stays the same)
+      SMTP_HOST=mail.spacemail.com   (confirmed 2026-09-21 — the older
+        mail.privateemail.com hostname returns 535 auth failures even with
+        correct credentials; the portal's own SMTP settings page lists
+        mail.spacemail.com)
       SMTP_PORT=465  (implicit TLS/SSL — RECOMMENDED)
       SMTP_PORT=587  (STARTTLS — also works)
       SMTP_USERNAME=sales@petrobindglobal.com  (FULL email, not just local part)
@@ -75,7 +78,7 @@ def _load_config() -> _SMTPConfig:
     if host_default == "gmail":
         default_host, default_port = "smtp.gmail.com", 587
     else:  # default: spacemail / privateemail
-        default_host, default_port = "mail.privateemail.com", 465
+        default_host, default_port = "mail.spacemail.com", 465
     return _SMTPConfig(
         host=os.getenv("SMTP_HOST", default_host),
         port=int(os.getenv("SMTP_PORT", str(default_port))),
@@ -195,21 +198,19 @@ def _send_sync(cfg: _SMTPConfig, msg: EmailMessage) -> None:
         msg_text = str(byts) if byts else str(exc)
         raise RuntimeError(
             f"SMTP auth failed (host={cfg.host} port={cfg.port} user={cfg.username!r}). "
-            f"For Spacemail: (1) SMTP_USERNAME must be the FULL email address "
-            f"(sales@petrobindglobal.com, not just 'sales'). (2) SMTP_PASSWORD is the "
-            f"mailbox password set via https://www.spacemail.com/ → Mailboxes → "
-            f"(your mailbox) → Change Password (NOT your Namecheap billing/account "
-            f"password; Spacemail does not use 'App Passwords'). (3) **PASSWORD "
-            f"CHARACTER WHITELIST RULE — very important:** Spacemail SMTP AUTH on "
-            f"mail.privateemail.com silently rejects passwords containing ?, !, @, "
-            f"#, $, %, ^, &, *, (, ), or other non-alphanumeric symbols even if "
-            f"the same password works on the spacemail.com webmail UI. Use ONLY "
-            f"A-Za-z0-9 (16+ chars) — no special characters — this is the #1 "
-            f"cause of 535 5.7.8 Authentication failed when webmail login works."
-            f" (4) If mailbox is brand new, log in via https://www.spacemail.com/ "
-            f"webmail ONCE to finish activation. (5) After password change: "
-            f"wait 2-3 minutes for replication then retry. Detail: code={code} "
-            f"server={msg_text}"
+            f"For Spacemail: (1) SMTP_HOST must be mail.spacemail.com — the older "
+            f"mail.privateemail.com hostname returns 535 even with correct "
+            f"credentials (confirmed 2026-09-21: same user/password authenticated "
+            f"fine against mail.spacemail.com on both 465 and 587, and failed "
+            f"every time against mail.privateemail.com). (2) SMTP_USERNAME must be "
+            f"the FULL email address (sales@petrobindglobal.com, not just 'sales'). "
+            f"(3) SMTP_PASSWORD is the mailbox password set via "
+            f"https://www.spacemail.com/ → Mailboxes → (your mailbox) → Change "
+            f"Password (NOT your Namecheap billing/account password; Spacemail "
+            f"does not use 'App Passwords'). (4) If mailbox is brand new, log in "
+            f"via https://www.spacemail.com/ webmail ONCE to finish activation. "
+            f"(5) After a password change, wait 2-3 minutes for replication then "
+            f"retry. Detail: code={code} server={msg_text}"
         ) from exc
     except ssl.SSLCertVerificationError as exc:
         raise RuntimeError(
