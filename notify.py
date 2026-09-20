@@ -105,6 +105,25 @@ def _build_message(
 _FIRST_CONFIG_LOGGED = False
 
 
+def _ehlo_hostname(cfg: "_SMTPConfig") -> str:
+    """Return a FQDN-style EHLO/HELO identity for the SMTP client.
+
+    Spacemail / PrivateEmail occasionally drops the connection right after
+    STARTTLS before AUTH when the client sends a generic `localhost` HELO
+    (we observed this on port 587: ehlo=250, STARTTLS=220, then immediate
+    SMTPServerDisconnected on the cipher-negotiated TLS socket). Using the
+    mailbox domain as the HELO identity avoids that heuristic ban.
+    """
+    user = cfg.username or ""
+    if "@" in user:
+        return user.split("@", 1)[1].lower() or "petrobindglobal.com"
+    # Fallback: derive from cfg.host if it is mail.<domain>.*
+    host_parts = cfg.host.lstrip("mail.").lstrip("smtp.").split(".")
+    if len(host_parts) >= 2:
+        return ".".join(host_parts[-2:]).lower()
+    return "petrobindglobal.com"
+
+
 def _send_sync(cfg: _SMTPConfig, msg: EmailMessage) -> None:
     """Blocking SMTP send — always wrapped in to_thread by public APIs.
 
@@ -112,6 +131,10 @@ def _send_sync(cfg: _SMTPConfig, msg: EmailMessage) -> None:
       - Port 465   → SMTP_SSL (implicit TLS on connect — Namecheap Spacemail default)
       - Port 25    → plain SMTP + STARTTLS when advertised (legacy, not recommended)
       - All others (587, 2525, 2587, …) → SMTP + STARTTLS upgrade
+    If STARTTLS path fails with a server-disconnect before AUTH (observed on
+    Spacemail port 587), we transparently retry once on port 465 with implicit
+    TLS. This keeps the user-facing config single-entry (no need to fiddle with
+    port numbers if one listener is having a bad day).
     """
     global _FIRST_CONFIG_LOGGED
     if not _FIRST_CONFIG_LOGGED:
@@ -122,25 +145,51 @@ def _send_sync(cfg: _SMTPConfig, msg: EmailMessage) -> None:
             f"(password is set? {bool(cfg.password)}) — logging ONCE per process"
         )
     ctx = ssl.create_default_context()
+    ehlo = _ehlo_hostname(cfg)
     # Spacemail/PrivateEmail uses LetsEncrypt-issued certs (all trusted by macOS,
     # Debian/RHEL ca-certificates, Render base image). If you run into
     # CERTIFICATE_VERIFY_FAILED in a stripped container: install ca-certificates.
+    def _try_send_via_ssl465() -> None:
+        with smtplib.SMTP_SSL(
+            cfg.host, 465, context=ctx, timeout=30, local_hostname=ehlo
+        ) as s:
+            s.login(cfg.username, cfg.password)
+            s.send_message(msg)
+
     try:
         if cfg.port == 465:
-            with smtplib.SMTP_SSL(cfg.host, cfg.port, context=ctx, timeout=30) as s:
-                s.login(cfg.username, cfg.password)
-                s.send_message(msg)
-                return
+            _try_send_via_ssl465()
+            return
         # STARTTLS path (ports 587 / 2525 / etc). Some providers require EHLO
         # twice (once before STARTTLS, once after). smtplib does this implicitly
         # on login() if needed, but we explicitly starttls to keep it obvious.
-        with smtplib.SMTP(cfg.host, cfg.port, timeout=30) as s:
-            s.ehlo()
-            if s.has_extn("starttls"):
-                s.starttls(context=ctx)
+        try:
+            with smtplib.SMTP(cfg.host, cfg.port, timeout=30, local_hostname=ehlo) as s:
                 s.ehlo()
-            s.login(cfg.username, cfg.password)
-            s.send_message(msg)
+                if s.has_extn("starttls"):
+                    s.starttls(context=ctx)
+                    s.ehlo()
+                s.login(cfg.username, cfg.password)
+                s.send_message(msg)
+            return
+        except (
+            smtplib.SMTPServerDisconnected,
+            smtplib.SMTPConnectError,
+            TimeoutError,
+            ConnectionResetError,
+        ):
+            # Spacemail 587 listener has been observed dropping the socket
+            # immediately after STARTTLS handshakes on certain IP ranges.
+            # Retry once on 465 SSL before failing so the user doesn't need
+            # to manually flip the port.
+            if cfg.port != 465:
+                print(
+                    f"[notify] STARTTLS on {cfg.host}:{cfg.port} disconnected "
+                    f"pre-AUTH; retrying via SSL 465 as fallback."
+                )
+                _try_send_via_ssl465()
+                return
+            raise
     except smtplib.SMTPAuthenticationError as exc:
         code, byts = getattr(exc, "smtp_code", None), getattr(exc, "smtp_error", None)
         msg_text = str(byts) if byts else str(exc)
@@ -150,10 +199,17 @@ def _send_sync(cfg: _SMTPConfig, msg: EmailMessage) -> None:
             f"(sales@petrobindglobal.com, not just 'sales'). (2) SMTP_PASSWORD is the "
             f"mailbox password set via https://www.spacemail.com/ → Mailboxes → "
             f"(your mailbox) → Change Password (NOT your Namecheap billing/account "
-            f"password; Spacemail does not use 'App Passwords'). (3) If the mailbox "
-            f"is brand new, log in via https://www.spacemail.com/ webmail ONCE to "
-            f"activate. (4) If you just changed pw: wait 2-3 minutes for replication, "
-            f"then retry. Detail: code={code} server={msg_text}"
+            f"password; Spacemail does not use 'App Passwords'). (3) **PASSWORD "
+            f"CHARACTER WHITELIST RULE — very important:** Spacemail SMTP AUTH on "
+            f"mail.privateemail.com silently rejects passwords containing ?, !, @, "
+            f"#, $, %, ^, &, *, (, ), or other non-alphanumeric symbols even if "
+            f"the same password works on the spacemail.com webmail UI. Use ONLY "
+            f"A-Za-z0-9 (16+ chars) — no special characters — this is the #1 "
+            f"cause of 535 5.7.8 Authentication failed when webmail login works."
+            f" (4) If mailbox is brand new, log in via https://www.spacemail.com/ "
+            f"webmail ONCE to finish activation. (5) After password change: "
+            f"wait 2-3 minutes for replication then retry. Detail: code={code} "
+            f"server={msg_text}"
         ) from exc
     except ssl.SSLCertVerificationError as exc:
         raise RuntimeError(
