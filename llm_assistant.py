@@ -323,6 +323,21 @@ def _looks_product_spec_question(text: str) -> bool:
     return any(w in t for w in product_words)
 
 
+def _looks_like_booking_request(text: str) -> bool:
+    # A message can contain product-ish words (e.g. "book a call to discuss
+    # pricing") while its real intent is scheduling, not a KB fact lookup.
+    # The deterministic zero-RAG-hit handoff must NOT pre-empt that: booking
+    # intent should always reach the LLM so it can call share_booking_link,
+    # never get swallowed by the canned "let me check and get back to you"
+    # handoff reply before the buyer's actual ask is addressed.
+    t = text.lower()
+    booking_words = (
+        "book", "schedule", "meet", "meeting", "call", "talk", "chat",
+        "1:1", "one on one", "zoom", "cal.com",
+    )
+    return any(w in t for w in booking_words)
+
+
 def _format_references(chunks: List[RetrievedChunk]) -> str:
     if not chunks:
         return "Retrieved reference material for this turn: NONE — you MUST call request_sales_handoff for any product/spec/pricing fact rather than guessing."
@@ -593,6 +608,7 @@ async def handle_incoming_message(
         safe_text
         and not references
         and _looks_product_spec_question(safe_text)
+        and not _looks_like_booking_request(safe_text)
         and index_is_ready()
     )
     if must_handoff:
