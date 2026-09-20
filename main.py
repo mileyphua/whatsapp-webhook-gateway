@@ -17,6 +17,275 @@ PHONE_NUMBER_ID = os.getenv("WHATSAPP_PHONE_NUMBER_ID", "")
 API_VERSION = os.getenv("WHATSAPP_API_VERSION", "v21.0")
 GRAPH_URL = f"https://graph.facebook.com/{API_VERSION}/{PHONE_NUMBER_ID}/messages"
 
+APP_NAME = "WhatsApp Webhook Gateway"
+APP_COMPANY = "Milly"
+APP_CONTACT_EMAIL = "mileyphua96@gmail.com"
+APP_COUNTRY = "Singapore"
+
+
+APP_ICON_SVG = (
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">'
+    '<defs>'
+    '<linearGradient id="g" x1="0" y1="0" x2="1" y2="1">'
+    '<stop offset="0%" stop-color="#25D366"/>'
+    '<stop offset="100%" stop-color="#128C7E"/>'
+    '</linearGradient>'
+    '</defs>'
+    '<rect width="512" height="512" rx="96" fill="url(#g)"/>'
+    '<path fill="#ffffff" d="M408 128A196 196 0 0 0 128 412L104 456l48-20a196 196 0 1 0 256-308z"/>'
+    '<circle cx="256" cy="256" r="20" fill="#128C7E"/>'
+    '<path fill="none" stroke="#128C7E" stroke-width="16" stroke-linecap="round" '
+    'd="M220 220c16-24 64-24 64 16 0 24-16 40-16 40s-8 8 0 16 40 16 56 0c24-24 16-80-24-96"/>'
+    '</svg>'
+)
+
+
+PRIVACY_POLICY_HTML = f"""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Privacy Policy - {APP_NAME}</title>
+<meta name="robots" content="index, follow">
+<style>
+  body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+         margin: 0; padding: 40px 20px; background: #f7f8fa; color: #1f2937; line-height: 1.65; }}
+  .wrap {{ max-width: 820px; margin: 0 auto; background: #fff; padding: 48px; border-radius: 16px;
+          box-shadow: 0 2px 12px rgba(0,0,0,.06); }}
+  h1 {{ font-size: 30px; margin: 0 0 8px; }}
+  h2 {{ font-size: 20px; margin: 32px 0 12px; color: #0f766e; }}
+  p, li {{ font-size: 15px; }}
+  .last {{ color: #6b7280; font-size: 13px; margin-top: 40px; }}
+</style>
+</head>
+<body>
+<div class="wrap">
+<h1>Privacy Policy</h1>
+<p><strong>Effective date:</strong> 2026-09-20</p>
+
+<p>This Privacy Policy describes how <strong>{APP_COMPANY}</strong> ("we", "us", "our")
+collects, uses, and shares information in connection with the
+<strong>{APP_NAME}</strong> application ("the App"), which provides customer support
+and transactional communication services over the WhatsApp Business Platform.</p>
+
+<h2>1. Information we collect</h2>
+<p>We only collect the minimum information necessary to deliver the App's services:</p>
+<ul>
+  <li><strong>Messages:</strong> the contents of inbound and outbound WhatsApp messages
+    (including timestamp, sender / recipient phone numbers in E.164 format, and message ID),
+    only for the purpose of delivering customer support and transactional notifications.</li>
+  <li><strong>Contact numbers:</strong> WhatsApp phone numbers provided by users when they
+    opt-in by sending a message to our WhatsApp Business Phone Number or explicitly agreeing
+    to receive updates through our website or order forms.</li>
+  <li><strong>Delivery statuses:</strong> sent / delivered / read statuses for customer
+    service quality monitoring.</li>
+</ul>
+<p>We do <strong>not</strong> collect names, email addresses, payment card data,
+government identifiers, or other personal information unless a user voluntarily
+provides it inside the body of a support message.</p>
+
+<h2>2. How we use the information</h2>
+<ul>
+  <li>Reply to users' inbound messages within the 24-hour customer support window.</li>
+  <li>Send transactional notifications (e.g., order confirmation, shipping updates)
+    to users who have explicitly opted in.</li>
+  <li>Operate, maintain, and troubleshoot the webhook gateway service.</li>
+  <li>Comply with legal obligations, applicable laws, and WhatsApp's Business Messaging
+    Policy.</li>
+</ul>
+<p>We do <strong>not</strong> use messages or phone numbers for advertising, marketing,
+profiling, or selling to third parties.</p>
+
+<h2>3. Legal basis for processing (GDPR)</h2>
+<p>Processing is based on (a) the user's explicit opt-in consent for transactional
+notifications, (b) performance of a contract for customer support services the user
+has requested, or (c) our legitimate interest in delivering secure 2-way customer
+communications, each balanced against user rights. Users may withdraw consent at
+any time (see §7).</p>
+
+<h2>4. Data sharing and transfers</h2>
+<p>We share message data with the following sub-processors only to operate the service:</p>
+<ul>
+  <li><strong>Meta Platforms / WhatsApp Business Platform</strong> — message routing
+    (see Meta Privacy Policy).</li>
+  <li><strong>Cloud hosting providers</strong> (Render, Supabase, and equivalent) —
+    infrastructure hosting, under contract with adequate data protection terms.</li>
+</ul>
+<p>No other third parties receive any personal data. For users in the EEA, UK, or
+Switzerland, data transfers rely on Standard Contractual Clauses or equivalent
+adequacy mechanisms.</p>
+
+<h2>5. Retention &amp; deletion</h2>
+<p>Message content and associated metadata are retained for <strong>7 calendar days</strong>
+to support the 24-hour customer support window and resolve delivery disputes,
+after which they are permanently and securely deleted. Opt-in phone numbers are
+retained until the user opts out or requests deletion, and are deleted within
+<strong>24 hours</strong> of such a request.</p>
+
+<h2>6. Security</h2>
+<p>We use industry-standard security practices including HTTPS/TLS 1.3 for all
+endpoints, encrypted-at-rest storage, environment-based secret management, and
+least-privilege access controls.</p>
+
+<h2>7. User rights &amp; opt-out</h2>
+<p>Users may at any time:</p>
+<ul>
+  <li>Stop receiving messages by replying <strong>STOP</strong> to our WhatsApp
+    Business Phone Number.</li>
+  <li>Request access to, correction of, or deletion of their personal data by
+    emailing <a href="mailto:{APP_CONTACT_EMAIL}">{APP_CONTACT_EMAIL}</a>.</li>
+  <li>Withdraw previously-given consent at any time, without affecting the
+    lawfulness of processing carried out prior to withdrawal.</li>
+</ul>
+<p>We will respond to verified user requests within <strong>30 days</strong>.</p>
+
+<h2>8. Children</h2>
+<p>The App is not directed to children under the age of 13 (or 16 in the EEA).
+We do not knowingly collect personal data from children.</p>
+
+<h2>9. Changes to this policy</h2>
+<p>We may update this Privacy Policy from time to time. Material changes will be
+notified by posting the updated policy at this URL with a revised effective date.</p>
+
+<h2>10. Contact</h2>
+<p>Questions or requests — <a href="mailto:{APP_CONTACT_EMAIL}">{APP_CONTACT_EMAIL}</a>
+<br>{APP_COMPANY}, {APP_COUNTRY}.</p>
+
+<p class="last">Document ID: pp-{APP_NAME.lower().replace(' ', '-')} · v1.0</p>
+</div>
+</body>
+</html>
+"""
+
+
+TERMS_OF_SERVICE_HTML = f"""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Terms of Service - {APP_NAME}</title>
+<meta name="robots" content="index, follow">
+<style>
+  body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+         margin: 0; padding: 40px 20px; background: #f7f8fa; color: #1f2937; line-height: 1.65; }}
+  .wrap {{ max-width: 820px; margin: 0 auto; background: #fff; padding: 48px; border-radius: 16px;
+          box-shadow: 0 2px 12px rgba(0,0,0,.06); }}
+  h1 {{ font-size: 30px; margin: 0 0 8px; }}
+  h2 {{ font-size: 20px; margin: 32px 0 12px; color: #0f766e; }}
+  p, li {{ font-size: 15px; }}
+  .last {{ color: #6b7280; font-size: 13px; margin-top: 40px; }}
+</style>
+</head>
+<body>
+<div class="wrap">
+<h1>Terms of Service</h1>
+<p><strong>Effective date:</strong> 2026-09-20</p>
+
+<p>These Terms of Service ("Terms") govern access to and use of
+<strong>{APP_NAME}</strong> (the "Service") operated by <strong>{APP_COMPANY}</strong>
+("we", "us", "our"). By sending a message to our WhatsApp Business Phone Number,
+or otherwise using the Service, you agree to these Terms.</p>
+
+<h2>1. Service description</h2>
+<p>The Service enables customer support, order notifications, and transactional
+communication over the WhatsApp Business Platform. It is provided on an
+"as-is" and "as-available" basis for end-users who message or opt in.</p>
+
+<h2>2. Eligibility &amp; opt-in</h2>
+<ul>
+  <li>You must be at least the age of majority in your jurisdiction to use the Service.</li>
+  <li>Messages are sent only to users who (a) initiate a conversation by messaging
+    our WhatsApp Business Phone Number, or (b) explicitly opt-in to transactional
+    notifications through our website or order form.</li>
+</ul>
+
+<h2>3. Acceptable use</h2>
+<p>You agree not to use the Service to send, receive, or facilitate:</p>
+<ul>
+  <li>Unsolicited promotional or spam content.</li>
+  <li>Content that is unlawful, defamatory, abusive, harassing, fraudulent, or
+    that infringes on third-party rights.</li>
+  <li>Content that violates the WhatsApp Business Messaging Policy, Community
+    Standards, or Commerce Policy as published by Meta Platforms, Inc.</li>
+</ul>
+<p>We reserve the right to suspend or block any user or number that violates
+these Terms or applicable policies.</p>
+
+<h2>4. Opt-out</h2>
+<p>You may stop receiving messages at any time by replying <strong>STOP</strong>
+to our WhatsApp Business Phone Number. Opt-out requests are honoured within
+24 hours.</p>
+
+<h2>5. Intellectual property</h2>
+<p>All content, trademarks, logos, and software made available through the
+Service are owned by {APP_COMPANY} or its licensors. Nothing in these Terms
+grants any licence to use our trademarks or branding except as required to
+display Service-provided content.</p>
+
+<h2>6. Disclaimers</h2>
+<p>To the maximum extent permitted by law:</p>
+<ul>
+  <li>We disclaim all warranties, express or implied, including merchantability,
+    fitness for a purpose, and non-infringement.</li>
+  <li>We do not warrant the Service will be uninterrupted or error-free, or
+    that messages will be delivered by third-party carriers within any timeframe.</li>
+</ul>
+
+<h2>7. Limitation of liability</h2>
+<p>Our total liability under these Terms, whether in contract, tort, or otherwise,
+is limited to the greater of US$100 or the amount paid (if any) by the user for
+the Service in the 12 months preceding the claim. We are not liable for any
+indirect, incidental, special, or consequential damages.</p>
+
+<h2>8. Governing law &amp; jurisdiction</h2>
+<p>These Terms are governed by the laws of <strong>{APP_COUNTRY}</strong>,
+without regard to its conflict of law rules. Disputes will be resolved exclusively
+in the courts located in {APP_COUNTRY}.</p>
+
+<h2>9. Contact</h2>
+<p>Questions — <a href="mailto:{APP_CONTACT_EMAIL}">{APP_CONTACT_EMAIL}</a>
+<br>{APP_COMPANY}, {APP_COUNTRY}.</p>
+
+<p class="last">Document ID: tos-{APP_NAME.lower().replace(' ', '-')} · v1.0</p>
+</div>
+</body>
+</html>
+"""
+
+
+from fastapi.responses import FileResponse, HTMLResponse, Response
+
+
+_ASSETS_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+@app.get("/privacy-policy")
+async def privacy_policy() -> HTMLResponse:
+    return HTMLResponse(content=PRIVACY_POLICY_HTML, status_code=200)
+
+
+@app.get("/terms-of-service")
+async def terms_of_service() -> HTMLResponse:
+    return HTMLResponse(content=TERMS_OF_SERVICE_HTML, status_code=200)
+
+
+@app.get("/app-icon.svg")
+async def app_icon_svg() -> Response:
+    return Response(
+        content=APP_ICON_SVG,
+        media_type="image/svg+xml",
+        headers={"Content-Disposition": 'inline; filename="app-icon.svg"'},
+    )
+
+
+@app.get("/app-icon.png")
+async def app_icon_png() -> FileResponse:
+    return FileResponse(
+        path=os.path.join(_ASSETS_DIR, "app-icon.png"),
+        media_type="image/png",
+        filename="app-icon.png",
+    )
+
 
 @app.get("/")
 async def root() -> JSONResponse:
@@ -25,14 +294,18 @@ async def root() -> JSONResponse:
     )
     return JSONResponse(
         content={
-            "app": "WhatsApp Webhook Gateway",
+            "app": APP_NAME,
             "version": "1.0.0",
             "verify_token_loaded": bool(VERIFY_TOKEN),
             "verify_token_preview": debug_token,
             "phone_number_id_loaded": bool(os.getenv("WHATSAPP_PHONE_NUMBER_ID")),
             "access_token_loaded": bool(os.getenv("WHATSAPP_ACCESS_TOKEN")),
+            "privacy_policy_url": "/privacy-policy",
+            "terms_of_service_url": "/terms-of-service",
+            "app_icon_url": "/app-icon.svg",
         }
     )
+
 
 
 @app.get("/webhook")
