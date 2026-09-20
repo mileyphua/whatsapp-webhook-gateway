@@ -1,8 +1,9 @@
+import json
 import os
 from typing import Any, Dict
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, Request, HTTPException, Query, status
+from fastapi import FastAPI, HTTPException, Query, Request, status
 from fastapi.responses import JSONResponse, PlainTextResponse
 
 load_dotenv()
@@ -42,9 +43,15 @@ async def verify_webhook(
         )
 
     if hub_mode == "subscribe" and hub_verify_token == VERIFY_TOKEN:
-        return PlainTextResponse(content=hub_challenge, status_code=status.HTTP_200_OK)
+        return PlainTextResponse(
+            content=hub_challenge, status_code=status.HTTP_200_OK
+        )
 
-    if hub_mode is None and hub_verify_token is None and hub_challenge is None:
+    if (
+        hub_mode is None
+        and hub_verify_token is None
+        and hub_challenge is None
+    ):
         return JSONResponse(
             content={"status": "ok", "endpoint": "webhook"},
             status_code=status.HTTP_200_OK,
@@ -74,33 +81,73 @@ async def verify_webhook(
 
 @app.post("/webhook")
 async def receive_webhook(request: Request) -> JSONResponse:
-    try:
-        payload: Dict[str, Any] = await request.json()
-    except Exception:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid JSON payload",
-        )
+    content_type = request.headers.get("content-type", "")
+    raw = await request.body()
+
+    payload: Dict[str, Any] = {}
+    if "application/json" in content_type.lower() or (
+        raw and raw[:1] in (b"{", b"[")
+    ):
+        try:
+            payload = json.loads(raw or b"{}")
+        except Exception:
+            payload = {}
+    else:
+        try:
+            form = await request.form()
+            if form:
+                payload = {k: v for k, v in form.items()}
+                if "entry" in payload:
+                    payload["entry"] = [{"changes": []}]
+        except Exception:
+            payload = {}
 
     obj = payload.get("object")
-    if obj != "whatsapp_business_account":
-        print(f"[WARN] Received webhook with unexpected object={obj!r} — still acking 200")
+    if obj and obj != "whatsapp_business_account":
+        print(f"[WARN] unexpected object={obj!r} — still acking 200")
 
     try:
-        entries = payload.get("entry", [])
-        for entry in entries:
-            changes = entry.get("changes", [])
-            for change in changes:
-                value = change.get("value", {})
+        for entry in payload.get("entry", []) or []:
+            for change in (entry or {}).get("changes", []) or []:
+                field = (change or {}).get("field")
+                value = (change or {}).get("value", {}) or {}
+                print(f"[WEBHOOK] field={field!r} value.keys={list(value.keys())}")
                 for message in value.get("messages", []) or []:
                     _process_message(message)
                 for st in value.get("statuses", []) or []:
                     _process_status(st)
-    except Exception as exc:  # pragma: no cover - defensive, never fail the webhook ack
-        print(f"[ERROR] Failed while processing webhook payload: {exc!r}")
+                for event in value.get("contacts", []) or []:
+                    print(f"[CONTACTS] event={event!r}")
+    except Exception as exc:  # pragma: no cover
+        print(f"[ERROR] processing payload: {exc!r}")
 
     return JSONResponse(
         content={"status": "success", "message": "EVENT_RECEIVED"},
+        status_code=status.HTTP_200_OK,
+    )
+
+
+@app.api_route(
+    "/webhook",
+    methods=["PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"],
+)
+async def webhook_catchall(request: Request) -> JSONResponse:
+    return JSONResponse(
+        content={"status": "ok", "method": request.method},
+        status_code=status.HTTP_200_OK,
+    )
+
+
+@app.api_route(
+    "/{path_name:path}",
+    methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"],
+)
+async def probe_catchall(request: Request, path_name: str) -> JSONResponse:
+    if path_name in {"", "docs", "redoc", "openapi.json"}:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not Found")
+    print(f"[PROBE] {request.method} /{path_name} - returned 200 for Meta probe")
+    return JSONResponse(
+        content={"status": "ok", "path": f"/{path_name}"},
         status_code=status.HTTP_200_OK,
     )
 
