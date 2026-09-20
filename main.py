@@ -1,7 +1,8 @@
 import json
 import os
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
+import httpx
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Query, Request, status
 from fastapi.responses import JSONResponse, PlainTextResponse
@@ -11,6 +12,10 @@ load_dotenv()
 app = FastAPI(title="WhatsApp Webhook Gateway", version="1.0.0")
 
 VERIFY_TOKEN = os.getenv("WHATSAPP_VERIFY_TOKEN", "")
+ACCESS_TOKEN = os.getenv("WHATSAPP_ACCESS_TOKEN", "")
+PHONE_NUMBER_ID = os.getenv("WHATSAPP_PHONE_NUMBER_ID", "")
+API_VERSION = os.getenv("WHATSAPP_API_VERSION", "v21.0")
+GRAPH_URL = f"https://graph.facebook.com/{API_VERSION}/{PHONE_NUMBER_ID}/messages"
 
 
 @app.get("/")
@@ -186,6 +191,83 @@ def _process_status(status: Dict[str, Any]) -> None:
         f"[STATUS] id={status_id} to={recipient} "
         f"status={status_value} origin={conversation!r} ts={timestamp}"
         + (f" errors=[{errors}]" if errors else "")
+    )
+
+
+async def send_whatsapp_text(
+    to: str,
+    text: str,
+    *,
+    preview_url: bool = True,
+    reply_to_message_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    if not ACCESS_TOKEN or not PHONE_NUMBER_ID:
+        raise RuntimeError(
+            "WHATSAPP_ACCESS_TOKEN and WHATSAPP_PHONE_NUMBER_ID must be set"
+        )
+
+    payload: Dict[str, Any] = {
+        "messaging_product": "whatsapp",
+        "recipient_type": "individual",
+        "to": to,
+        "type": "text",
+        "text": {"preview_url": preview_url, "body": text},
+    }
+    if reply_to_message_id:
+        payload["context"] = {"message_id": reply_to_message_id}
+
+    headers = {
+        "Authorization": f"Bearer {ACCESS_TOKEN}",
+        "Content-Type": "application/json",
+    }
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        r = await client.post(GRAPH_URL, json=payload, headers=headers)
+        body = r.json() if r.content else {}
+        if 200 <= r.status_code < 300:
+            return body
+        raise RuntimeError(
+            f"WhatsApp API {r.status_code}: "
+            f"{body.get('error', {}).get('message', r.text)}"
+        )
+
+
+@app.post("/send-message")
+async def send_message_endpoint(request: Request) -> JSONResponse:
+    try:
+        body: Dict[str, Any] = await request.json()
+    except Exception:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid JSON body",
+        )
+
+    to = body.get("to")
+    text = body.get("text")
+    if not to or not text:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Request must include 'to' (phone in E.164) and 'text' (string)",
+        )
+
+    reply_to = body.get("reply_to_message_id")
+
+    try:
+        result = await send_whatsapp_text(
+            to=str(to),
+            text=str(text),
+            preview_url=bool(body.get("preview_url", True)),
+            reply_to_message_id=str(reply_to) if reply_to else None,
+        )
+    except RuntimeError as exc:
+        return JSONResponse(
+            content={"success": False, "error": str(exc)},
+            status_code=status.HTTP_502_BAD_GATEWAY,
+        )
+
+    return JSONResponse(
+        content={"success": True, "result": result},
+        status_code=status.HTTP_200_OK,
     )
 
 
