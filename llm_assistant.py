@@ -24,6 +24,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 from dataclasses import asdict
 from typing import Any, Dict, List, Optional
 
@@ -156,6 +157,24 @@ just start a new sentence instead. No emoji except an occasional single
 checkmark or wave when greeting, never more than one per message. Always
 spell out Incoterms and product names clearly.
 
+Length and density: keep replies to 1-3 short sentences unless the buyer
+explicitly asked for detail (e.g. payment terms, full spec). Do ONE thing
+per reply, don't stack a recap + a link + a follow-up question all into the
+same message, that reads as a wall of text and feels robotic even if each
+individual sentence is fine. If you already answered/confirmed something
+last turn, don't re-summarize it again this turn unless asked.
+Opener variety: do NOT start every reply with 'Thanks' or 'Thank you',
+that becomes an obvious tic when it repeats turn after turn. Only thank
+them when they've actually just given you useful info; for a question, a
+vague reply, or small talk, just respond to it directly with no opener at
+all.
+Off-topic / meta questions about you ('who are you', 'are you a bot',
+'what is this') get a short, direct, honest answer only, e.g. 'I'm
+Petrobind's WhatsApp assistant, here to help with bitumen and base oil
+questions.' Do NOT use this as a chance to recap their inquiry, push a
+link, or restate old context, that's answering a different question than
+the one they asked.
+
 Below is a real WhatsApp exchange between a Petrobind rep and a genuine buyer
 (names redacted). This is a REGISTER reference only — copy the way it talks
 (short, direct, conversational, one line where one line is enough, no
@@ -219,15 +238,14 @@ Behaviour:
     even if the reference material happens to mention a number; pricing is
     always withheld from chat regardless of source. Price is only ever
     discussed once a call or face-to-face meeting is booked, and even then
-    it's the sales director who gives it personally, never this assistant. If the
-    buyer asks about pricing: call capture_trade_inquiry (if you have a
-    product), AND call request_sales_handoff (reason: pricing not
-    disclosed over chat), AND call share_booking_link, all in the same
-    tool-call round (no text alongside them, per the tool-use rules below).
-    Once their results come back, write ONE reply that includes the exact
-    URL string share_booking_link returned, offered outright, not asked as
-    a yes/no question, e.g. 'Pricing gets confirmed on a call with our
-    sales director, here's a link if you're free: ' followed by that URL.
+    it's the sales director who gives it personally, never this assistant. If
+    the buyer asks about pricing: call capture_trade_inquiry (if you have a
+    product) AND call request_sales_handoff (reason: pricing not disclosed
+    over chat). Only ALSO call share_booking_link if the buyer memory note
+    says the booking link has not been shared yet this conversation, if it
+    was already shared, just say the sales director will confirm pricing on
+    that call, don't paste the URL again. When you do include the link,
+    offer it outright in one short sentence, not as a yes/no question.
   - Buyer intent (Part 3.4): for vague / one-liner inquiries ('just checking
     prices', 'bitumen price?') ask a light qualifying question FIRST ('Which
     grade are you targeting, and roughly what volume per month?') before
@@ -253,22 +271,21 @@ Tool-use rules:
     no text content alongside them. The tool results come back to you
     immediately after, and THEN you write your one text reply to the buyer
     using those results.
-  - When request_sales_handoff fires, also call share_booking_link in the
-    same round (unless the buyer already has a call booked this session or
-    explicitly said they don't want one). Once you have its result, write a
-    reply that: (a) does NOT say 'escalated' or 'specialist has been
-    paged', that reads as robotic, say instead that you'll check on it and
-    get back to them personally; and (b) includes the booking invite using
-    the EXACT URL string the share_booking_link tool result gave you, e.g.
-    'Let me check on that and get back to you. If you're free, happy to
-    jump on a quick call so we can go through it properly: ' followed
-    directly by that URL. NEVER write the literal characters '<link>' or
-    any other placeholder, if you have not actually received a URL string
-    back from share_booking_link yet, do not mention a link at all.
+  - When request_sales_handoff fires, only ALSO call share_booking_link if
+    the buyer memory note says it hasn't been shared yet this conversation
+    (and the buyer hasn't already got a call booked, or said they don't want
+    one). Don't re-paste the link on every handoff, once is enough unless
+    the buyer brings up scheduling again themselves. When you do include a
+    fresh link, use the EXACT URL string the share_booking_link tool result
+    gave you, never invent one or write a placeholder like '<link>'. Say
+    you'll check on it and get back to them personally, do NOT say
+    'escalated' or 'specialist has been paged', that reads as robotic. Keep
+    it to one short sentence, don't also recap the whole inquiry in the same
+    reply unless the buyer actually asked for that recap.
   - Calling capture_trade_inquiry sends an email to the sales director. After
-    calling it, tell the buyer something like: 'Thank you, I've recorded your
-    inquiry and our sales director will reach out directly to you on WhatsApp
-    within the next business hours.'
+    calling it, confirm briefly in one sentence that it's recorded and the
+    sales director will follow up, vary the phrasing turn to turn instead of
+    repeating the same sentence.
 """
 
 
@@ -337,8 +354,15 @@ def _format_buyer_memory(session: ConversationSession) -> str:
     elif session.is_known_partner is False:
         known_bits.append("new prospect")
     known = ", ".join(known_bits) if known_bits else "nothing identifying known yet"
+    booking_status = (
+        "booking link already shared this conversation, do NOT repeat it "
+        "unless the buyer brings up scheduling again themselves"
+        if session.booking_link_shared_at
+        else "booking link not yet shared"
+    )
     return (
-        f"Buyer memory: {session.relationship_summary()}. Known so far: {known}."
+        f"Buyer memory: {session.relationship_summary()}. Known so far: {known}. "
+        f"{booking_status}."
     )
 
 
@@ -419,8 +443,7 @@ async def _run_tool(name: str, args: dict, *, session: ConversationSession) -> O
             link = booking.get_booking_link(message=args.get("message"))
             # Remember WHEN we shared the link so conversation_store's follow-up
             # cron can nudge the buyer if a booking is never confirmed (>20h later).
-            import time as _t
-            session.booking_link_shared_at = _t.time()
+            session.booking_link_shared_at = time.time()
             if not link:
                 return (
                     "Tool result: share_booking_link — Cal.com booking URL is not "
@@ -597,18 +620,15 @@ async def handle_incoming_message(
                 recent_transcript=transcript,
             )
             session.handoff_notified = True
-        if booking.is_configured():
+        if booking.is_configured() and not session.booking_link_shared_at:
             reply = (
-                "Good question, let me check on that and get right back to "
-                "you. While I confirm the details, want to grab a quick call "
-                "with our sales director so we can go through everything "
-                "properly? " + booking.get_booking_link()
+                "Good question, let me check on that and get back to you. "
+                "Want to grab a quick call with our sales director so we can "
+                "go through it properly? " + booking.get_booking_link()
             )
+            session.booking_link_shared_at = time.time()
         else:
-            reply = (
-                "Good question, let me check on that and get right back to "
-                "you shortly."
-            )
+            reply = "Good question, let me check on that and get back to you shortly."
         # Append to history so the next turn has context of the handoff.
         session.append("user", safe_text)
         session.append("assistant", reply)
@@ -628,18 +648,18 @@ async def handle_incoming_message(
     if text is None:
         # Fallback path: LLM unavailable or failed. Notify sales (once) + give
         # the buyer a friendly, specific next-step message.
-        if booking.is_configured():
+        if booking.is_configured() and not session.booking_link_shared_at:
             fallback = (
-                "Thanks for reaching out, let me get back to you on this "
-                "shortly. In the meantime, feel free to grab a quick call "
-                "with our sales director so we can go through your requirement "
-                "properly: " + booking.get_booking_link()
+                "Let me get back to you on this shortly. Feel free to grab a "
+                "quick call with our sales director in the meantime: "
+                + booking.get_booking_link()
             )
+            session.booking_link_shared_at = time.time()
         else:
             fallback = (
-                "Thanks for reaching out, let me get back to you on this "
-                "shortly. Which product are you interested in, and roughly "
-                "what quantity per shipment, so our sales director can prepare?"
+                "Let me get back to you on this shortly. Which product are "
+                "you interested in, and roughly what quantity, so our sales "
+                "director can prepare?"
             )
         # Only call this once per session to avoid spam.
         if not session.handoff_notified:

@@ -1,5 +1,6 @@
 import json
 import os
+import time
 from typing import Any, Dict, Optional
 
 from dotenv import load_dotenv
@@ -853,13 +854,14 @@ async def _instant_handoff_reply(
     when they're free, + (b) the handoff email to admin in parallel.
     Never raises — best-effort.
     """
-    if booking.is_configured():
+    sess = conversation_store.get_session(from_number) if from_number else None
+    if booking.is_configured() and sess and not sess.booking_link_shared_at:
         reply = (
             "Of course, let me get back to you on that shortly. If you're "
             "free, it's often quickest to grab a short call with our sales "
-            "director so we can understand your requirement properly: "
-            + booking.get_booking_link()
+            "director: " + booking.get_booking_link()
         )
+        sess.booking_link_shared_at = time.time()
     else:
         reply = (
             "Of course, let me get back to you on that shortly. In the meantime, "
@@ -884,7 +886,6 @@ async def _instant_handoff_reply(
         print(f"[INSTANT HANDOFF SEND FAIL] to={from_number!r} error={exc!r}")
 
     try:
-        sess = conversation_store.get_session(from_number) if from_number else None
         if sess and not sess.handoff_notified:
             inquiry_dict = sess.inquiry.as_dict() if sess else {}
             ok = await notify.send_handoff_email(
