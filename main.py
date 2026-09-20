@@ -44,6 +44,12 @@ async def verify_webhook(
     if hub_mode == "subscribe" and hub_verify_token == VERIFY_TOKEN:
         return PlainTextResponse(content=hub_challenge, status_code=status.HTTP_200_OK)
 
+    if hub_mode is None and hub_verify_token is None and hub_challenge is None:
+        return JSONResponse(
+            content={"status": "ok", "endpoint": "webhook"},
+            status_code=status.HTTP_200_OK,
+        )
+
     debug_expected = (
         VERIFY_TOKEN[:6] + "…" + VERIFY_TOKEN[-4:]
         if len(VERIFY_TOKEN) > 12
