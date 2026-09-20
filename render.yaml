@@ -1,0 +1,23 @@
+services:
+  - type: web
+    name: whatsapp-webhook-gateway
+    runtime: python
+    repo: https://github.com/your-github-username/whatsapp-webhook-gateway
+    branch: main
+    region: singapore
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python main.py
+    healthCheckPath: /docs
+    autoDeploy: yes
+    envVars:
+      - key: WHATSAPP_VERIFY_TOKEN
+        sync: false
+      - key: WHATSAPP_ACCESS_TOKEN
+        sync: false
+      - key: WHATSAPP_PHONE_NUMBER_ID
+        sync: false
+      - key: WHATSAPP_BUSINESS_ACCOUNT_ID
+        sync: false
+      - key: WHATSAPP_API_VERSION
+        value: v21.0
