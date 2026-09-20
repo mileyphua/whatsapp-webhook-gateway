@@ -14,8 +14,17 @@ app = FastAPI(title="WhatsApp Webhook Gateway", version="1.0.0")
 VERIFY_TOKEN = os.getenv("WHATSAPP_VERIFY_TOKEN", "")
 ACCESS_TOKEN = os.getenv("WHATSAPP_ACCESS_TOKEN", "")
 PHONE_NUMBER_ID = os.getenv("WHATSAPP_PHONE_NUMBER_ID", "")
-API_VERSION = os.getenv("WHATSAPP_API_VERSION", "v21.0")
-GRAPH_URL = f"https://graph.facebook.com/{API_VERSION}/{PHONE_NUMBER_ID}/messages"
+API_VERSION = os.getenv("WHATSAPP_API_VERSION", "v22.0")
+
+
+def _graph_url_for(phone_number_id: str) -> str:
+    return (
+        f"https://graph.facebook.com/{API_VERSION}/"
+        f"{phone_number_id}/messages"
+    )
+
+
+GRAPH_URL = _graph_url_for(PHONE_NUMBER_ID) if PHONE_NUMBER_ID else ""
 
 APP_NAME = "WhatsApp Webhook Gateway"
 APP_COMPANY = "Milly"
@@ -390,8 +399,19 @@ async def receive_webhook(request: Request) -> JSONResponse:
                 field = (change or {}).get("field")
                 value = (change or {}).get("value", {}) or {}
                 print(f"[WEBHOOK] field={field!r} value.keys={list(value.keys())}")
+                metadata = value.get("metadata", {}) or {}
+                pnid = metadata.get("phone_number_id") or PHONE_NUMBER_ID
                 for message in value.get("messages", []) or []:
                     _process_message(message)
+                    text_body = None
+                    if message.get("type") == "text":
+                        text_body = (message.get("text") or {}).get("body")
+                    await _echo_reply(
+                        from_number=message.get("from"),
+                        phone_number_id=pnid,
+                        inbound_text=text_body,
+                        reply_to_message_id=message.get("id"),
+                    )
                 for st in value.get("statuses", []) or []:
                     _process_status(st)
                 for event in value.get("contacts", []) or []:
@@ -471,12 +491,16 @@ async def send_whatsapp_text(
     to: str,
     text: str,
     *,
+    phone_number_id: Optional[str] = None,
     preview_url: bool = True,
     reply_to_message_id: Optional[str] = None,
 ) -> Dict[str, Any]:
-    if not ACCESS_TOKEN or not PHONE_NUMBER_ID:
+    if not ACCESS_TOKEN:
+        raise RuntimeError("WHATSAPP_ACCESS_TOKEN must be set")
+    resolved_pnid = phone_number_id or PHONE_NUMBER_ID
+    if not resolved_pnid:
         raise RuntimeError(
-            "WHATSAPP_ACCESS_TOKEN and WHATSAPP_PHONE_NUMBER_ID must be set"
+            "phone_number_id must be provided or WHATSAPP_PHONE_NUMBER_ID set"
         )
 
     payload: Dict[str, Any] = {
@@ -494,14 +518,53 @@ async def send_whatsapp_text(
         "Content-Type": "application/json",
     }
 
+    url = _graph_url_for(resolved_pnid)
+
     async with httpx.AsyncClient(timeout=30.0) as client:
-        r = await client.post(GRAPH_URL, json=payload, headers=headers)
+        r = await client.post(url, json=payload, headers=headers)
         body = r.json() if r.content else {}
         if 200 <= r.status_code < 300:
             return body
         raise RuntimeError(
-            f"WhatsApp API {r.status_code}: "
+            f"WhatsApp API {r.status_code} (pnid={resolved_pnid}): "
             f"{body.get('error', {}).get('message', r.text)}"
+        )
+
+
+async def _echo_reply(
+    *,
+    from_number: str,
+    phone_number_id: str,
+    inbound_text: Optional[str],
+    reply_to_message_id: Optional[str],
+) -> None:
+    if not from_number or not phone_number_id:
+        return
+
+    static_reply = (
+        "Hello! Message received."
+        if not inbound_text
+        else f"Hello! Message received. You said: {inbound_text}"
+    )
+
+    try:
+        result = await send_whatsapp_text(
+            to=from_number,
+            text=static_reply,
+            phone_number_id=phone_number_id,
+            reply_to_message_id=reply_to_message_id,
+            preview_url=False,
+        )
+        messages = result.get("messages") or []
+        sent_id = messages[0].get("id") if messages else None
+        print(
+            f"[ECHO OK] to={from_number} pnid={phone_number_id} "
+            f"in_reply_to={reply_to_message_id} sent_id={sent_id}"
+        )
+    except Exception as exc:  # pragma: no cover - best effort, never break 200
+        print(
+            f"[ECHO FAIL] to={from_number} pnid={phone_number_id} "
+            f"error={exc!r}"
         )
 
 
@@ -524,11 +587,13 @@ async def send_message_endpoint(request: Request) -> JSONResponse:
         )
 
     reply_to = body.get("reply_to_message_id")
+    override_pnid = body.get("phone_number_id")
 
     try:
         result = await send_whatsapp_text(
             to=str(to),
             text=str(text),
+            phone_number_id=str(override_pnid) if override_pnid else None,
             preview_url=bool(body.get("preview_url", True)),
             reply_to_message_id=str(reply_to) if reply_to else None,
         )
