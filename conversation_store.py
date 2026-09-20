@@ -69,6 +69,9 @@ class ConversationSession:
     inquiry: InquiryDraft = field(default_factory=InquiryDraft)
     is_known_partner: Optional[bool] = None  # None = not asked yet
     last_activity_ts: float = field(default_factory=time.time)
+    # --- Buyer memory (per PLAN: richer in-process personalization) ---
+    first_seen_ts: float = field(default_factory=time.time)  # set once, at creation
+    message_count: int = 0  # incremented per inbound buyer message (not assistant replies)
     lead_notified: bool = False  # prevent duplicate notification emails
     handoff_notified: bool = False
     followed_up_at: Optional[float] = None  # for Part 3.3 cron follow-ups
@@ -88,6 +91,41 @@ class ConversationSession:
         msg.update({k: v for k, v in extra.items() if v is not None})
         self.history.append(msg)
         self.last_activity_ts = time.time()
+        if role == "user":
+            self.message_count += 1
+
+    def relationship_summary(self) -> str:
+        """Human-readable buyer-memory line, e.g. '4th message, first contacted
+        3 days ago'. Used both in the LLM's system prompt (so replies can
+        naturally reference continuity) and in lead/handoff emails (so the
+        sales team can see how warm/long-running this contact is at a glance)."""
+        elapsed = max(0.0, time.time() - self.first_seen_ts)
+        if elapsed < 3600:
+            age = "just started"
+        elif elapsed < 86400:
+            hours = int(elapsed // 3600)
+            age = f"first contacted {hours}h ago"
+        else:
+            days = int(elapsed // 86400)
+            age = f"first contacted {days} day{'s' if days != 1 else ''} ago"
+        ordinal = {1: "1st", 2: "2nd", 3: "3rd"}.get(self.message_count, f"{self.message_count}th")
+        return f"{ordinal} message from this buyer, {age}"
+
+    def recent_transcript(self, max_turns: int = 6) -> str:
+        """Plain-text buyer/assistant transcript excerpt (most recent N turns)
+        for lead/handoff emails, so the sales team can read what actually
+        happened without opening WhatsApp. Skips tool-call/tool-result rows."""
+        lines = []
+        for msg in self.history:
+            role = msg.get("role")
+            content = msg.get("content")
+            if role not in ("user", "assistant") or not content:
+                continue
+            speaker = "Buyer" if role == "user" else "Assistant"
+            lines.append(f"{speaker}: {content}")
+        if not lines:
+            return "(no prior messages this session)"
+        return "\n".join(lines[-max_turns:])
         # Trim: keep most-recent MAX_HISTORY_TURNS round-trips. Each turn is
         # (user + assistant) so we keep 2 * MAX items (plus tool rows if any).
         cap = MAX_HISTORY_TURNS * 4

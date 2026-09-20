@@ -176,6 +176,20 @@ out over chat, full stop. A real trader only discusses numbers once a call
 or face-to-face meeting is booked, and even then a human does it personally
 — not this assistant.
 
+Emotional intelligence: this assistant talks to a different buyer in every
+chat, not one generic persona. Each turn you'll get a "Buyer memory" system
+note (name/company if known, how many messages, how long you've known
+them). Use it naturally: if it's a returning buyer, don't reintroduce
+yourself or re-ask things you already know, acknowledge you remember them
+(e.g. 'good to hear from you again') where it fits, without being weird
+about it. Also read the buyer's actual tone in their message and mirror it:
+someone terse and urgent gets short, efficient, reassuring replies; someone
+casual and friendly gets warmth back, not stiffness; someone frustrated
+gets genuine empathy in plain words, not a scripted apology; someone
+excited about a big order can be met with real enthusiasm, not flatness.
+Two different buyers asking the same question should not get word-for-word
+identical replies, vary your phrasing like a person would.
+
 Behaviour:
   - On the FIRST message of a brand-new chat only, greet with something close
     to: 'Hi 👋 Welcome to PetroBind Global. How can we help you with your
@@ -305,6 +319,29 @@ def _format_references(chunks: List[RetrievedChunk]) -> str:
     return "\n".join(lines)
 
 
+def _format_buyer_memory(session: ConversationSession) -> str:
+    """Buyer-memory system note injected each turn so replies can reference
+    continuity (name, company, prior interest, how long/how many times
+    they've been in touch) instead of treating every message like a first
+    contact. In-process only, same lifetime as the rest of the session."""
+    inquiry = session.inquiry
+    known_bits = []
+    if inquiry.contact_name:
+        known_bits.append(f"name={inquiry.contact_name!r}")
+    if inquiry.company_name:
+        known_bits.append(f"company={inquiry.company_name!r}")
+    if inquiry.product:
+        known_bits.append(f"product interest={inquiry.product!r}")
+    if session.is_known_partner is True:
+        known_bits.append("existing partner")
+    elif session.is_known_partner is False:
+        known_bits.append("new prospect")
+    known = ", ".join(known_bits) if known_bits else "nothing identifying known yet"
+    return (
+        f"Buyer memory: {session.relationship_summary()}. Known so far: {known}."
+    )
+
+
 def _nudge_if_needed(session: ConversationSession) -> Optional[str]:
     """Return a small soft-nudge appended to the assistant reply after N questions
     with no progress toward an inquiry or booking (Part 5.2)."""
@@ -347,6 +384,8 @@ async def _run_tool(name: str, args: dict, *, session: ConversationSession) -> O
             if not notified:
                 notified = await notify.send_lead_email(
                     phone_number=session.phone_number,
+                    relationship_summary=session.relationship_summary(),
+                    recent_transcript=session.recent_transcript(),
                     **{k: v for k, v in asdict(session.inquiry).items() if k != "completeness"},
                 )
                 if notified:
@@ -365,6 +404,8 @@ async def _run_tool(name: str, args: dict, *, session: ConversationSession) -> O
                     phone_number=session.phone_number,
                     reason=reason,
                     partial_inquiry_summary=summary,
+                    relationship_summary=session.relationship_summary(),
+                    recent_transcript=session.recent_transcript(),
                 )
                 if ok:
                     session.handoff_notified = True
@@ -418,6 +459,7 @@ async def _single_turn_chat(
         "content": _format_references(references),
     }
     messages.append(ref_block)
+    messages.append({"role": "system", "content": _format_buyer_memory(session)})
     messages.extend(session.history)
 
     model = os.getenv("OPENROUTER_MODEL") or OPENROUTER_MODEL_DEFAULT
@@ -539,10 +581,20 @@ async def handle_incoming_message(
             inquiry = {k: v for k, v in asdict(session.inquiry).items() if v}
             if inquiry:
                 summary_lines.append(f"Inquiry fields so far: {json.dumps(inquiry)}")
+            # safe_text hasn't been appended to session.history yet at this
+            # point in the flow, so append it manually for the transcript.
+            prior_transcript = session.recent_transcript()
+            transcript = (
+                f"{prior_transcript}\nBuyer: {safe_text}"
+                if prior_transcript != "(no prior messages this session)"
+                else f"Buyer: {safe_text}"
+            )
             await notify.send_handoff_email(
                 phone_number=session.phone_number,
                 reason="Query had zero RAG matches but looked product/spec/pricing-related — auto-handoff to avoid hallucination.",
                 partial_inquiry_summary="\n".join(summary_lines),
+                relationship_summary=session.relationship_summary(),
+                recent_transcript=transcript,
             )
             session.handoff_notified = True
         if booking.is_configured():
@@ -596,6 +648,8 @@ async def handle_incoming_message(
                 phone_number=session.phone_number,
                 reason="LLM fallback path triggered (OPENROUTER_API_KEY missing or call failed).",
                 partial_inquiry_summary=f"Query: {safe_text[:300]}\nInquiry: {json.dumps(inquiry)}",
+                relationship_summary=session.relationship_summary(),
+                recent_transcript=session.recent_transcript(),
             )
             session.handoff_notified = True
         session.append("assistant", fallback)

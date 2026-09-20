@@ -234,16 +234,45 @@ def _fmt_rows(fields: Mapping[str, Any]) -> str:
     return "".join(rows)
 
 
+def _format_snapshot_html(
+    relationship_summary: Optional[str],
+    recent_transcript: Optional[str],
+) -> str:
+    """Quick-read block for the sales team: how warm this contact is, and
+    what was actually said, without needing to open WhatsApp first."""
+    parts = []
+    if relationship_summary:
+        parts.append(
+            f"<div style='display:inline-block;margin:0 0 16px;padding:6px 12px;"
+            f"background:#e8f0fe;color:#1a56db;border-radius:14px;font-size:13px;"
+            f"font-weight:600'>{relationship_summary}</div>"
+        )
+    if recent_transcript:
+        escaped = (
+            recent_transcript.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        )
+        parts.append(
+            "<div style='margin:4px 0 20px'>"
+            "<div style='font-weight:600;margin-bottom:6px;font-size:13px;color:#333'>"
+            "Recent conversation</div>"
+            f"<pre style='white-space:pre-wrap;font-family:-apple-system,BlinkMacSystemFont,"
+            f"\"Segoe UI\",Roboto,Arial;font-size:13px;line-height:1.5;background:#fff;"
+            f"border:1px solid #eee;border-radius:6px;padding:12px;margin:0;color:#222'>"
+            f"{escaped}</pre></div>"
+        )
+    return "".join(parts)
+
+
 def _wrap_html(title: str, lead_meta: str, table: str, extra: str = "") -> str:
     return f"""
     <div style='font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial;
          max-width:640px;margin:24px auto;color:#111'>
       <h2 style='margin:0 0 4px'>{title}</h2>
-      <p style='margin:0 0 20px;color:#555'>{lead_meta}</p>
+      <p style='margin:0 0 12px;color:#555'>{lead_meta}</p>
+      {extra}
       <table style='width:100%;border-collapse:collapse;background:#fafafa;border-radius:6px'>
         {table}
       </table>
-      {extra}
       <p style='margin-top:24px;color:#888;font-size:13px'>
         Sent at {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')} —
         Petrobind Global WhatsApp Assistant
@@ -296,6 +325,8 @@ async def send_lead_email(
     packaging: Optional[str] = None,
     additional_notes: Optional[str] = None,
     is_new_prospect: Optional[bool] = None,
+    relationship_summary: Optional[str] = None,
+    recent_transcript: Optional[str] = None,
 ) -> bool:
     """Called by llm_assistant when capture_trade_inquiry tool is invoked."""
     fields: Dict[str, Any] = {
@@ -325,6 +356,7 @@ async def send_lead_email(
             "Follow up with the buyer directly via WhatsApp or the phone number below."
         ),
         table=_fmt_rows(fields),
+        extra=_format_snapshot_html(relationship_summary, recent_transcript),
     )
     return await _send_if_configured(subject=subject, html_body=html)
 
@@ -334,6 +366,8 @@ async def send_handoff_email(
     phone_number: str,
     reason: str,
     partial_inquiry_summary: str = "",
+    relationship_summary: Optional[str] = None,
+    recent_transcript: Optional[str] = None,
 ) -> bool:
     """Called when the model hits something outside the KB (zero-hallucination guard)."""
     fields: Dict[str, Any] = {
@@ -350,6 +384,7 @@ async def send_handoff_email(
             "Please take over the conversation."
         ),
         table=_fmt_rows(fields),
+        extra=_format_snapshot_html(relationship_summary, recent_transcript),
     )
     return await _send_if_configured(subject=subject, html_body=html)
 

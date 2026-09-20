@@ -621,12 +621,16 @@ async def receive_webhook(request: Request) -> JSONResponse:
                             )
                         # Also send a handoff email so a human sees the inbound media now.
                         try:
+                            media_from = message.get("from") or ""
+                            media_sess = conversation_store.get_session(media_from) if media_from else None
                             await notify.send_handoff_email(
-                                phone_number=message.get("from") or "",
+                                phone_number=media_from,
                                 reason=(
                                     f"Inbound {msg_type} message received (no auto-processing)."
                                 ),
                                 partial_inquiry_summary=summary_extra,
+                                relationship_summary=media_sess.relationship_summary() if media_sess else None,
+                                recent_transcript=media_sess.recent_transcript() if media_sess else None,
                             )
                         except Exception as exc:
                             print(f"[MEDIA HANDOFF EMAIL FAIL] {exc!r}")
@@ -890,6 +894,8 @@ async def _instant_handoff_reply(
                     "Instant keyword-triggered handoff.\n"
                     f"Inquiry fields so far: {json.dumps({k:v for k,v in inquiry_dict.items() if v})}"
                 ),
+                relationship_summary=sess.relationship_summary(),
+                recent_transcript=sess.recent_transcript(),
             )
             if ok and sess:
                 sess.handoff_notified = True
