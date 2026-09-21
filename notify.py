@@ -5,21 +5,38 @@ capture_trade_inquiry or request_sales_handoff, we call into send_lead_email /
 send_handoff_email; when Cal.com booking fires via /cal-webhook, send_booking_email.
 
 Provider support (tested with configs below):
-  - **Spacemail** by Namecheap (formerly "Private Email"):
+  - **Gmail** (CURRENT PRODUCTION CHOICE, confirmed 2026-09-22): Spacemail
+      (mail.spacemail.com) is blocked from Render on both port 465 and 587
+      — TimeoutError at the network level, same credentials work fine from
+      a local machine, so this is a PaaS outbound-SMTP restriction, not a
+      Spacemail/credentials problem. Switched to Gmail SMTP since it
+      reaches Render successfully:
+      SMTP_HOST=smtp.gmail.com, SMTP_PORT=587
+      SMTP_USERNAME=<your gmail address>, full address required
+      SMTP_PASSWORD=<Gmail App Password from
+        https://myaccount.google.com/apppasswords — requires 2-Step
+        Verification enabled first, or Google returns "535 Bad
+        credentials" regardless of what you enter>
+      NOTIFY_FROM_EMAIL must equal SMTP_USERNAME (Gmail requires the From
+        address to match the authenticated account — can't send AS
+        sales@petrobindglobal.com through a personal Gmail account).
+  - **Spacemail** by Namecheap (formerly "Private Email") — works fine from
+      a local machine / any host that doesn't block outbound SMTP:
       Mailbox admin portal:  https://www.spacemail.com/
       SMTP_HOST=mail.spacemail.com   (confirmed 2026-09-21 — the older
         mail.privateemail.com hostname returns 535 auth failures even with
         correct credentials; the portal's own SMTP settings page lists
         mail.spacemail.com)
-      SMTP_PORT=465  (implicit TLS/SSL — RECOMMENDED)
-      SMTP_PORT=587  (STARTTLS — also works)
+      SMTP_PORT=465  (implicit TLS/SSL)
       SMTP_USERNAME=sales@petrobindglobal.com  (FULL email, not just local part)
       SMTP_PASSWORD=<Spacemail portal → Mailboxes → Change Password>
         NOTE: This is the MAILBOX password, NOT your Namecheap billing password,
         and NOT a Gmail-style "App Password" (Spacemail does not use App Passwords).
-  - Google Workspace / Gmail (with App Password):
-      SMTP_HOST=smtp.gmail.com, SMTP_PORT=587
   - Any standard SMTP: set SMTP_HOST / SMTP_PORT / SMTP_USERNAME / SMTP_PASSWORD.
+  - Longer-term: a proper HTTPS transactional email API (Resend, SendGrid,
+    etc.) would be more robust than any SMTP provider on a PaaS host, since
+    HTTPS (443) is essentially never blocked the way SMTP ports are —
+    worth revisiting if Gmail ever also becomes unreliable from Render.
 
 To verify settings WITHOUT sending a real email, run from a shell:
   python3 - <<'PY'
