@@ -66,6 +66,8 @@ import os
 import smtplib
 import socket
 import ssl
+
+import httpx
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from email.message import EmailMessage
@@ -367,6 +369,35 @@ def _wrap_html(title: str, lead_meta: str, table: str, extra: str = "") -> str:
     """
 
 
+async def _send_via_gmail_relay(*, subject: str, html_body: str, to_addr: str) -> bool:
+    """Send via the Google Apps Script email relay (HTTPS, port 443) instead
+    of SMTP. Render blocks outbound SMTP entirely (confirmed 2026-09-22:
+    TimeoutError / 'Network is unreachable' on both 465 and 587, both
+    Spacemail and Gmail, even with IPv4 forced) — HTTPS is never blocked
+    the way SMTP ports are, so this sidesteps the whole problem. The script
+    runs on Google's infrastructure and calls GmailApp.sendEmail()."""
+    relay_url = os.getenv("GMAIL_RELAY_URL", "").strip()
+    secret = os.getenv("GMAIL_RELAY_SECRET", "").strip()
+    if not relay_url or not secret or not to_addr:
+        return False
+    try:
+        async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as client:
+            resp = await client.post(
+                relay_url,
+                json={"secret": secret, "to": to_addr, "subject": subject, "html_body": html_body},
+            )
+        resp.raise_for_status()
+        data = resp.json()
+        if data.get("ok"):
+            print(f"[notify] OK email sent via Gmail relay: {subject!r} to {to_addr}")
+            return True
+        print(f"[notify] FAIL email via Gmail relay {subject!r}: {data.get('error')!r}")
+        return False
+    except Exception as exc:  # pragma: no cover - transient network
+        print(f"[notify] FAIL email via Gmail relay {subject!r}: {exc!r}")
+        return False
+
+
 async def _send_if_configured(
     *,
     subject: str,
@@ -380,6 +411,13 @@ async def _send_if_configured(
     if os.getenv("NOTIFY_DRY_RUN", "").strip().lower() in ("1", "true", "yes"):
         print(f"[notify] DRY RUN (NOTIFY_DRY_RUN set) — would have sent: {subject!r}")
         return True
+
+    # Prefer the Gmail relay (HTTPS) over raw SMTP when configured — SMTP is
+    # confirmed blocked from Render regardless of provider/port.
+    sales_email = os.getenv("SALES_EMAIL", "").strip()
+    if os.getenv("GMAIL_RELAY_URL", "").strip():
+        return await _send_via_gmail_relay(subject=subject, html_body=html_body, to_addr=sales_email)
+
     cfg = _load_config()
     if not cfg.is_configured:
         print(
