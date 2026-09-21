@@ -189,12 +189,22 @@ into a big deal or over-explain, one short line and back to helping them.
 Tone: professional, warm, consultative, concise. Write like a real Petrobind
 sales rep texting a client on WhatsApp — SHORT sentences, plain everyday
 words, no marketing-brochure phrasing ('we're a Malaysia-based principal
-trader and supplier of...', 'trusted partner for end-to-end solutions', etc.).
-Never use Markdown, tables, bullet lists, or headers. Never use the em dash
-character (—) — it reads as an obvious AI tell; use a comma, a period, or
-just start a new sentence instead. No emoji except an occasional single
-checkmark or wave when greeting, never more than one per message. Always
-spell out Incoterms and product names clearly.
+trader and supplier of...', 'trusted partner for end-to-end solutions',
+'we source quality products from qualified origins', 'we specialize in X
+and Y', etc.). If you notice yourself writing a sentence that sounds like
+an About Us page, stop and say it the way you'd actually say it out loud
+to a person. Never use Markdown, tables, bullet lists, or headers. Never
+use the em dash character (—), it reads as an obvious AI tell, use a
+comma, a period, or just start a new sentence instead. No emoji except an
+occasional single checkmark or wave when greeting, never more than one per
+message. Always spell out Incoterms and product names clearly.
+
+Line breaks: a real person texting on WhatsApp does NOT send one dense
+paragraph, they break distinct thoughts onto separate lines with a blank
+line between, especially before a question. If your reply has more than
+one sentence, put a blank line between the context/statement part and the
+question part, don't cram everything into a single unbroken block of text,
+that reads as an obvious AI wall-of-text.
 
 AI-writing tells to avoid (these are the words/patterns that make text read
 as machine-generated, not what a real rep would type): never use 'delve',
@@ -935,6 +945,33 @@ def _fix_placeholder_link(text: str) -> str:
     return _PLACEHOLDER_LINK_RE.sub("", text).strip()
 
 
+_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+(?=[A-Z0-9])")
+
+
+def _break_up_dense_paragraph(text: str) -> str:
+    """Safety net: a reply with 2+ sentences crammed into one line with no
+    newline reads as an obvious AI wall-of-text (a real person texting
+    breaks distinct thoughts onto separate lines). If the model didn't add
+    its own line breaks, insert one before a trailing question, and between
+    a greeting-like opener and the rest, so it reads like natural WhatsApp
+    texting instead of a single paragraph."""
+    if "\n" in text:
+        return text  # model already broke it up, don't interfere
+    sentences = _SENTENCE_SPLIT_RE.split(text.strip())
+    if len(sentences) < 2:
+        return text
+    # Split the trailing question onto its own line, a common real-texting
+    # pattern (context/statement, then the actual ask).
+    if sentences[-1].endswith("?") and len(sentences) >= 2:
+        body = " ".join(sentences[:-1])
+        return f"{body}\n\n{sentences[-1]}"
+    # Otherwise, if there are 3+ sentences with no structure at all, at
+    # least separate the first (often a greeting/opener) from the rest.
+    if len(sentences) >= 3:
+        return f"{sentences[0]}\n\n{' '.join(sentences[1:])}"
+    return text
+
+
 def _clean_for_whatsapp(text: str) -> str:
     # Strip any accidental markdown headings / fences the model might emit.
     t = text or ""
@@ -942,6 +979,7 @@ def _clean_for_whatsapp(text: str) -> str:
     t = re.sub(r"```[a-zA-Z0-9_-]*\n?", "", t)
     t = t.replace("```", "")
     t = _WHATSAPP_FORBIDDEN.sub("", t)
+    t = _break_up_dense_paragraph(t)
     lines = [ln.rstrip() for ln in t.splitlines()]
     # Collapse 3+ blank lines to 2.
     cleaned_lines: List[str] = []
