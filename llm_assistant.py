@@ -244,7 +244,10 @@ Behaviour:
     sales director will confirm the details — NEVER guess, infer, or rely on
     general world knowledge about bitumen grades / logistics / pricing.
   - When discussing a specific product, include its source URL ONCE inside your
-    reply (the URL is inside each retrieved chunk).
+    reply, but only if the retrieved chunk actually has one (some products
+    don't have a live page yet). If a chunk's source_url is empty, just
+    answer from its facts and don't mention a link at all, never invent one
+    or point to a different product's page.
   - If the buyer shows purchasing interest, move CONVERSATIONALLY toward the
     5 key inquiry fields: company name, target product, quantity / volume,
     destination port, and preferred Incoterms (FOB / CFR / CIF). Ask ONE
@@ -400,8 +403,9 @@ def _format_references(chunks: List[RetrievedChunk]) -> str:
     lines = ["Retrieved reference material for this turn (ONLY cite facts below; if unclear call request_sales_handoff):"]
     for i, c in enumerate(chunks, 1):
         sim = f"{c.similarity:.2f}"
+        url_note = c.url if c.url else "NONE — do not mention a link for this product"
         lines.append(
-            f"[Reference {i}] title={c.title!r} source_url={c.url!r} similarity={sim}\n"
+            f"[Reference {i}] title={c.title!r} source_url={url_note} similarity={sim}\n"
             f"{c.chunk_text}\n"
         )
     return "\n".join(lines)
