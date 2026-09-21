@@ -157,14 +157,19 @@ async def _startup_warm_index() -> None:
             return "<set>"
         return f"{val[:4]}…{val[-3:]}"
     openrouter_ok = bool(os.getenv("OPENROUTER_API_KEY"))
-    smtp_ok = bool(os.getenv("SMTP_USERNAME") and os.getenv("SMTP_PASSWORD") and os.getenv("SALES_EMAIL"))
+    email_ok = bool(
+        os.getenv("GMAIL_RELAY_URL")
+        or (os.getenv("SMTP_USERNAME") and os.getenv("SMTP_PASSWORD") and os.getenv("SALES_EMAIL"))
+    )
     print(
         "[STARTUP] WhatsApp tokens OK. "
         f"phone_number_id={_mask(PHONE_NUMBER_ID)!r} "
         f"OPENAI_API_KEY={'set' if os.getenv('OPENAI_API_KEY') else '<unset>'} "
         f"OPENROUTER_API_KEY={'set' if openrouter_ok else '<unset — LLM replies will use canned fallback>'} "
-        f"SMTP={'configured' if smtp_ok else '<unconfigured — lead/handoff emails will be SKIPPED>'} "
+        f"EMAIL={'configured' if email_ok else '<unconfigured — lead/handoff emails will be SKIPPED>'} "
+        f"WHATSAPP_APP_SECRET={'set' if WHATSAPP_APP_SECRET else '<unset — /webhook signature NOT verified, security risk>'} "
         f"CAL_COM_BOOKING_LINK={'set' if booking.is_configured() else '<unset>'} "
+        f"CAL_COM_WEBHOOK_SECRET={'set' if CAL_COM_WEBHOOK_SECRET else '<unset — /cal-webhook signature NOT verified>'} "
         f"FOLLOWUPS_CRON_TOKEN={'set' if FOLLOWUPS_CRON_TOKEN else '<unset — /followups-scan will WARN each call>'}"
     )
     try:
@@ -175,6 +180,9 @@ async def _startup_warm_index() -> None:
 VERIFY_TOKEN = os.getenv("WHATSAPP_VERIFY_TOKEN", "")
 ACCESS_TOKEN = os.getenv("WHATSAPP_ACCESS_TOKEN", "")
 PHONE_NUMBER_ID = os.getenv("WHATSAPP_PHONE_NUMBER_ID", "")
+# Meta App Dashboard -> Settings -> Basic -> App Secret. Used to verify
+# X-Hub-Signature-256 on inbound /webhook POSTs (see receive_webhook).
+WHATSAPP_APP_SECRET = os.getenv("WHATSAPP_APP_SECRET", "")
 API_VERSION = os.getenv("WHATSAPP_API_VERSION", "v22.0")
 
 
@@ -531,6 +539,30 @@ async def verify_webhook(
 async def receive_webhook(request: Request) -> JSONResponse:
     content_type = request.headers.get("content-type", "")
     raw = await request.body()
+
+    # Verify Meta's X-Hub-Signature-256 when WHATSAPP_APP_SECRET is set —
+    # without this, ANY caller who knows this URL can POST fake WhatsApp
+    # messages: real LLM API cost per message, spam lead/handoff emails,
+    # and outbound WhatsApp sends billed to this business number, all
+    # triggered by a spoofed payload with no proof it came from Meta.
+    # Mirrors the same pattern already used for /cal-webhook below.
+    if WHATSAPP_APP_SECRET:
+        import hashlib
+        import hmac
+
+        provided = request.headers.get("x-hub-signature-256") or ""
+        expected = (
+            "sha256="
+            + hmac.new(WHATSAPP_APP_SECRET.encode("utf-8"), msg=raw or b"", digestmod=hashlib.sha256).hexdigest()
+        )
+        if not provided or not hmac.compare_digest(provided, expected):
+            print(f"[WEBHOOK] signature mismatch, rejecting: got={provided[:20]!r}...")
+            # 200 (not 401/403): Meta's webhook delivery retries aggressively
+            # on non-2xx, which would just hammer us with the same forged
+            # or misconfigured request. Silently drop instead.
+            return JSONResponse(content={"status": "ignored"}, status_code=status.HTTP_200_OK)
+    else:
+        print("[WEBHOOK] WARN: WHATSAPP_APP_SECRET not set — signature NOT verified, anyone can POST fake messages here.")
 
     payload: Dict[str, Any] = {}
     if "application/json" in content_type.lower() or (
