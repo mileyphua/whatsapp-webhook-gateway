@@ -52,6 +52,10 @@ OPENROUTER_MODEL_DEFAULT = "openai/gpt-5-mini"  # see PLAN Part 5.1; upgraded fr
 # the buyer had said in an earlier turn).
 # Max freeform Q&A turns before we nudge toward quote/booking (Part 5.2).
 MAX_QUESTIONS_BEFORE_NUDGE = 3
+# Cost guardrail: web search (search_industry_info) is pricier/slower than a
+# normal completion — cap calls per session, RAG should cover almost all
+# Petrobind-specific questions and most buyers never need general search at all.
+MAX_WEB_SEARCHES_PER_SESSION = 2
 
 # Vague / low-intent inquiries get a light qualifying question instead of full FAQ
 # detail (Part 3.4 buyer intent). These are *trigger patterns*, not rigid keyword
@@ -304,14 +308,18 @@ conversation toward the sales director confirming numbers on a call rather
 than getting defensive or repeating the same deflection twice.
 
 Try to answer it yourself before ever mentioning a human is needed: first
-check the retrieved reference material, then, for general industry
-questions that are NOT about Petrobind's own products/pricing/availability,
-you may call search_industry_info for a live web-search answer. Reserve
-'sales director' as a phrase ONLY for when pricing itself needs their
-confirmation, using the exact line specified in the pricing guardrail
-below. For any other genuine gap you can't answer even after trying, hand
-off without naming 'sales director', just let the buyer know you'll
-confirm and come back to them.
+check the retrieved reference material, that's the cheap, fast, already-
+verified source, always prefer it. search_industry_info is a genuine last
+resort, not a default habit, it costs more and is slower than answering
+from the reference material, and is capped per conversation. Only reach
+for it when the retrieved material truly doesn't cover a general (not
+Petrobind-specific) industry question the buyer is asking, don't call it
+for things you could reasonably answer, infer conversationally, or simply
+ask the buyer to clarify instead. Reserve 'sales director' as a phrase
+ONLY for when pricing itself needs their confirmation, using the exact
+line specified in the pricing guardrail below. For any other genuine gap
+you can't answer even after trying, hand off without naming 'sales
+director', just let the buyer know you'll confirm and come back to them.
 
 Behaviour:
   - On the FIRST message of a brand-new chat only, greet with something close
@@ -659,6 +667,19 @@ async def _run_tool(name: str, args: dict, *, session: ConversationSession) -> O
             query = str(args.get("query") or "").strip()
             if not query:
                 return "Tool result: search_industry_info — no query provided, do not call again without one."
+            # Cost guardrail: web search is pricier and slower than answering
+            # from the KB, cap it per session so a chatty buyer can't drive
+            # up cost turn after turn. capture_trade_inquiry/request_sales_
+            # handoff have no such cap, they're cheap normal completions.
+            if session.web_search_count >= MAX_WEB_SEARCHES_PER_SESSION:
+                return (
+                    "Tool result: search_industry_info — session search limit "
+                    f"reached ({MAX_WEB_SEARCHES_PER_SESSION}). Do not call this "
+                    "again this conversation. Answer from what you already know "
+                    "from the reference material, or call request_sales_handoff "
+                    "if it's a Petrobind-specific fact you can't confirm."
+                )
+            session.web_search_count += 1
             result = await _run_web_search(query)
             return (
                 f"Tool result: search_industry_info for {query!r} returned:\n{result}\n"
