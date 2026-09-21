@@ -236,6 +236,18 @@ base oil questions.' Do NOT use this as a chance to recap their inquiry,
 push a link, or restate old context, that's answering a different question
 than the one they asked.
 
+Recalling what the buyer said: if asked 'do you remember what I asked' or
+similar, only state things the BUYER themselves actually typed, visible as
+their own messages in the conversation so far. Do NOT count a product you
+brought up yourself as an example or suggestion as something THEY asked
+about, that's a real mistake, not a small one, mixing up who said what
+erodes trust fast. If you're not fully sure what they meant, say so and
+ask them to remind you rather than confidently stating a specific recollection
+that might be wrong. If a buyer corrects you ('I did not mention that, you
+are wrong'), take the correction directly and drop the wrong claim
+entirely, do NOT apologize and then repeat the same wrong claim again,
+actually re-check what they said instead of restating it.
+
 Below is a real WhatsApp exchange between a Petrobind rep and a genuine buyer
 (names redacted). This is a REGISTER reference only — copy the way it talks
 (short, direct, conversational, one line where one line is enough, no
@@ -927,6 +939,35 @@ async def handle_incoming_message(
 # --------------------------- WHATSAPP FORMAT CLEANUP ------------------------
 
 _WHATSAPP_FORBIDDEN = re.compile(r"[`#>*_\-]{3,}")  # markdown-ish noise
+_BULLET_LINE_RE = re.compile(r"^\s*[·•\-\*]\s+(.*)$")
+
+
+def _delistify(text: str) -> str:
+    """Safety net: the prompt bans bullet lists, but a smaller model doesn't
+    always comply, especially reciting specs (still saw '· Type: ...' lines
+    in production). Deterministically flatten any run of bullet-marker lines
+    into a plain comma-separated sentence, so the buyer never sees a raw
+    list even when the model ignores the instruction."""
+    lines = text.splitlines()
+    out: List[str] = []
+    buffer: List[str] = []
+
+    def flush() -> None:
+        if buffer:
+            out.append(", ".join(buffer) + ".")
+            buffer.clear()
+
+    for ln in lines:
+        m = _BULLET_LINE_RE.match(ln)
+        if m:
+            item = m.group(1).strip().rstrip(".")
+            if item:
+                buffer.append(item)
+        else:
+            flush()
+            out.append(ln)
+    flush()
+    return "\n".join(out)
 
 _PLACEHOLDER_LINK_RE = re.compile(r"<\s*(link|url|booking[_ ]?link)\s*>", re.IGNORECASE)
 
@@ -979,6 +1020,7 @@ def _clean_for_whatsapp(text: str) -> str:
     t = re.sub(r"```[a-zA-Z0-9_-]*\n?", "", t)
     t = t.replace("```", "")
     t = _WHATSAPP_FORBIDDEN.sub("", t)
+    t = _delistify(t)
     t = _break_up_dense_paragraph(t)
     lines = [ln.rstrip() for ln in t.splitlines()]
     # Collapse 3+ blank lines to 2.
