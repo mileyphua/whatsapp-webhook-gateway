@@ -757,12 +757,16 @@ async def _single_turn_chat(
     *,
     session: ConversationSession,
     references: List[RetrievedChunk],
-) -> Optional[str]:
-    """Run one LLM chat-completion + tool-execution loop. Returns the final
-    assistant reply text for WhatsApp, or None if we should send a fallback."""
+) -> tuple[Optional[str], set[str]]:
+    """Run one LLM chat-completion + tool-execution loop. Returns (final
+    assistant reply text for WhatsApp, or None if we should send a
+    fallback; the set of tool names actually called this turn — used by
+    the caller to catch the model promising an escalation in text without
+    actually calling the tool that notifies sales)."""
+    called_tools: set[str] = set()
     client = _openrouter_client()
     if client is None:
-        return None  # caller uses canned fallback
+        return None, called_tools  # caller uses canned fallback
 
     # Prepend the system prompt (company identity + zero-hallucination rules).
     # We don't persist the system prompt in session.history; we inject it each
@@ -804,7 +808,7 @@ async def _single_turn_chat(
             )
         except Exception as exc:
             print(f"[llm] chat.completions call failed (round {round_idx}): {exc!r}")
-            return None
+            return None, called_tools
         choice = resp.choices[0]
         msg = choice.message
 
@@ -837,6 +841,7 @@ async def _single_turn_chat(
         # Execute each tool call.
         for tc in tool_calls:
             fn = tc.function
+            called_tools.add(fn.name)
             try:
                 args = json.loads(fn.arguments or "{}")
             except Exception:
@@ -854,7 +859,7 @@ async def _single_turn_chat(
         if final_reply is None:
             final_reply = ""
 
-    return final_reply
+    return final_reply, called_tools
 
 
 # ------------------------- PUBLIC API ---------------------------------------
@@ -946,8 +951,9 @@ async def handle_incoming_message(
 
     # 4. Run the LLM turn with tool-calling loop.
     text = None
+    called_tools: set[str] = set()
     try:
-        text = await _single_turn_chat(session=session, references=references)
+        text, called_tools = await _single_turn_chat(session=session, references=references)
     except Exception as exc:
         print(f"[llm] turn exception: {exc!r}")
         text = None
@@ -986,6 +992,35 @@ async def handle_incoming_message(
     # 5. Post-processing: WhatsApp formatting adjustments + Q&A cap nudge.
     cleaned = _clean_for_whatsapp(text)
     cleaned = _fix_placeholder_link(cleaned)
+
+    # Safety net: the model sometimes promises an escalation in its reply
+    # text ("I'll arrange a discussion with our senior sales team...")
+    # without actually calling a tool that notifies sales — a real
+    # production case (buyer said "I need to talk to your boss", got that
+    # exact promise, no email ever went out). Catch it deterministically:
+    # if the reply reads like an escalation promise but no notify-worthy
+    # tool fired this turn, send the handoff email anyway.
+    if (
+        not called_tools & {"request_sales_handoff", "capture_trade_inquiry", "share_booking_link"}
+        and _ESCALATION_ROLE_RE.search(cleaned)
+        and _ESCALATION_ACTION_RE.search(cleaned)
+        and not session.handoff_notified
+    ):
+        print(
+            f"[llm] SAFETY NET: reply promised escalation but no notify tool "
+            f"was called this turn for {phone_number!r}, sending handoff email anyway"
+        )
+        ok = await notify.send_handoff_email(
+            phone_number=session.phone_number,
+            reason="Assistant's reply promised a sales-team/director discussion "
+                   "but did not call request_sales_handoff, caught by safety net.",
+            partial_inquiry_summary=f"Buyer's message: {safe_text[:300]}\nReply: {cleaned[:300]}",
+            relationship_summary=session.relationship_summary(),
+            recent_transcript=session.recent_transcript(),
+        )
+        if ok:
+            session.handoff_notified = True
+
     nudge = _nudge_if_needed(session)
     if nudge:
         cleaned = (cleaned + nudge).strip()
@@ -1045,6 +1080,27 @@ def _delistify(text: str) -> str:
     return "\n".join(out)
 
 _PLACEHOLDER_LINK_RE = re.compile(r"<\s*(link|url|booking[_ ]?link)\s*>", re.IGNORECASE)
+
+# Safety net for handle_incoming_message: catches the model promising an
+# escalation in reply TEXT without actually calling request_sales_handoff /
+# capture_trade_inquiry / share_booking_link. Two independent checks
+# (a human-role mention, and a follow-up-action phrase) ANYWHERE in the
+# reply, rather than one exact phrase structure — real model paraphrasing
+# is too varied for a single fixed pattern ("I'll arrange a direct
+# discussion with our senior sales team" vs "I will arrange for our
+# manager to get in touch" both need to match, and don't share a
+# contiguous phrase).
+_ESCALATION_ROLE_RE = re.compile(
+    r"\b(sales director|sales team|senior sales|senior manager|manager|"
+    r"director|specialist|our boss|the boss)\b",
+    re.IGNORECASE,
+)
+_ESCALATION_ACTION_RE = re.compile(
+    r"\b(arrange(d|ment)?|connect you|get in touch|reach out|contact you|"
+    r"follow up|speak (to|with)|call you|get back to you|"
+    r"will (call|contact|reach)|confirm (this|the details) (personally|directly))\b",
+    re.IGNORECASE,
+)
 
 
 def _fix_placeholder_link(text: str) -> str:
