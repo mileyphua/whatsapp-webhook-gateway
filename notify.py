@@ -152,43 +152,72 @@ def _send_sync(cfg: _SMTPConfig, msg: EmailMessage) -> None:
     # Spacemail/PrivateEmail uses LetsEncrypt-issued certs (all trusted by macOS,
     # Debian/RHEL ca-certificates, Render base image). If you run into
     # CERTIFICATE_VERIFY_FAILED in a stripped container: install ca-certificates.
+    _CONN_ERRORS = (
+        smtplib.SMTPServerDisconnected,
+        smtplib.SMTPConnectError,
+        TimeoutError,
+        ConnectionResetError,
+        ConnectionRefusedError,
+        OSError,
+    )
+
     def _try_send_via_ssl465() -> None:
         with smtplib.SMTP_SSL(
-            cfg.host, 465, context=ctx, timeout=30, local_hostname=ehlo
+            cfg.host, 465, context=ctx, timeout=15, local_hostname=ehlo
         ) as s:
+            s.login(cfg.username, cfg.password)
+            s.send_message(msg)
+
+    def _try_send_via_starttls(port: int) -> None:
+        # Some providers require EHLO twice (once before STARTTLS, once
+        # after). smtplib does this implicitly on login() if needed, but we
+        # explicitly starttls to keep it obvious.
+        with smtplib.SMTP(cfg.host, port, timeout=15, local_hostname=ehlo) as s:
+            s.ehlo()
+            if s.has_extn("starttls"):
+                s.starttls(context=ctx)
+                s.ehlo()
             s.login(cfg.username, cfg.password)
             s.send_message(msg)
 
     try:
         if cfg.port == 465:
-            _try_send_via_ssl465()
-            return
-        # STARTTLS path (ports 587 / 2525 / etc). Some providers require EHLO
-        # twice (once before STARTTLS, once after). smtplib does this implicitly
-        # on login() if needed, but we explicitly starttls to keep it obvious.
+            try:
+                _try_send_via_ssl465()
+                return
+            except _CONN_ERRORS as exc:
+                # smtplib.SMTPAuthenticationError is (surprisingly) an OSError
+                # subclass, so it matches _CONN_ERRORS too — but retrying on a
+                # different port never fixes wrong credentials, and doing so
+                # would bury the detailed auth-troubleshooting message below.
+                # Let it fall through to the outer handler unchanged instead.
+                if isinstance(exc, smtplib.SMTPAuthenticationError):
+                    raise
+                # A cloud host can restrict outbound port 465 while leaving
+                # 587 open (or vice versa) — this varies by provider/plan
+                # and isn't always documented. Rather than require the user
+                # to manually flip SMTP_PORT and redeploy, try the other
+                # transport automatically before giving up.
+                print(
+                    f"[notify] SSL 465 to {cfg.host} failed ({exc!r}); "
+                    f"retrying via STARTTLS 587 as fallback."
+                )
+                _try_send_via_starttls(587)
+                return
         try:
-            with smtplib.SMTP(cfg.host, cfg.port, timeout=30, local_hostname=ehlo) as s:
-                s.ehlo()
-                if s.has_extn("starttls"):
-                    s.starttls(context=ctx)
-                    s.ehlo()
-                s.login(cfg.username, cfg.password)
-                s.send_message(msg)
+            _try_send_via_starttls(cfg.port)
             return
-        except (
-            smtplib.SMTPServerDisconnected,
-            smtplib.SMTPConnectError,
-            TimeoutError,
-            ConnectionResetError,
-        ):
+        except _CONN_ERRORS as exc:
+            if isinstance(exc, smtplib.SMTPAuthenticationError):
+                raise
             # Spacemail 587 listener has been observed dropping the socket
             # immediately after STARTTLS handshakes on certain IP ranges.
             # Retry once on 465 SSL before failing so the user doesn't need
             # to manually flip the port.
             if cfg.port != 465:
                 print(
-                    f"[notify] STARTTLS on {cfg.host}:{cfg.port} disconnected "
-                    f"pre-AUTH; retrying via SSL 465 as fallback."
+                    f"[notify] STARTTLS on {cfg.host}:{cfg.port} failed "
+                    f"({exc!r}); retrying via SSL 465 as fallback."
                 )
                 _try_send_via_ssl465()
                 return
