@@ -393,6 +393,35 @@ async def send_handoff_email(
     return await _send_if_configured(subject=subject, html_body=html)
 
 
+async def send_booking_interest_email(
+    *,
+    phone_number: str,
+    relationship_summary: Optional[str] = None,
+    recent_transcript: Optional[str] = None,
+) -> bool:
+    """Called the moment the assistant shares the Cal.com link / the buyer
+    says they want to book, BEFORE they've necessarily completed the actual
+    Cal.com form. Distinct from send_booking_email (which fires only once
+    Cal.com's BOOKING_CREATED webhook confirms a real slot) — without this,
+    a buyer who says "yes I'd like to book" in chat but never finishes the
+    external Cal.com flow would generate no notification at all."""
+    fields: Dict[str, Any] = {
+        "whatsapp_number": f"+{phone_number.lstrip('+')}",
+    }
+    subject = f"[Booking Interest] +{phone_number.lstrip('+')} wants to schedule a call"
+    html = _wrap_html(
+        title="Buyer wants to book a call",
+        lead_meta=(
+            "The WhatsApp assistant shared the Cal.com booking link with this "
+            "buyer. They have NOT necessarily completed the booking yet, "
+            "consider following up directly if no slot shows up soon."
+        ),
+        table=_fmt_rows(fields),
+        extra=_format_snapshot_html(relationship_summary, recent_transcript),
+    )
+    return await _send_if_configured(subject=subject, html_body=html)
+
+
 async def send_booking_email(
     *,
     phone_number: Optional[str] = None,

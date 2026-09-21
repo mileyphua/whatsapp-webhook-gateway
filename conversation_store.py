@@ -82,6 +82,7 @@ class ConversationSession:
     followed_up_at: Optional[float] = None  # for Part 3.3 cron follow-ups
     freeform_questions_answered: int = 0  # Part 5.2 Q&A cap
     web_search_count: int = 0  # cost guardrail: cap search_industry_info calls per session
+    booking_intent_notified: bool = False  # dedup: 1 "buyer wants to book" email per session
 
     # --- Booking / scheduling state (follow-up loop, see scan_for_followups) ---
     booking_link_shared_at: Optional[float] = None  # unix ts we shared the Cal link

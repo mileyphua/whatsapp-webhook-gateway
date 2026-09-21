@@ -920,6 +920,17 @@ async def _instant_handoff_reply(
             "director: " + booking.get_booking_link()
         )
         sess.booking_link_shared_at = time.time()
+        if not sess.booking_intent_notified:
+            try:
+                ok = await notify.send_booking_interest_email(
+                    phone_number=from_number,
+                    relationship_summary=sess.relationship_summary(),
+                    recent_transcript=sess.recent_transcript(),
+                )
+                if ok:
+                    sess.booking_intent_notified = True
+            except Exception as exc:
+                print(f"[BOOKING INTEREST EMAIL FAIL] to={from_number!r} error={exc!r}")
     else:
         reply = (
             "Of course, let me get back to you on that shortly. In the meantime, "

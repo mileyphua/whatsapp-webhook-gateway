@@ -621,6 +621,23 @@ def _nudge_if_needed(session: ConversationSession) -> Optional[str]:
 
 # ---------------------- TOOL EXECUTION --------------------------------------
 
+async def _notify_booking_interest(session: ConversationSession) -> None:
+    """Notify sales the moment the Cal.com link is shared / booking intent
+    shows up, from ANY code path (tool call or the deterministic non-LLM
+    paths) — don't wait on the buyer completing the external Cal.com form,
+    that's a separate, later notification (notify.send_booking_email, fired
+    by /cal-webhook). Deduped once per session via booking_intent_notified."""
+    if session.booking_intent_notified:
+        return
+    ok = await notify.send_booking_interest_email(
+        phone_number=session.phone_number,
+        relationship_summary=session.relationship_summary(),
+        recent_transcript=session.recent_transcript(),
+    )
+    if ok:
+        session.booking_intent_notified = True
+
+
 async def _run_tool(name: str, args: dict, *, session: ConversationSession) -> Optional[str]:
     """Execute a single tool call side-effect. Returns string content to inject
     as the tool-result role in the chat history, or None on error."""
@@ -721,6 +738,7 @@ async def _run_tool(name: str, args: dict, *, session: ConversationSession) -> O
             # Remember WHEN we shared the link so conversation_store's follow-up
             # cron can nudge the buyer if a booking is never confirmed (>20h later).
             session.booking_link_shared_at = time.time()
+            await _notify_booking_interest(session)
             if not link:
                 return (
                     "Tool result: share_booking_link — Cal.com booking URL is not "
@@ -907,6 +925,7 @@ async def handle_incoming_message(
             if booking.is_configured() and not session.booking_link_shared_at:
                 reply += " Want to grab a quick call in the meantime? " + booking.get_booking_link()
                 session.booking_link_shared_at = time.time()
+                await _notify_booking_interest(session)
         elif booking.is_configured() and not session.booking_link_shared_at:
             reply = (
                 "Good question, let me check on that and get back to you. "
@@ -914,6 +933,7 @@ async def handle_incoming_message(
                 + booking.get_booking_link()
             )
             session.booking_link_shared_at = time.time()
+            await _notify_booking_interest(session)
         else:
             reply = "Good question, let me check on that and get back to you shortly."
         # Append to history so the next turn has context of the handoff.
@@ -942,6 +962,7 @@ async def handle_incoming_message(
                 + booking.get_booking_link()
             )
             session.booking_link_shared_at = time.time()
+            await _notify_booking_interest(session)
         else:
             fallback = (
                 "Let me get back to you on this shortly. Which product are "
