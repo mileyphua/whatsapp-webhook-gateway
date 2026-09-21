@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 import time
@@ -584,10 +585,10 @@ async def receive_webhook(request: Request) -> JSONResponse:
                             continue
 
                         _process_message(message)
-                        await _llm_reply(
+                        _schedule_batched_reply(
                             from_number=message.get("from"),
                             phone_number_id=pnid,
-                            inbound_text=text_body,
+                            text=text_body or "",
                             reply_to_message_id=wamid,
                         )
                         continue
@@ -781,6 +782,63 @@ async def _echo_reply(
             f"[ECHO FAIL] to={from_number} pnid={phone_number_id} "
             f"error={exc!r}"
         )
+
+
+# ---------------------- Message batching / debounce -------------------------
+# A buyer often sends 2-3 quick separate WhatsApp messages instead of one long
+# one (typing habit). Replying to each individually reads as robotic and can
+# misfire the LLM's turn-taking logic on a fragment ("100", then "MT", then
+# "per month"). Instead we hold each text message for DEBOUNCE_SECONDS after
+# the first one arrives, keep collecting any more that show up from the same
+# sender in that window, and once it goes quiet, process everything as ONE
+# combined turn. In-process only (same lifetime as everything else in
+# conversation_store), and does not delay Meta's webhook ack — the wait
+# happens in a background asyncio task, not in the request/response cycle.
+DEBOUNCE_SECONDS = 8
+
+_pending_texts: dict[str, list[str]] = {}
+_pending_generation: dict[str, int] = {}
+_pending_meta: dict[str, dict] = {}
+
+
+def _schedule_batched_reply(
+    *, from_number: str, phone_number_id: str, text: str, reply_to_message_id: Optional[str]
+) -> None:
+    """Register one inbound text message for the buyer and (re)start the
+    debounce timer. Does not block — safe to call from the webhook handler."""
+    if not from_number or not text:
+        return
+    _pending_texts.setdefault(from_number, []).append(text)
+    generation = _pending_generation.get(from_number, 0) + 1
+    _pending_generation[from_number] = generation
+    _pending_meta[from_number] = {
+        "phone_number_id": phone_number_id,
+        "reply_to_message_id": reply_to_message_id,
+    }
+    asyncio.create_task(_debounced_flush(from_number, generation))
+
+
+async def _debounced_flush(from_number: str, generation: int) -> None:
+    await asyncio.sleep(DEBOUNCE_SECONDS)
+    # If a newer message arrived while we were sleeping, its own task owns
+    # the flush now (bumped the generation) — this one is stale, do nothing.
+    if _pending_generation.get(from_number) != generation:
+        return
+    texts = _pending_texts.pop(from_number, [])
+    meta = _pending_meta.pop(from_number, {})
+    if not texts:
+        return
+    combined = "\n".join(texts)
+    print(
+        f"[BATCH] flushing {len(texts)} message(s) from {from_number!r} "
+        f"after {DEBOUNCE_SECONDS}s quiet period"
+    )
+    await _llm_reply(
+        from_number=from_number,
+        phone_number_id=meta.get("phone_number_id") or PHONE_NUMBER_ID,
+        inbound_text=combined,
+        reply_to_message_id=meta.get("reply_to_message_id"),
+    )
 
 
 async def _llm_reply(

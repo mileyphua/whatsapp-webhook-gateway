@@ -94,22 +94,51 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
         "function": {
             "name": "request_sales_handoff",
             "description": (
-                "MANDATORY FALLBACK. Call this when: (a) the buyer asks a fact "
-                "(spec, pricing, availability, logistics, certification, delivery "
-                "timeline, custom grade) that the retrieved reference material "
-                "for this turn does NOT directly answer; (b) the buyer wants a "
-                "human; (c) the buyer wants exact spot / current pricing or "
-                "custom quote terms. DO NOT guess facts not present in the "
-                "retrieved references. Calling this tool sends an email to the "
-                "human sales director to take over the conversation personally."
+                "LAST RESORT, only after you've genuinely tried to answer first "
+                "(check the retrieved reference material, and for general "
+                "non-Petrobind-specific industry questions, try search_industry_info). "
+                "Call this when: (a) pricing is being discussed and needs the sales "
+                "director's confirmation (set is_pricing=true); (b) a Petrobind-specific "
+                "fact (spec, availability, logistics, certification, delivery timeline, "
+                "custom grade) genuinely isn't answerable from the reference material or "
+                "a general search (set is_pricing=false); (c) the buyer explicitly asks "
+                "for a human. DO NOT guess facts not present in the retrieved references, "
+                "and DO NOT promise a specific discount, exception, or custom term "
+                "yourself, that decision belongs to the sales director, not you. Calling "
+                "this tool sends an email to the sales director to take over personally."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "reason": {"type": "string", "description": "1-sentence reason a human is needed (e.g. 'spot pricing for Bitumen 80/100 not in KB')."},
                     "partial_inquiry_summary": {"type": "string", "description": "Any known inquiry fields so far (product, port, volume, etc.)."},
+                    "is_pricing": {"type": "boolean", "description": "True if this handoff is specifically because pricing needs sales-director confirmation; false for any other kind of handoff."},
                 },
                 "required": ["reason"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_industry_info",
+            "description": (
+                "Runs a live web search. Use ONLY for general bitumen/petroleum "
+                "industry knowledge that is NOT specific to Petrobind's own products, "
+                "pricing, availability, or certifications, e.g. industry standards "
+                "explained, general terminology, how a test method works, broad market "
+                "context. NEVER use this for Petrobind's own product specs, pricing, or "
+                "availability, those come ONLY from the retrieved reference material or "
+                "the sales director, never from a web search. The result may be cited "
+                "as general industry context, never presented as Petrobind's own "
+                "official spec or an official Petrobind price."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "The general industry question to search for."},
+                },
+                "required": ["query"],
             },
         },
     },
@@ -231,6 +260,34 @@ excited about a big order can be met with real enthusiasm, not flatness.
 Two different buyers asking the same question should not get word-for-word
 identical replies, vary your phrasing like a person would.
 
+Sales mindset: you genuinely want this buyer to purchase from Petrobind,
+not just to answer politely and move on. Everything below this line (the
+safety/accuracy rules) always comes first, no exception, but within that,
+think and act like a salesperson who wants to close: highlight what's
+genuinely good about Petrobind's offering when it's relevant (COA/PDS
+support, sourcing from multiple qualified suppliers, responsive service),
+keep the conversation moving toward a concrete next step (quote request,
+booking a call), and treat every question as a chance to build trust and
+move closer to a sale, not just a box to tick. Never let sales enthusiasm
+push you into guessing a fact, quoting a price, or promising a specific
+discount/exception/custom term, those decisions belong to the sales
+director, not you, promising them yourself would undercut their authority
+to actually negotiate. If a buyer is comparing prices, negotiating, or
+pushing back, stay warm and professional, acknowledge what they said
+genuinely (not a scripted 'I understand your concern'), and move the
+conversation toward the sales director confirming numbers on a call rather
+than getting defensive or repeating the same deflection twice.
+
+Try to answer it yourself before ever mentioning a human is needed: first
+check the retrieved reference material, then, for general industry
+questions that are NOT about Petrobind's own products/pricing/availability,
+you may call search_industry_info for a live web-search answer. Reserve
+'sales director' as a phrase ONLY for when pricing itself needs their
+confirmation, using the exact line specified in the pricing guardrail
+below. For any other genuine gap you can't answer even after trying, hand
+off without naming 'sales director', just let the buyer know you'll
+confirm and come back to them.
+
 Behaviour:
   - On the FIRST message of a brand-new chat only, greet with something close
     to: 'Hi 👋 Welcome to PetroBind Global. How can we help you with your
@@ -238,11 +295,14 @@ Behaviour:
     product list recited unprompted. Do NOT ask the new-vs-existing
     partnership question on this very first turn; save it for once the buyer
     has stated what they need, and only if it's actually useful context.
-  - Answer buyer questions ONLY from the "Retreived reference material" block
-    included with the current turn. If a question is not directly answered by
-    that block, you MUST call request_sales_handoff and tell the buyer our
-    sales director will confirm the details — NEVER guess, infer, or rely on
-    general world knowledge about bitumen grades / logistics / pricing.
+  - Answer Petrobind-specific product questions (specs, availability,
+    logistics, certifications) ONLY from the "Retrieved reference material"
+    block for this turn, NEVER from general world knowledge or a web
+    search, those are not authoritative about Petrobind's own products. If
+    a general, non-Petrobind-specific industry question comes up and isn't
+    covered, you may try search_industry_info before falling back. If a
+    Petrobind-specific fact still isn't answerable after that, call
+    request_sales_handoff (is_pricing=false) rather than guess.
   - When discussing a specific product, include its source URL ONCE inside your
     reply, but only if the retrieved chunk actually has one (some products
     don't have a live page yet). If a chunk's source_url is empty, just
@@ -288,11 +348,14 @@ Behaviour:
     it's the sales director who gives it personally, never this assistant. If
     the buyer asks about pricing: call capture_trade_inquiry (if you have a
     product) AND call request_sales_handoff (reason: pricing not disclosed
-    over chat). Only ALSO call share_booking_link if the buyer memory note
+    over chat, is_pricing=true). Your reply for this MUST be exactly: 'Hold
+    on, let me check with my sales director about the latest price to
+    confirm.' This is the ONLY situation where you name 'sales director' in
+    your reply. Only ALSO call share_booking_link if the buyer memory note
     says the booking link has not been shared yet this conversation, if it
-    was already shared, just say the sales director will confirm pricing on
-    that call, don't paste the URL again. When you do include the link,
-    offer it outright in one short sentence, not as a yes/no question.
+    was already shared, don't paste the URL again, the pricing line above
+    is enough on its own. When you do include the link, offer it outright
+    in one short sentence, not as a yes/no question.
   - Buyer intent (Part 3.4): for vague / one-liner inquiries ('just checking
     prices', 'bitumen price?') ask a light qualifying question FIRST ('Which
     grade are you targeting, and roughly what volume per month?') before
@@ -318,21 +381,24 @@ Tool-use rules:
     no text content alongside them. The tool results come back to you
     immediately after, and THEN you write your one text reply to the buyer
     using those results.
-  - When request_sales_handoff fires, only ALSO call share_booking_link if
-    the buyer memory note says it hasn't been shared yet this conversation
-    (and the buyer hasn't already got a call booked, or said they don't want
-    one). Don't re-paste the link on every handoff, once is enough unless
-    the buyer brings up scheduling again themselves. When you do include a
-    fresh link, use the EXACT URL string the share_booking_link tool result
-    gave you, never invent one or write a placeholder like '<link>'. Say
-    you'll check on it and get back to them personally, do NOT say
-    'escalated' or 'specialist has been paged', that reads as robotic. Keep
-    it to one short sentence, don't also recap the whole inquiry in the same
-    reply unless the buyer actually asked for that recap.
-  - Calling capture_trade_inquiry sends an email to the sales director. After
-    calling it, confirm briefly in one sentence that it's recorded and the
-    sales director will follow up, vary the phrasing turn to turn instead of
-    repeating the same sentence.
+  - When request_sales_handoff fires with is_pricing=true, use the exact
+    pricing line from the pricing guardrail above, nothing else added. For
+    is_pricing=false, say you'll check on it and get back to them
+    personally in your own words, do NOT say 'escalated' or 'specialist
+    has been paged' (robotic), and do NOT name 'sales director', that
+    phrase is reserved for pricing only. Only ALSO call share_booking_link
+    if the buyer memory note says it hasn't been shared yet this
+    conversation (and the buyer hasn't already got a call booked, or said
+    they don't want one), once is enough unless the buyer brings up
+    scheduling again themselves. When you do include a fresh link, use the
+    EXACT URL string the share_booking_link tool result gave you, never
+    invent one or write a placeholder like '<link>'. Keep the reply to one
+    short sentence, don't also recap the whole inquiry unless asked.
+  - Calling capture_trade_inquiry sends an email to the sales director
+    internally, but your reply to the buyer should say 'our team' or
+    'we'll follow up', not 'sales director', that phrase stays reserved
+    for pricing per the rule above. Vary the phrasing turn to turn instead
+    of repeating the same sentence.
 """
 
 
@@ -343,6 +409,33 @@ def _openrouter_client():
     from openai import AsyncOpenAI
 
     return AsyncOpenAI(api_key=api_key, base_url=OPENROUTER_BASE_URL)
+
+
+async def _run_web_search(query: str) -> str:
+    """Scoped live web search for search_industry_info — a small, separate
+    OpenRouter call with the ':online' web-search suffix, given ONLY the
+    buyer's general-knowledge query (not the full conversation, not
+    Petrobind's own reference material). Never used for Petrobind's own
+    product facts/pricing — that boundary is enforced by the tool
+    description and the system prompt, not by this function."""
+    client = _openrouter_client()
+    if client is None:
+        return "Web search unavailable right now, answer without it or escalate if truly needed."
+    model = (os.getenv("OPENROUTER_MODEL") or OPENROUTER_MODEL_DEFAULT) + ":online"
+    try:
+        resp = await client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": query}],
+            max_tokens=400,
+            temperature=0.2,
+            timeout=30.0,
+            extra_body={"reasoning": {"effort": "low"}},
+        )
+        text = resp.choices[0].message.content
+        return text.strip() if text else "No results found."
+    except Exception as exc:
+        print(f"[llm] web search failed for {query!r}: {exc!r}")
+        return "Web search failed, do not guess, answer without it or escalate if truly needed."
 
 
 # ---------------------- HUMAN REVIEW NOTE -----------------------------------
@@ -395,6 +488,15 @@ def _looks_like_short_reply(text: str) -> bool:
     # never reaches the sales inbox.
     t = text.strip()
     return "?" not in t and len(t.split()) <= 4
+
+
+def _looks_like_pricing_question(text: str) -> bool:
+    # Used by the deterministic (non-LLM) zero-RAG-hit handoff to decide
+    # whether the 'sales director' phrasing applies (pricing only, per the
+    # rule that sales director is named ONLY for price confirmation).
+    t = text.lower()
+    pricing_words = ("price", "pricing", "cost", "how much", "quote", "rate", "$", "discount")
+    return any(w in t for w in pricing_words)
 
 
 def _format_references(chunks: List[RetrievedChunk]) -> str:
@@ -498,6 +600,7 @@ async def _run_tool(name: str, args: dict, *, session: ConversationSession) -> O
         if name == "request_sales_handoff":
             reason = str(args.get("reason") or "(no reason provided)")
             summary = str(args.get("partial_inquiry_summary") or "")
+            is_pricing = bool(args.get("is_pricing"))
             if not session.handoff_notified:
                 ok = await notify.send_handoff_email(
                     phone_number=session.phone_number,
@@ -508,11 +611,34 @@ async def _run_tool(name: str, args: dict, *, session: ConversationSession) -> O
                 )
                 if ok:
                     session.handoff_notified = True
+            if is_pricing:
+                reply_instruction = (
+                    "Reply with EXACTLY this line (word for word, this is the "
+                    "required phrasing for price handoffs): 'Hold on, let me "
+                    "check with my sales director about the latest price to "
+                    "confirm.'"
+                )
+            else:
+                reply_instruction = (
+                    "Reply: let the buyer know you'll confirm this and come "
+                    "back to them, in your own natural words, do NOT name "
+                    "'sales director' here, that phrasing is reserved for "
+                    "pricing handoffs only."
+                )
             return (
                 "Tool result: request_sales_handoff completed. "
                 f"Handoff reason: {reason!r}. Summary: {summary!r}. "
-                "Reply: tell the buyer our sales director has been notified "
-                "and will reply personally on WhatsApp."
+                f"is_pricing={is_pricing}. {reply_instruction}"
+            )
+        if name == "search_industry_info":
+            query = str(args.get("query") or "").strip()
+            if not query:
+                return "Tool result: search_industry_info — no query provided, do not call again without one."
+            result = await _run_web_search(query)
+            return (
+                f"Tool result: search_industry_info for {query!r} returned:\n{result}\n"
+                "Reminder: this is general industry context only, never present it as "
+                "Petrobind's own official spec, availability, or price."
             )
         if name == "share_booking_link":
             link = booking.get_booking_link(message=args.get("message"))
@@ -697,11 +823,19 @@ async def handle_incoming_message(
                 recent_transcript=transcript,
             )
             session.handoff_notified = True
-        if booking.is_configured() and not session.booking_link_shared_at:
+        if _looks_like_pricing_question(safe_text):
+            reply = (
+                "Hold on, let me check with my sales director about the "
+                "latest price to confirm."
+            )
+            if booking.is_configured() and not session.booking_link_shared_at:
+                reply += " Want to grab a quick call in the meantime? " + booking.get_booking_link()
+                session.booking_link_shared_at = time.time()
+        elif booking.is_configured() and not session.booking_link_shared_at:
             reply = (
                 "Good question, let me check on that and get back to you. "
-                "Want to grab a quick call with our sales director so we can "
-                "go through it properly? " + booking.get_booking_link()
+                "Want to grab a quick call so we can go through it properly? "
+                + booking.get_booking_link()
             )
             session.booking_link_shared_at = time.time()
         else:
@@ -728,7 +862,7 @@ async def handle_incoming_message(
         if booking.is_configured() and not session.booking_link_shared_at:
             fallback = (
                 "Let me get back to you on this shortly. Feel free to grab a "
-                "quick call with our sales director in the meantime: "
+                "quick call with our team in the meantime: "
                 + booking.get_booking_link()
             )
             session.booking_link_shared_at = time.time()
