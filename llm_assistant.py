@@ -84,6 +84,8 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
                 "properties": {
                     "company_name": {"type": "string", "description": "Buyer's company name (ask if not yet known)."},
                     "contact_name": {"type": "string", "description": "Buyer's personal name (if shared)."},
+                    "contact_position": {"type": "string", "description": "Buyer's job title/role at their company, e.g. 'Procurement Manager' (ask naturally if not yet known, don't force it)."},
+                    "contact_email": {"type": "string", "description": "Buyer's work email (ask naturally if not yet known, useful for sending COA/PDS/formal quotes)."},
                     "product": {"type": "string", "description": "Target product, e.g. 'Bitumen 60/70' or 'Base Oil SN150'."},
                     "quantity": {"type": "string", "description": "Volume / tonnage / MT / drums / flexitanks if stated."},
                     "destination_port": {"type": "string", "description": "Destination seaport or country (e.g. 'Ho Chi Minh', 'Vietnam')."},
@@ -346,13 +348,23 @@ Behaviour:
     answer from its facts and don't mention a link at all, never invent one
     or point to a different product's page.
   - If the buyer shows purchasing interest, move CONVERSATIONALLY toward the
-    5 key inquiry fields: company name, target product, quantity / volume,
-    destination port, and preferred Incoterms (FOB / CFR / CIF). Ask ONE
-    question at a time, like a real person texting — e.g. once product is
-    known, ask ONLY for quantity next ('May I ask what quantity/MT you're
-    looking at?'), wait for that answer, then ask the next single thing.
-    NEVER list several questions in one message (no bullet points, no
-    numbered list, no 'could you share: X, Y, Z').
+    key inquiry fields: company name, target product, quantity / volume,
+    destination port, preferred Incoterms (FOB / CFR / CIF), and, once the
+    conversation has enough rapport for it (not on the very first ask),
+    the buyer's role/position at their company and a work email (useful
+    for sending COA/PDS or a formal quote later). Ask ONE question at a
+    time, like a real person texting — e.g. once product is known, ask
+    ONLY for quantity next ('May I ask what quantity/MT you're looking
+    at?'), wait for that answer, then ask the next single thing. NEVER list
+    several questions in one message (no bullet points, no numbered list,
+    no 'could you share: X, Y, Z').
+    NEVER ask for a field again once the buyer memory note or the
+    conversation already shows it's known, check what you already have
+    before asking, asking the same thing twice reads as not paying
+    attention and is one of the fastest ways to lose trust. If you're not
+    sure whether something was already given, look back at what they
+    actually said rather than asking blind, or just move to whichever
+    field is genuinely still missing.
     MANDATORY, do not skip this: call capture_trade_inquiry the MOMENT the
     'product' field becomes known, on that exact turn, even though you're
     only asking for ONE more field in your visible reply. Do not wait to
@@ -360,9 +372,10 @@ Behaviour:
     whether they'd like you to start a quote request, call the tool
     silently (per the tool-use rules) and continue the conversation
     naturally in the text reply that follows. Every later turn where a new
-    field is confirmed (quantity, port, incoterm, company), call
-    capture_trade_inquiry AGAIN with the updated fields so the sales record
-    stays current, this is a cheap update, not a one-time action.
+    field is confirmed (quantity, port, incoterm, company, position,
+    email), call capture_trade_inquiry AGAIN with the updated fields so
+    the sales record stays current, this is a cheap update, not a
+    one-time action.
   - Needs discovery: alongside the 5 transactional fields, weave in ONE
     light discovery question somewhere in the conversation (not stacked
     with another question in the same message) to actually understand the
@@ -559,10 +572,20 @@ def _format_buyer_memory(session: ConversationSession) -> str:
     known_bits = []
     if inquiry.contact_name:
         known_bits.append(f"name={inquiry.contact_name!r}")
+    if inquiry.contact_position:
+        known_bits.append(f"position={inquiry.contact_position!r}")
+    if inquiry.contact_email:
+        known_bits.append(f"email={inquiry.contact_email!r}")
     if inquiry.company_name:
         known_bits.append(f"company={inquiry.company_name!r}")
     if inquiry.product:
         known_bits.append(f"product interest={inquiry.product!r}")
+    if inquiry.quantity:
+        known_bits.append(f"quantity={inquiry.quantity!r}")
+    if inquiry.destination_port:
+        known_bits.append(f"destination_port={inquiry.destination_port!r}")
+    if inquiry.incoterm:
+        known_bits.append(f"incoterm={inquiry.incoterm!r}")
     if session.is_known_partner is True:
         known_bits.append("existing partner")
     elif session.is_known_partner is False:
@@ -576,7 +599,8 @@ def _format_buyer_memory(session: ConversationSession) -> str:
     )
     return (
         f"Buyer memory: {session.relationship_summary()}. Known so far: {known}. "
-        f"{booking_status}."
+        f"Do NOT ask again for any field already listed above, only ask for "
+        f"what's genuinely still missing. {booking_status}."
     )
 
 
@@ -608,6 +632,8 @@ async def _run_tool(name: str, args: dict, *, session: ConversationSession) -> O
             d.update({k: v for k, v in args.items() if v is not None and v != ""})
             session.inquiry.company_name = d.get("company_name") or session.inquiry.company_name
             session.inquiry.contact_name = d.get("contact_name") or session.inquiry.contact_name
+            session.inquiry.contact_position = d.get("contact_position") or session.inquiry.contact_position
+            session.inquiry.contact_email = d.get("contact_email") or session.inquiry.contact_email
             session.inquiry.product = d.get("product") or session.inquiry.product
             session.inquiry.quantity = d.get("quantity") or session.inquiry.quantity
             session.inquiry.destination_port = d.get("destination_port") or session.inquiry.destination_port

@@ -25,6 +25,8 @@ MAX_HISTORY_TURNS = 20  # round-trips (each = user + assistant)
 class InquiryDraft:
     company_name: Optional[str] = None
     contact_name: Optional[str] = None
+    contact_position: Optional[str] = None  # job title / role at their company
+    contact_email: Optional[str] = None
     product: Optional[str] = None
     quantity: Optional[str] = None
     destination_port: Optional[str] = None
@@ -34,7 +36,7 @@ class InquiryDraft:
     is_new_prospect: Optional[bool] = None  # None = not yet asked
 
     def completeness_score(self) -> float:
-        """0.0 = empty, 1.0 = all 8 fields filled (used to decide when to notify)."""
+        """0.0 = empty, 1.0 = all core fields filled (used to decide when to notify)."""
         vals = [
             self.company_name,
             self.contact_name,
@@ -42,7 +44,8 @@ class InquiryDraft:
             self.quantity,
             self.destination_port,
             self.incoterm,
-            # packaging + notes are optional — don't penalize
+            # contact_position, contact_email, packaging, notes are optional
+            # (nice-to-have context) — don't penalize completeness for them.
         ]
         filled = sum(1 for v in vals if v)
         return round(filled / len(vals), 3)
@@ -51,6 +54,8 @@ class InquiryDraft:
         return {
             "company_name": self.company_name,
             "contact_name": self.contact_name,
+            "contact_position": self.contact_position,
+            "contact_email": self.contact_email,
             "product": self.product,
             "quantity": self.quantity,
             "destination_port": self.destination_port,
