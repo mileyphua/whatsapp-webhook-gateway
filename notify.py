@@ -64,6 +64,7 @@ from __future__ import annotations
 import asyncio
 import os
 import smtplib
+import socket
 import ssl
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -71,6 +72,45 @@ from email.message import EmailMessage
 from typing import Any, Dict, Mapping, Optional
 
 ENV_PREFIX = ""  # placeholder for future namespacing
+
+
+def _ipv4_only_socket(host: str, port: int, timeout: float) -> socket.socket:
+    """Connect using ONLY an IPv4 address for `host`, never IPv6.
+
+    Render logged OSError(101, 'Network is unreachable') connecting to
+    smtp.gmail.com — that specific error (not a timeout) is the classic
+    signature of a container with no outbound IPv6 route attempting to
+    connect to a host that has an IPv6 (AAAA) DNS record; the OS picks the
+    IPv6 address from getaddrinfo() and immediately fails since there's no
+    route for that address family at all. Gmail publishes both A (IPv4)
+    and AAAA (IPv6) records globally, even though a resolver on an
+    IPv6-less network (like this one, when testing locally) may only
+    surface the IPv4 one via AI_ADDRCONFIG. Forcing AF_INET here is a safe,
+    no-downside fix on any network, and resolves the failure if it is in
+    fact this exact class of IPv6-routing issue.
+    """
+    infos = socket.getaddrinfo(host, port, socket.AF_INET, socket.SOCK_STREAM)
+    if not infos:
+        raise OSError(f"No IPv4 address found for {host}:{port}")
+    family, socktype, proto, _canonname, sockaddr = infos[0]
+    sock = socket.socket(family, socktype, proto)
+    sock.settimeout(timeout)
+    sock.connect(sockaddr)
+    return sock
+
+
+class _IPv4SMTP(smtplib.SMTP):
+    def _get_socket(self, host, port, timeout):  # noqa: D102 - smtplib internal override
+        return _ipv4_only_socket(host, port, timeout)
+
+
+class _IPv4SMTP_SSL(smtplib.SMTP_SSL):
+    def _get_socket(self, host, port, timeout):  # noqa: D102 - smtplib internal override
+        raw = _ipv4_only_socket(host, port, timeout)
+        # server_hostname must stay the ORIGINAL domain name (not the IP we
+        # actually connected to) so TLS SNI and certificate hostname
+        # verification still work correctly against the domain's real cert.
+        return self.context.wrap_socket(raw, server_hostname=self._host)
 
 
 @dataclass
@@ -179,7 +219,7 @@ def _send_sync(cfg: _SMTPConfig, msg: EmailMessage) -> None:
     )
 
     def _try_send_via_ssl465() -> None:
-        with smtplib.SMTP_SSL(
+        with _IPv4SMTP_SSL(
             cfg.host, 465, context=ctx, timeout=15, local_hostname=ehlo
         ) as s:
             s.login(cfg.username, cfg.password)
@@ -189,7 +229,7 @@ def _send_sync(cfg: _SMTPConfig, msg: EmailMessage) -> None:
         # Some providers require EHLO twice (once before STARTTLS, once
         # after). smtplib does this implicitly on login() if needed, but we
         # explicitly starttls to keep it obvious.
-        with smtplib.SMTP(cfg.host, port, timeout=15, local_hostname=ehlo) as s:
+        with _IPv4SMTP(cfg.host, port, timeout=15, local_hostname=ehlo) as s:
             s.ehlo()
             if s.has_extn("starttls"):
                 s.starttls(context=ctx)
