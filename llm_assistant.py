@@ -46,7 +46,10 @@ from rag import RetrievedChunk, index_is_ready, load_index_if_needed, retrieve
 # OpenAI-compatible client for OpenRouter (the chat platform used by the *model*,
 # not embeddings). Base URL + API key both pulled from env.
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
-OPENROUTER_MODEL_DEFAULT = "openai/gpt-5-nano"  # see PLAN Part 5.1
+OPENROUTER_MODEL_DEFAULT = "openai/gpt-5-mini"  # see PLAN Part 5.1; upgraded from
+# gpt-5-nano 2026-09-22 after nano-tier instruction-following/grounding
+# failures in production (ignored the no-bullets rule, hallucinated what
+# the buyer had said in an earlier turn).
 # Max freeform Q&A turns before we nudge toward quote/booking (Part 5.2).
 MAX_QUESTIONS_BEFORE_NUDGE = 3
 
