@@ -50,7 +50,7 @@ def _find_session_for_phone(phone: Any):
     return None
 
 
-def _stamp_session_booking(phone: Any, payload: Mapping[str, Any]) -> None:
+async def _stamp_session_booking(phone: Any, payload: Mapping[str, Any]) -> None:
     """After Cal.com BOOKING_CREATED, stamp matching ConversationSession so
     booking-follow-up nudges don't fire to someone who already booked."""
     import time as _t
@@ -73,6 +73,8 @@ def _stamp_session_booking(phone: Any, payload: Mapping[str, Any]) -> None:
         }
     sess.booking_confirmed_at = _t.time()
     sess.booking_details.update(booking_fields)
+    import conversation_store
+    await conversation_store.save_session(sess)
 
 
 def is_configured() -> bool:
@@ -133,7 +135,7 @@ async def handle_cal_webhook(payload: Mapping[str, Any]) -> tuple[str, int]:
             or None
         )
         # Stamp the matching session so follow-up cron skips this buyer.
-        _stamp_session_booking(phone, payload)
+        await _stamp_session_booking(phone, payload)
         await notify.send_booking_email(phone_number=phone, cal_payload=payload)
         return "booking recorded", 200
 

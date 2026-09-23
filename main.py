@@ -656,7 +656,7 @@ async def receive_webhook(request: Request) -> JSONResponse:
                         # Also send a handoff email so a human sees the inbound media now.
                         try:
                             media_from = message.get("from") or ""
-                            media_sess = conversation_store.get_session(media_from) if media_from else None
+                            media_sess = await conversation_store.get_session(media_from) if media_from else None
                             await notify.send_handoff_email(
                                 phone_number=media_from,
                                 reason=(
@@ -944,7 +944,7 @@ async def _instant_handoff_reply(
     when they're free, + (b) the handoff email to admin in parallel.
     Never raises — best-effort.
     """
-    sess = conversation_store.get_session(from_number) if from_number else None
+    sess = await conversation_store.get_session(from_number) if from_number else None
     if booking.is_configured() and sess and not sess.booking_link_shared_at:
         reply = (
             "Of course, let me get back to you on that shortly. If you're "
@@ -1003,6 +1003,9 @@ async def _instant_handoff_reply(
                 sess.handoff_notified = True
     except Exception as exc:
         print(f"[INSTANT HANDOFF EMAIL FAIL] to={from_number!r} error={exc!r}")
+
+    if sess:
+        await conversation_store.save_session(sess)
 
 
 # ---------------- Cal.com booking webhook ----------------
@@ -1107,7 +1110,7 @@ async def followups_scan(request: Request) -> JSONResponse:
                 text=act.message_text,
                 preview_url=False,
             )
-            conversation_store.mark_followup_sent(act.phone_number, act.kind)
+            await conversation_store.mark_followup_sent(act.phone_number, act.kind)
             sent += 1
             results.append({
                 **act.as_dict(),

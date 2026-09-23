@@ -912,7 +912,7 @@ async def handle_incoming_message(
     load_index_if_needed()  # idempotent — loads rag/index.json on first call
 
     # 1. Session state (new-vs-known, partial inquiry, history, turn counter).
-    session = get_session(phone_number)
+    session = await get_session(phone_number)
     safe_text = (inbound_text or "").strip()
 
     # 2. Deterministic handoff: first-tap retrieval + code-side guardrail (PLAN 4.4).
@@ -978,6 +978,7 @@ async def handle_incoming_message(
         # Append to history so the next turn has context of the handoff.
         session.append("user", safe_text)
         session.append("assistant", reply)
+        await conversation_store.save_session(session)
         return reply
 
     # 3. Append the user turn (reference block injected in the LLM call, not history).
@@ -1021,6 +1022,7 @@ async def handle_incoming_message(
             )
             session.handoff_notified = True
         session.append("assistant", fallback)
+        await conversation_store.save_session(session)
         return fallback
 
     # 5. Post-processing: WhatsApp formatting adjustments + Q&A cap nudge.
@@ -1077,6 +1079,7 @@ async def handle_incoming_message(
         session.append("assistant", cleaned)
     else:
         last["content"] = cleaned
+    await conversation_store.save_session(session)
     return cleaned
 
 

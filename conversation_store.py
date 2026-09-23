@@ -1,24 +1,46 @@
-"""In-memory per-phone-number conversation store.
+"""Per-phone-number conversation store, persisted to Upstash Redis.
 
 Scope (per PLAN.md Part 2 / 3.3):
   - ONE ConversationSession per WhatsApp sender phone number (from-number).
   - Stores OpenAI-style chat history ({role, content}[], with tool_calls/tool_id),
     an InquiryDraft (partial quote-request data), booleans for existing partner
     vs new prospect, lead/handoff already-notified flag, and a follow-up tracker.
-  - Module-level _SESSIONS dict — process-local memory only; resets on Render
-    redeploy. Fine for today's single instance. (Per PLAN Part 5.1: revisit at
-    >100K msgs/day — then swap for Redis/Postgres.)
+  - Backed by Upstash Redis (REST API, HTTPS) so sessions survive Render
+    redeploys and idle-sleep restarts — previously (in-process-dict-only)
+    the assistant "forgot" returning buyers and re-introduced itself every
+    time the process restarted, which given free-tier idle-sleep and how
+    often this app gets redeployed, was most of the time. Falls back to
+    process-local memory only if UPSTASH_REDIS_REST_URL/TOKEN aren't set
+    (e.g. local dev without a Redis account), same as before.
+  - _SESSIONS is kept as an in-process read cache: within one process's
+    lifetime, a session already loaded doesn't re-fetch from Redis on every
+    field access, mutations happen on the in-memory object; save_session()
+    is called at defined checkpoints (end of a turn) to flush it back.
   - History is trimmed to ~20 turns (roundtrip = 2) to bound token cost.
+
+Known limitation: all_sessions() / scan_for_followups() / booking.py's
+session lookup only see sessions already loaded into THIS process's
+in-memory cache, not every session ever persisted to Redis. A session from
+a buyer who hasn't messaged since before the last restart won't be picked
+up by the idle-nudge cron or a Cal.com booking-confirmation match until
+they message again (at which point get_session() lazy-loads it from
+Redis). Scanning all Redis keys for these background jobs is future work.
 """
 
 from __future__ import annotations
 
+import json
+import os
 import time
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from typing import Any, Dict, List, Optional
 
+import httpx
 
 MAX_HISTORY_TURNS = 20  # round-trips (each = user + assistant)
+_REDIS_URL = os.getenv("UPSTASH_REDIS_REST_URL", "").rstrip("/")
+_REDIS_TOKEN = os.getenv("UPSTASH_REDIS_REST_TOKEN", "")
+_REDIS_TTL_SECONDS = 60 * 24 * 3600  # 60 days — generous, well past OLD_SESSION_PRUNE_SEC
 
 
 @dataclass
@@ -145,25 +167,103 @@ class ConversationSession:
 _SESSIONS: Dict[str, ConversationSession] = {}
 
 
-def get_session(phone_number: str) -> ConversationSession:
-    """Get-or-create a session keyed by the raw WhatsApp 'from' number string."""
+def _redis_key(phone_number: str) -> str:
+    return f"session:{phone_number}"
+
+
+def _serialize(session: ConversationSession) -> str:
+    return json.dumps(asdict(session))
+
+
+def _deserialize(data: Dict[str, Any]) -> ConversationSession:
+    inquiry_data = data.pop("inquiry", None) or {}
+    inquiry_fields = {f.name for f in fields(InquiryDraft)}
+    inquiry = InquiryDraft(**{k: v for k, v in inquiry_data.items() if k in inquiry_fields})
+    session_fields = {f.name for f in fields(ConversationSession)}
+    kwargs = {k: v for k, v in data.items() if k in session_fields}
+    return ConversationSession(inquiry=inquiry, **kwargs)
+
+
+async def _redis_load(phone_number: str) -> Optional[ConversationSession]:
+    if not (_REDIS_URL and _REDIS_TOKEN):
+        return None
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(
+                f"{_REDIS_URL}/get/{_redis_key(phone_number)}",
+                headers={"Authorization": f"Bearer {_REDIS_TOKEN}"},
+            )
+        resp.raise_for_status()
+        raw = resp.json().get("result")
+        if not raw:
+            return None
+        return _deserialize(json.loads(raw))
+    except Exception as exc:  # pragma: no cover - best-effort, never block a reply
+        print(f"[conversation_store] Redis load failed for {phone_number!r}: {exc!r}")
+        return None
+
+
+async def save_session(session: ConversationSession) -> None:
+    """Flush a session's current state to Redis. Call at the end of a turn
+    (after mutations are done), not after every individual field change —
+    cheap enough to call generously, but doesn't need to be in the hot path
+    of every attribute assignment. Best-effort: never raises, a save
+    failure just means the NEXT successful save catches up the state."""
+    if not (_REDIS_URL and _REDIS_TOKEN):
+        return
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.post(
+                f"{_REDIS_URL}/set/{_redis_key(session.phone_number)}",
+                headers={"Authorization": f"Bearer {_REDIS_TOKEN}"},
+                params={"EX": str(_REDIS_TTL_SECONDS)},
+                content=_serialize(session),
+            )
+        resp.raise_for_status()
+    except Exception as exc:  # pragma: no cover - best-effort, never block a reply
+        print(f"[conversation_store] Redis save failed for {session.phone_number!r}: {exc!r}")
+
+
+async def get_session(phone_number: str) -> ConversationSession:
+    """Get-or-create a session keyed by the raw WhatsApp 'from' number string.
+
+    Checks the in-process cache first (cheap, no network), then Redis (a
+    returning buyer whose session isn't cached in THIS process, e.g. after
+    a redeploy or idle-sleep restart), then creates a fresh session if
+    neither has one. Does NOT persist a freshly-created session by itself,
+    callers save it via save_session() once it actually has state worth
+    keeping."""
     if not phone_number:
         raise ValueError("phone_number is required")
     s = _SESSIONS.get(phone_number)
+    if s is not None:
+        return s
+    s = await _redis_load(phone_number)
     if s is None:
         s = ConversationSession(phone_number=phone_number)
-        _SESSIONS[phone_number] = s
+    _SESSIONS[phone_number] = s
     return s
 
 
 def all_sessions() -> List[ConversationSession]:
-    """Used by the follow-up cron job (Part 3.3) to scan idle sessions."""
+    """Used by the follow-up cron job (Part 3.3) to scan idle sessions.
+    Only sees sessions already loaded into this process's cache — see the
+    module docstring's "Known limitation" note."""
     return list(_SESSIONS.values())
 
 
-def reset_session(phone_number: str) -> None:
+async def reset_session(phone_number: str) -> None:
     """Test helper; also useful if buyer explicitly asks to restart."""
     _SESSIONS.pop(phone_number, None)
+    if _REDIS_URL and _REDIS_TOKEN:
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                await client.post(
+                    f"{_REDIS_URL}/del/{_redis_key(phone_number)}",
+                    headers={"Authorization": f"Bearer {_REDIS_TOKEN}"},
+                )
+        except Exception as exc:  # pragma: no cover - best-effort
+            print(f"[conversation_store] Redis delete failed for {phone_number!r}: {exc!r}")
 
 
 # ------------------- Follow-up / idle scanning (Part 3.3) -------------------
@@ -275,7 +375,7 @@ def scan_for_followups() -> List[FollowupAction]:
     return out
 
 
-def mark_followup_sent(phone_number: str, kind: str) -> None:
+async def mark_followup_sent(phone_number: str, kind: str) -> None:
     """Dedup flag flip — called by main.py after a nudge WhatsApp message is ACK'd.
 
     kind must be 'booking_nudge' or 'inquiry_nudge' (matches FollowupAction.kind)."""
@@ -288,12 +388,14 @@ def mark_followup_sent(phone_number: str, kind: str) -> None:
         s.booking_followup_sent_at = ts
     elif kind == "inquiry_nudge":
         s.inquiry_followup_sent_at = ts
+    await save_session(s)
 
 
 __all__ = [
     "InquiryDraft",
     "ConversationSession",
     "get_session",
+    "save_session",
     "all_sessions",
     "reset_session",
     "MAX_HISTORY_TURNS",
