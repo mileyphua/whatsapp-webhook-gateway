@@ -196,10 +196,7 @@
       <form
         id="human-send-form"
         class="max-w-5xl mx-auto"
-        hx-post="/api/inbox/chats/{{ e164 }}/messages"
-        hx-swap="none"
-        hx-headers='{"Authorization": "Bearer __INBOX_ADMIN_TOKEN_PLACEHOLDER__"}'
-        hx-on::after-request="window.__handleSendResult(event)"
+        novalidate
       >
         <input type="hidden" name="reply_to_wamid" id="form-reply-to" value="{{ last_buyer_wamid }}">
         <div class="rounded-2xl border border-gray-200 focus-within:border-pb-green focus-within:ring-2 focus-within:ring-pb-green/20 transition bg-white shadow-sm">

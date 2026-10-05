@@ -204,6 +204,7 @@
     const btnReload    = document.getElementById("btn-suggestion-reload-inline");
     const textarea     = document.getElementById("human-text-input");
     const sendForm     = document.getElementById("human-send-form");
+    const sendBtn      = document.getElementById("btn-send-submit");
 
     let currentSuggestionText = "";
 
@@ -246,15 +247,9 @@
       }
     }
 
-    // Populate the send form hx-headers with a real bearer. The render-time
-    // placeholder __INBOX_ADMIN_TOKEN_PLACEHOLDER__ can't contain the secret
-    // since it'd be in view-source. HTMX lets us override at submit time.
-    // Instead we listen to submit and convert HTMX form to manual fetch so we
-    // can inject the bearer + session id headers cleanly, append bubble to UI.
+    // The reply form is handled only here (it carries no hx-* attributes, so HTMX never binds to it):
+    // a plain fetch lets us send the session id + auth, show the bubble at once and report real errors.
     if (sendForm) {
-      sendForm.setAttribute("hx-post", "");          // disable HTMX native
-      sendForm.removeAttribute("hx-swap");
-      sendForm.removeAttribute("hx-headers");
       sendForm.addEventListener("submit", async function (e) {
         e.preventDefault();
         if (!textarea) return;
@@ -272,6 +267,12 @@
         appendBubble({ direction: "human", text, held_by: ctx.admin_name, created_at: new Date().toISOString(), _optimistic: true });
         textarea.value = "";
         textarea.focus();
+        // If the send fails, drop the unsent bubble and put the text back so it can be retried.
+        function undoUnsent() {
+          const mine = Array.from(stack.querySelectorAll('[data-optimistic][data-direction="human"]')).reverse().find(function (n) { return n.getAttribute("data-text") === text; });
+          if (mine) mine.remove();
+          if (!textarea.value) { textarea.value = text; autoGrowComposer(); }
+        }
         try {
           const resp = await inboxFetch(`/api/inbox/chats/${encodeURIComponent(E164)}/messages`, {
             method: "POST",
@@ -283,13 +284,15 @@
             if (sugMetaEl) sugMetaEl.textContent = `✓ Human reply sent.`;
           } else {
             // failure → append a small error bubble
+            undoUnsent();
             appendBubble({ direction: "system",
-              text: `[Human send FAILED: ${(data && data.detail) || resp.status || "unknown"}]`,
+              text: `[Not sent: ${(data && (data.detail || data.error)) || ("error " + resp.status)}]`,
               created_at: new Date().toISOString(), _optimistic: true, errored: true });
           }
         } catch (err) {
+          undoUnsent();
           appendBubble({ direction: "system",
-            text: `[Human send FAILED (network): ${err && err.message ? err.message : err}]`,
+            text: `[Not sent (network problem): ${err && err.message ? err.message : err}]`,
             created_at: new Date().toISOString(), _optimistic: true });
         }
       });
