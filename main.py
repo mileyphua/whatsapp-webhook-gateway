@@ -237,6 +237,13 @@ _NONTEXT_MEDIA_REPLY: dict[str, str] = {
 
 
 @app.on_event("startup")
+async def _local_sync_startup() -> None:
+    """A local server hands any not-yet-confirmed sent messages to Render (no-op on Render itself)."""
+    if not _sb.ENABLED and _sb.local_unsynced_count():
+        asyncio.create_task(_sb.sync_pending_local())
+
+
+@app.on_event("startup")
 async def _team_cache_startup() -> None:
     await _refresh_users_cache()
     asyncio.create_task(_users_cache_loop())
@@ -3199,6 +3206,29 @@ async def api_inbox_delete_chat(e164: str, request: Request) -> JSONResponse:
 
 def _iso_utc(ts: float) -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ts))
+
+
+@app.post("/api/inbox/admin/import-messages")
+async def api_inbox_import_messages(request: Request) -> JSONResponse:
+    """Receive messages that a local server already sent through WhatsApp and save them in Supabase, so this
+    (Render) inbox shows them. Admin only; duplicates are ignored by WhatsApp message id."""
+    fail = _requires_admin(request)
+    if fail:
+        return fail
+    if not _sb.ENABLED:
+        return JSONResponse(content={"detail": "Supabase is not configured on this server"}, status_code=503)
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+    rows = body.get("messages") if isinstance(body, dict) else None
+    if not isinstance(rows, list):
+        raise HTTPException(status_code=422, detail="'messages' (list) required")
+    if len(rows) > 200:
+        return JSONResponse(content={"detail": "At most 200 messages per request"}, status_code=413)
+    result = await _sb.import_message_rows([r for r in rows if isinstance(r, dict)])
+    result["skipped"] += len(rows) - len([r for r in rows if isinstance(r, dict)])
+    return JSONResponse(content={"ok": True, **result})
 
 
 @app.post("/api/inbox/admin/import-history")

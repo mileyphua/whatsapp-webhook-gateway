@@ -204,10 +204,10 @@ def describe_inbound(msg: Dict[str, Any]) -> Dict[str, Any]:
 def _store_local(*, e164: str, direction: str, text: str, sent_id: Optional[str] = None, errored: bool = False,
                  error_detail: Optional[str] = None, reply_to_wamid: Optional[str] = None, sent_by: Optional[str] = None,
                  media_type: Optional[str] = None, media_meta: Optional[Dict[str, Any]] = None, media_id: Optional[str] = None,
-                 mime: Optional[str] = None, filename: Optional[str] = None, created_at: Optional[str] = None) -> None:
+                 mime: Optional[str] = None, filename: Optional[str] = None, created_at: Optional[str] = None) -> Optional[Dict[str, Any]]:
     key = _digits(e164)
     if not key:
-        return
+        return None
     meta = media_meta or {}
     rows = _LOCAL_OUTBOUND.setdefault(key, [])
     rows.append({
@@ -218,14 +218,16 @@ def _store_local(*, e164: str, direction: str, text: str, sent_id: Optional[str]
         "created_at": created_at or time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "errored": errored,
         "error_detail": error_detail, "meta_statuses_jsonb": {}, "held_by": sent_by,
     })
+    row = rows[-1]
     del rows[:-_LOCAL_MAX_PER_CHAT]
     _save_local_outbound()
+    return row
 
 
 def _store_local_outbound(*, e164: str, direction: str, text: str, sent_id: Optional[str], errored: bool, error_detail: Optional[str],
                           reply_to_wamid: Optional[str], sent_by: Optional[str], media_type: Optional[str],
-                          media_meta: Optional[Dict[str, Any]]) -> None:
-    _store_local(e164=e164, direction=direction, text=text, sent_id=sent_id, errored=errored, error_detail=error_detail,
+                          media_meta: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    return _store_local(e164=e164, direction=direction, text=text, sent_id=sent_id, errored=errored, error_detail=error_detail,
                  reply_to_wamid=reply_to_wamid, sent_by=sent_by, media_type=media_type, media_meta=media_meta)
 
 
@@ -254,6 +256,112 @@ if not ENABLED:
     _load_local_outbound()
 
 
+# ---------------------------------------------------------------------------------------------------------------
+# Localhost -> Render. A local server has no Supabase key on purpose (it would be the database master key on a
+# laptop). Instead, every message it sends is handed to the Render inbox (logged in as admin with the same
+# INBOX_ADMIN_TOKEN), which saves it in Supabase. Set RENDER_INBOX_URL in the local .env to switch this on.
+# Rows stay in the local file until Render has confirmed them, so a sleeping Render never loses a message.
+# ---------------------------------------------------------------------------------------------------------------
+_RENDER_COOKIE: Optional[str] = None
+_FORWARD_DIRECTIONS = ("human", "ai")
+
+
+def _render_url() -> str:
+    return (os.getenv("RENDER_INBOX_URL") or "").strip().rstrip("/")
+
+
+def _unsynced_rows() -> List[Dict[str, Any]]:
+    if not _render_url():
+        return []
+    return [r for rows in _LOCAL_OUTBOUND.values() for r in rows
+            if r.get("sent_id_from_graph") and r.get("direction") in _FORWARD_DIRECTIONS and r.get("sync") != "done"]
+
+
+def local_unsynced_count() -> int:
+    return len(_unsynced_rows())
+
+
+def _forward_payload(r: Dict[str, Any]) -> Dict[str, Any]:
+    return {"e164": r["e164"], "direction": r["direction"], "text": r.get("text") or "", "wamid": r["sent_id_from_graph"],
+            "created_at": r.get("created_at"), "sent_by": r.get("held_by"), "media_type": r.get("media_type"),
+            "filename": r.get("filename"), "media_id": r.get("media_id"), "mime": r.get("mime"),
+            "errored": bool(r.get("errored")), "error_detail": r.get("error_detail")}
+
+
+async def _forward_to_render(rows: List[Dict[str, Any]]) -> bool:
+    global _RENDER_COOKIE
+    base, token = _render_url(), os.getenv("INBOX_ADMIN_TOKEN") or ""
+    if not (base and token and rows):
+        return False
+    try:
+        async with httpx.AsyncClient(timeout=15.0, follow_redirects=False) as c:
+            for attempt in (1, 2):
+                if not _RENDER_COOKIE:
+                    lr = await c.post(f"{base}/inbox/login", data={"username": "", "password": token})
+                    _RENDER_COOKIE = (lr.cookies.get("inbox_session") if lr.cookies is not None else None)
+                    if not _RENDER_COOKIE:
+                        print("[RENDER-SYNC] login to Render failed (is INBOX_ADMIN_TOKEN the same as on Render?)")
+                        return False
+                r = await c.post(f"{base}/api/inbox/admin/import-messages", json={"messages": [_forward_payload(x) for x in rows]},
+                                 cookies={"inbox_session": _RENDER_COOKIE})
+                if r.status_code == 401 and attempt == 1:
+                    _RENDER_COOKIE = None            # session expired: log in again once
+                    continue
+                if r.status_code == 200:
+                    return True
+                print(f"[RENDER-SYNC] Render answered {r.status_code}; will retry later")
+                return False
+    except Exception as exc:
+        print(f"[RENDER-SYNC] could not reach Render ({type(exc).__name__}); will retry later")
+    return False
+
+
+async def sync_pending_local() -> int:
+    """Send every locally stored message that Render has not confirmed yet. Returns how many were confirmed."""
+    if ENABLED:
+        return 0
+    rows = _unsynced_rows()
+    if not rows or not await _forward_to_render(rows):
+        return 0
+    for r in rows:
+        r["sync"] = "done"
+    _save_local_outbound()
+    return len(rows)
+
+
+_ISO_RE = __import__("re").compile(r"^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:?\d{2})?$")
+
+
+async def import_message_rows(rows: List[Dict[str, Any]]) -> Dict[str, int]:
+    """Save already-sent messages (from a local server) into the messages table. Skips rows without a WhatsApp id
+    (that is what makes re-sending harmless: ignore-duplicates on wamid)."""
+    saved = skipped = 0
+    for r in rows:
+        e164, wamid, direction = _digits(str(r.get("e164") or "")), str(r.get("wamid") or "").strip(), r.get("direction")
+        if not (ENABLED and e164 and wamid) or direction not in ("human", "ai", "system", "buyer"):
+            skipped += 1
+            continue
+        payload = {k: v for k, v in {"sent_by": r.get("sent_by"), "filename": r.get("filename"), "media_id": r.get("media_id"),
+                                     "mime": r.get("mime")}.items() if v}
+        body: Dict[str, Any] = {"wamid": wamid, "sent_id_from_graph": wamid, "direction": direction, "e164": e164,
+                                "text": str(r.get("text") or ""), "errored": bool(r.get("errored")), "error_detail": r.get("error_detail"),
+                                "meta_statuses_jsonb": {}}
+        if r.get("created_at") and _ISO_RE.match(str(r["created_at"])):
+            body["created_at"] = str(r["created_at"])
+        if payload:
+            body["payload_jsonb"] = payload
+        if r.get("media_type") in ("image", "document", "audio", "video"):
+            body["media_type"] = r["media_type"]
+        try:
+            async with _client() as c:
+                await c.post(f"{_REST_BASE}/messages", headers={**_HEADERS, "Prefer": "resolution=ignore-duplicates,return=minimal"}, json=body)
+            saved += 1
+        except Exception as exc:
+            print(f"[supabase_client] import_message_rows failed for {wamid}: {type(exc).__name__}: {exc!s}")
+            skipped += 1
+    return {"saved": saved, "skipped": skipped}
+
+
 async def insert_outbound_message(
     *,
     e164: str,
@@ -271,6 +379,7 @@ async def insert_outbound_message(
     if not ENABLED:
         _store_local_outbound(e164=e164, direction=direction, text=text, sent_id=sent_id_from_graph, errored=errored, error_detail=error_detail,
                               reply_to_wamid=reply_to_wamid, sent_by=sent_by, media_type=media_type, media_meta=media_meta)
+        await sync_pending_local()           # hand it to Render (no-op unless RENDER_INBOX_URL is set)
         return
     if direction not in {"ai", "human", "system"}:
         direction = "system"
