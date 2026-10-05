@@ -14,6 +14,7 @@ load_dotenv()
 
 import booking
 import contact_names
+import media_rules
 import users_store
 import reply_guard
 import feedback_store
@@ -339,6 +340,8 @@ async def _persist_outbound_safe(
     errored: bool = False,
     error_detail: Optional[str] = None,
     sent_by: Optional[str] = None,
+    media_type: Optional[str] = None,
+    media_meta: Optional[Dict[str, Any]] = None,
 ) -> None:
     """Save a message we sent to the inbox database. Awaited by the sender (not a background task that can be
     lost), retried once, and a final failure is written to the log page (audit) so it is never invisible.
@@ -357,6 +360,8 @@ async def _persist_outbound_safe(
                 errored=errored,
                 error_detail=error_detail,
                 sent_by=sent_by,
+                media_type=media_type,
+                media_meta=media_meta,
             ), timeout=4.0)
             return
         except Exception as exc:
@@ -1082,6 +1087,58 @@ async def send_whatsapp_text(
             f"WhatsApp API {r.status_code} (pnid={resolved_pnid}): "
             f"{body.get('error', {}).get('message', r.text)}"
         )
+
+
+def _media_url_for(phone_number_id: str) -> str:
+    return f"https://graph.facebook.com/{API_VERSION}/{phone_number_id}/media"
+
+
+async def send_whatsapp_media(
+    *,
+    to: str,
+    kind: str,                      # "image" | "document"
+    data: bytes,
+    mime: str,
+    filename: str,
+    caption: str = "",
+    reply_to_message_id: Optional[str] = None,
+    sent_by: Optional[str] = None,
+    phone_number_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Send an image/document: upload it to WhatsApp (/media) to get an id, then send a message pointing at that id."""
+    if not ACCESS_TOKEN:
+        raise RuntimeError("WHATSAPP_ACCESS_TOKEN must be set")
+    pnid = phone_number_id or PHONE_NUMBER_ID
+    if not pnid:
+        raise RuntimeError("phone_number_id must be provided or WHATSAPP_PHONE_NUMBER_ID set")
+    auth = {"Authorization": f"Bearer {ACCESS_TOKEN}"}
+    caption = (caption or "").strip()[:1024]
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        up = await client.post(_media_url_for(pnid), headers=auth, data={"messaging_product": "whatsapp", "type": mime},
+                               files={"file": (filename, data, mime)})
+        upj = up.json() if up.content else {}
+        media_id = upj.get("id") if isinstance(upj, dict) else None
+        if not (200 <= up.status_code < 300 and media_id):
+            raise RuntimeError(f"WhatsApp media upload {up.status_code}: {(upj.get('error') or {}).get('message', up.text) if isinstance(upj, dict) else up.text}")
+        obj: Dict[str, Any] = {"id": media_id}
+        if caption:
+            obj["caption"] = caption
+        if kind == "document":
+            obj["filename"] = filename
+        payload: Dict[str, Any] = {"messaging_product": "whatsapp", "recipient_type": "individual", "to": to, "type": kind, kind: obj}
+        if reply_to_message_id:
+            payload["context"] = {"message_id": reply_to_message_id}
+        r = await client.post(_graph_url_for(pnid), json=payload, headers={**auth, "Content-Type": "application/json"})
+        body = r.json() if r.content else {}
+        if 200 <= r.status_code < 300:
+            sent_id = (body.get("messages") or [{}])[0].get("id") if body else None
+            await _persist_outbound_safe(
+                e164=to, direction="human", text=caption or f"📎 {filename}", reply_to_wamid=reply_to_message_id,
+                sent_id_from_graph=sent_id, sent_by=sent_by, media_type=kind,
+                media_meta={"filename": filename, "mime": mime, "size": len(data), "media_id": media_id},
+            )
+            return body
+        raise RuntimeError(f"WhatsApp API {r.status_code} (pnid={pnid}): {(body.get('error') or {}).get('message', r.text)}")
 
 
 async def send_whatsapp_template(
@@ -2564,6 +2621,73 @@ async def api_inbox_thread_messages(e164: str, request: Request) -> JSONResponse
     return JSONResponse(content={"e164": e164, "messages": msgs})
 
 
+async def _claim_gate_for_send(e164: str, my_session_id: str, my_name: str) -> Optional[JSONResponse]:
+    """409 if a colleague holds this chat; otherwise hold it for the sender for 2 minutes so the AI can't race them."""
+    held = await _sb.claim_is_human_held(e164)
+    if held and held.get("session_id") != my_session_id:
+        return JSONResponse(
+            content={
+                "success": False,
+                "detail": (f"Chat claimed by {held.get('held_by') or 'a colleague'}; "
+                           f"release claim or wait for expiry ({held.get('expires_in_secs')}s)"),
+                "held_by": held.get("held_by"),
+                "expires_in_secs": held.get("expires_in_secs"),
+            },
+            status_code=status.HTTP_409_CONFLICT,
+        )
+    if not held:
+        try:
+            await _sb.claim_acquire(e164=e164, held_by=my_name, session_id=my_session_id, ttl_seconds=120)
+        except Exception as exc:
+            print(f"[INBOX] pre-send claim acquire best-effort failed: {exc!r}")
+    return None
+
+
+@app.post("/api/inbox/chats/{e164}/attachments")
+async def api_inbox_send_attachment(e164: str, request: Request) -> JSONResponse:
+    """Send an image or document (multipart: file, optional caption, optional reply_to_wamid) via WhatsApp Cloud API."""
+    fail = _requires_inbox_bearer(request)
+    if fail:
+        return fail
+    # Refuse an oversized body BEFORE reading it (the check runs after auth so strangers can't make us parse uploads).
+    max_body = media_rules.MAX_DOCUMENT_BYTES + 1024 * 1024
+    try:
+        declared = int(request.headers.get("content-length") or 0)
+    except ValueError:
+        declared = 0
+    if declared > max_body:
+        return JSONResponse(content={"detail": f"The file is too large (limit {media_rules.MAX_DOCUMENT_BYTES // (1024 * 1024)} MB)."}, status_code=413)
+    try:
+        form = await request.form()
+    except Exception:
+        return JSONResponse(content={"detail": "Could not read the upload."}, status_code=422)
+    upload = form.get("file")
+    if upload is None or not hasattr(upload, "read"):
+        return JSONResponse(content={"detail": "Choose a file to send."}, status_code=422)
+    data = await upload.read(max_body + 1)
+    try:
+        info = media_rules.validate_upload(getattr(upload, "filename", "") or "", getattr(upload, "content_type", "") or "", data)
+    except media_rules.UploadRejected as exc:
+        return JSONResponse(content={"detail": str(exc)}, status_code=422)
+    caption = str(form.get("caption") or "")
+    reply_to = str(form.get("reply_to_wamid") or "") or None
+
+    my_session_id, my_name = _identity(request)
+    blocked = await _claim_gate_for_send(e164, my_session_id, my_name)
+    if blocked:
+        return blocked
+    try:
+        result = await send_whatsapp_media(to=e164, kind=info["kind"], data=data, mime=info["mime"], filename=info["filename"],
+                                           caption=caption, reply_to_message_id=reply_to, sent_by=my_name)
+    except RuntimeError as exc:
+        return JSONResponse(content={"success": False, "error": str(exc)}, status_code=status.HTTP_502_BAD_GATEWAY)
+    sent_id = (result.get("messages") or [{}])[0].get("id") if result else None
+    await _clear_needs_human(e164)
+    asyncio.create_task(_sb.audit(actor=my_name, action="human_send_media", e164=e164,
+                                  detail={"kind": info["kind"], "filename": info["filename"], "bytes": len(data), "sent_id": sent_id}))
+    return JSONResponse(content={"success": True, "sent_id": sent_id, "kind": info["kind"], "filename": info["filename"]})
+
+
 @app.post("/api/inbox/chats/{e164}/messages")
 async def api_inbox_send_human_message(e164: str, request: Request) -> JSONResponse:
     fail = _requires_inbox_bearer(request)
@@ -2584,34 +2708,9 @@ async def api_inbox_send_human_message(e164: str, request: Request) -> JSONRespo
     # We extract the session_id from a custom header if present (the frontend
     # sets it on each request after login), else treat as generic admin send.
     my_session_id, my_name = _identity(request)
-    held = await _sb.claim_is_human_held(e164)
-    if held and held.get("session_id") != my_session_id:
-        # Someone else holds the claim → 409
-        return JSONResponse(
-            content={
-                "success": False,
-                "detail": (
-                    f"Chat claimed by {held.get('held_by') or 'a colleague'}; "
-                    f"release claim or wait for expiry ({held.get('expires_in_secs')}s)"
-                ),
-                "held_by": held.get("held_by"),
-                "expires_in_secs": held.get("expires_in_secs"),
-            },
-            status_code=status.HTTP_409_CONFLICT,
-        )
-
-    # Optional: pre-acquire claim with my_session_id for 120s if unclaimed
-    # so the AI pipeline definitely won't race us in the next ~2 min.
-    if not held:
-        try:
-            await _sb.claim_acquire(
-                e164=e164,
-                held_by=my_name,
-                session_id=my_session_id,
-                ttl_seconds=120,
-            )
-        except Exception as exc:
-            print(f"[INBOX] pre-send claim acquire best-effort failed: {exc!r}")
+    blocked = await _claim_gate_for_send(e164, my_session_id, my_name)
+    if blocked:
+        return blocked
 
     try:
         result = await send_whatsapp_text(

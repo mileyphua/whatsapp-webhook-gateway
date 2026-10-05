@@ -129,6 +129,8 @@ async def insert_outbound_message(
     error_detail: Optional[str] = None,
     meta_statuses: Optional[Dict[str, Any]] = None,
     sent_by: Optional[str] = None,
+    media_type: Optional[str] = None,                 # "image" | "document" when a file was sent
+    media_meta: Optional[Dict[str, Any]] = None,      # {filename, mime, size, media_id}
 ) -> None:
     if not ENABLED:
         return
@@ -144,8 +146,13 @@ async def insert_outbound_message(
         "error_detail": error_detail,
         "meta_statuses_jsonb": meta_statuses or {},
     }
+    payload: Dict[str, Any] = dict(media_meta or {})
     if sent_by:
-        body["payload_jsonb"] = {"sent_by": sent_by}       # who on the team sent it
+        payload["sent_by"] = sent_by                        # who on the team sent it
+    if payload:
+        body["payload_jsonb"] = payload
+    if media_type:
+        body["media_type"] = media_type
     if sent_id_from_graph:
         # Use Graph message-id as wamid for dedup uniqueness on send side.
         body["wamid"] = sent_id_from_graph
@@ -283,7 +290,10 @@ async def thread_messages(e164: str, limit: int = 200) -> List[Dict[str, Any]]:
         except Exception:
             return []
     for r in rows:   # show who on the team wrote a human message
-        r["held_by"] = (r.get("payload_jsonb") or {}).get("sent_by")
+        pj = r.get("payload_jsonb") or {}
+        r["held_by"] = pj.get("sent_by")
+        if r.get("media_type") and not r.get("filename"):
+            r["filename"] = pj.get("filename")             # shown as the attachment name in the thread
     rows.reverse()  # oldest first for the UI chat bubble stack
     return rows
 
