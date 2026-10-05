@@ -96,15 +96,15 @@
       "redis_scan_available", "followups_configured",
     ];
     const nameMap = {
-      whatsapp_env: "WhatsApp connection",
+      whatsapp_env: "WhatsApp Cloud API Env",
       llm_ready: "LLM (OpenRouter gpt-5-mini)",
-      rag_index_ready: "Knowledge base (RAG)",
-      supabase_inbox: "Supabase (inbox storage)",
-      inbox_login_configured: "Inbox login",
-      booking_configured: "Booking link (Cal.com)",
-      email_configured: "Email hand-off (Gmail relay)",
-      redis_scan_available: "Redis (conversation memory)",
-      followups_configured: "Follow-up job token",
+      rag_index_ready: "RAG Bitumen Index",
+      supabase_inbox: "Supabase Inbox Mirror",
+      inbox_login_configured: "Inbox Admin Login Config",
+      booking_configured: "Cal.com Booking Link",
+      email_configured: "Gmail Relay (Hand-off Emails)",
+      redis_scan_available: "Redis Scan Hydrate Available",
+      followups_configured: "Follow-ups Cron Token Set",
     };
     const keys = Object.keys(checks).length >= 7
       ? order.concat(Object.keys(checks).filter(function (k) { return order.indexOf(k) < 0; }))
@@ -113,7 +113,7 @@
       const raw = checks[k];
       const isBool = typeof raw === "boolean";
       let cls = "ops-check--warn";
-      let val = raw === true ? "Connected" : raw === false ? "Not configured" : escapeHtml(String(raw));
+      let val = raw === true ? "ONLINE" : raw === false ? "OFFLINE" : escapeHtml(String(raw));
       if (isBool) { cls = raw ? "ops-check--ok" : "ops-check--bad"; }
       else if (raw == null) { cls = "ops-check--skeleton"; val = "—"; }
       return '<div class="ops-check ' + cls + '">' +
@@ -168,7 +168,7 @@
     if (box) {
       const pal = { pending: "#f4a261", claimed_temp: "#e9c46a", sent: "#2a9d8f", failed: "#ef476f", cancelled: "#94a3b8" };
       box.innerHTML = Object.keys(counts).filter(function (k) { return !k.startsWith("_"); }).map(function (k) {
-        return '<div class="ops-sc"><span class="ops-sc-name">' + escapeHtml(k) + '</span><span class="ops-sc-num tabnum" style="color:' + (pal[k] || "#111827") + ';">' + counts[k] + '</span></div>';
+        return '<div class="ops-sc"><span class="ops-sc-name">' + escapeHtml(k) + '</span><span class="ops-sc-num tabnum" style="color:' + (pal[k] || "#fff") + ';">' + counts[k] + '</span></div>';
       }).join("") || '<div class="ops-sc"><span class="ops-sc-name">pending</span><span class="ops-sc-num">0</span></div>';
     }
     const tbl = $("#schedule-pending-table > tbody");
@@ -223,7 +223,7 @@
     const wk = $("#weekend-state");
     if (wk) {
       const on = !!sc.environment_followups_weekend_sends_ok;
-      wk.textContent = on ? "on (quiet hours still respected)" : "off (skipped per country weekend)";
+      wk.textContent = on ? "ON · send on weekends, quiet 22-07 only" : "OFF · skip weekends, per-country (default Petrobind B2B)";
       wk.className = "ops-weekend-state " + (on ? "on" : "off");
     }
     const grid = $("#zone-grid");
@@ -240,7 +240,7 @@
         '<div class="ops-zone-head"><b>' + escapeHtml(r.prefix) + '</b><span>UTC' + (r.tz_offset_hours >= 0 ? "+" : "") + String(r.tz_offset_hours) + 'h</span></div>' +
         '<div class="ops-zone-time">' + escapeHtml(String(r.local_now_iso).split(" ")[1] || "—") + '</div>' +
         '<div class="ops-zone-meta">' +
-          '<span class="ops-pill ' + (quiet ? "ops-pill--quiet" : "ops-pill--awake") + '">' + (quiet ? "Quiet hours" : "Working hours") + '</span>' +
+          '<span class="ops-pill ' + (quiet ? "ops-pill--quiet" : "ops-pill--awake") + '">' + (quiet ? "QUIET 22–07" : "WORK HOURS") + '</span>' +
           (isWeekend ? '<span class="ops-pill ops-pill--weekend">' + wdName + " weekend</span>" : '<span class="ops-pill ops-pill--awake">' + wdName + " bizday</span>") +
         '</div>' +
         '<div class="ops-zone-meta" style="margin-top:2px;">' + escapeHtml(r.weekend || "") + '</div>' +
