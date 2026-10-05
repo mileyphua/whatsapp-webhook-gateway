@@ -14,6 +14,8 @@ load_dotenv()
 
 import booking
 import contact_names
+import feedback_store
+import learning
 import conversation_store
 import httpx
 import llm_assistant
@@ -2840,6 +2842,115 @@ async def web_inbox_guide(request: Request) -> Response:
             endpoints.append({"method": m, "path": path, "doc": doc})
     endpoints.sort(key=lambda e: (e["path"], e["method"]))
     return _render_template("guide.html", endpoints=endpoints, **ctx)
+
+
+# ---------------------------------------------------------------------------
+# Reply feedback + learning loop (ratings -> lessons -> approved guidance)
+# ---------------------------------------------------------------------------
+@app.post("/api/inbox/feedback")
+async def api_inbox_add_feedback(request: Request) -> JSONResponse:
+    """Rate an AI reply (up/down) with optional tags, note and a better reply."""
+    fail = _requires_inbox_bearer(request)
+    if fail:
+        return fail
+    try:
+        body: Dict[str, Any] = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+    try:
+        item = await feedback_store.add_feedback(
+            e164=str(body.get("e164") or ""),
+            ai_text=str(body.get("ai_text") or ""),
+            buyer_text=str(body.get("buyer_text") or ""),
+            rating=str(body.get("rating") or ""),
+            tags=body.get("tags") if isinstance(body.get("tags"), list) else [],
+            note=str(body.get("note") or ""),
+            better_reply=str(body.get("better_reply") or ""),
+            actor=INBOX_ADMIN_NAME,
+        )
+    except ValueError as exc:
+        return JSONResponse(content={"detail": str(exc)}, status_code=422)
+    except Exception as exc:
+        print(f"[INBOX] add_feedback failed: {type(exc).__name__}: {exc!s}")
+        return JSONResponse(content={"detail": "could not save feedback"}, status_code=502)
+    learning.invalidate_cache()
+    asyncio.create_task(_sb.audit(actor=INBOX_ADMIN_NAME, action="ai_feedback", e164=item["e164"],
+                                  detail={"rating": item["rating"], "tags": item["tags"], "has_better_reply": bool(item["better_reply"])}))
+    st = await learning.stats()
+    if st["unprocessed"] >= learning.AUTO_LEARN_AFTER:
+        asyncio.create_task(learning.distill())  # creates *pending* lessons only; a human approves them
+    return JSONResponse(content={"ok": True, "feedback": item})
+
+
+@app.get("/api/inbox/feedback")
+async def api_inbox_list_feedback(request: Request) -> JSONResponse:
+    """Ratings given so far (optionally for one chat with ?e164=)."""
+    fail = _requires_inbox_bearer(request)
+    if fail:
+        return fail
+    items = await feedback_store.list_feedback(request.query_params.get("e164") or None)
+    return JSONResponse(content={"feedback": items[:500]})
+
+
+@app.get("/api/inbox/learning")
+async def api_inbox_learning(request: Request) -> JSONResponse:
+    """Learning dashboard data: accuracy trend, lessons, recent feedback."""
+    fail = _requires_inbox_bearer(request)
+    if fail:
+        return fail
+    return JSONResponse(content={
+        "stats": await learning.stats(),
+        "lessons": await feedback_store.list_lessons(),
+        "recent_feedback": (await feedback_store.list_feedback())[:50],
+    })
+
+
+@app.post("/api/inbox/learning/learn")
+async def api_inbox_learning_learn(request: Request) -> JSONResponse:
+    """Turn new feedback into pending lessons now."""
+    fail = _requires_inbox_bearer(request)
+    if fail:
+        return fail
+    return JSONResponse(content=await learning.distill())
+
+
+@app.patch("/api/inbox/learning/lessons/{lesson_id}")
+async def api_inbox_lesson_status(lesson_id: str, request: Request) -> JSONResponse:
+    """Approve (active), disable or re-open (pending) a lesson. Approved lessons guide every reply."""
+    fail = _requires_inbox_bearer(request)
+    if fail:
+        return fail
+    try:
+        body: Dict[str, Any] = await request.json()
+        item = await feedback_store.set_lesson_status(lesson_id, str(body.get("status") or ""))
+    except ValueError:
+        return JSONResponse(content={"detail": "status must be pending, active or disabled"}, status_code=422)
+    except Exception:
+        return JSONResponse(content={"detail": "bad request"}, status_code=400)
+    if item is None:
+        return JSONResponse(content={"detail": "lesson not found"}, status_code=404)
+    learning.invalidate_cache()
+    asyncio.create_task(_sb.audit(actor=INBOX_ADMIN_NAME, action="lesson_" + item["status"], detail={"lesson": item["text"], "kind": item["kind"]}))
+    return JSONResponse(content={"ok": True, "lesson": item})
+
+
+@app.delete("/api/inbox/learning/lessons/{lesson_id}")
+async def api_inbox_lesson_delete(lesson_id: str, request: Request) -> JSONResponse:
+    """Delete a lesson permanently."""
+    fail = _requires_inbox_bearer(request)
+    if fail:
+        return fail
+    await feedback_store.delete_lesson(lesson_id)
+    learning.invalidate_cache()
+    return JSONResponse(content={"ok": True})
+
+
+@app.get("/inbox/learning")
+async def web_inbox_learning(request: Request) -> Response:
+    resp, ctx = _logged_in_page_ctx(request)
+    if resp:
+        return resp
+    return _render_template("learning.html", **ctx)
 
 
 @app.get("/api/inbox/chats/{e164}/suggestion")

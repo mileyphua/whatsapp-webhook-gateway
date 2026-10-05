@@ -37,6 +37,7 @@ Supabase and Redis are optional/fire-and-forget: if either is down, WhatsApp rep
 | Page | URL | Purpose |
 |---|---|---|
 | Inbox | `/inbox/chats` | One row per number; search; ⋮ → name / delete; thread opens on the right; AI \| Human switch |
+| Learning | `/inbox/learning` | Rate AI replies (👍/👎 in a chat) → lessons you approve → injected into every reply; approval-rate trend |
 | Logs | `/inbox/logs` | Audit trail (logins, takeovers, replies, **chat deletions with transcript copy**, history imports) |
 | Architecture | `/inbox/architecture` | This diagram as a clickable node graph; each node links to the page that shows it |
 | Ops console | `/inbox/admin` | Live health, Redis, claims, schedules, template cache; **Import chat history** (Redis → Supabase) |
@@ -44,3 +45,13 @@ Supabase and Redis are optional/fire-and-forget: if either is down, WhatsApp rep
 | Health | `/health` | Dependency status JSON |
 
 Delete flow: Inbox ⋮ → Delete chat → confirm → `DELETE /api/inbox/chats/{e164}` removes Supabase rows (messages, claim, session), the Redis session and the reference name, then writes a `chat_delete` event (who, when, transcript) to `audit_events`, visible in Logs.
+
+## How the assistant improves
+
+1. **Rate** – under each AI message: 👍, or 👎 with tags, a note and an optional better reply (`POST /api/inbox/feedback`, stored in Redis).
+2. **Learn** – `learning.distill()` turns unprocessed ratings into short *pending* lessons (auto-runs after 5 new ratings, or press the button). Lessons are about tone/length/when-to-hand-over only; factual complaints become "Knowledge base to check" items and never enter the prompt.
+3. **Approve** – a human approves a lesson on `/inbox/learning`; only approved lessons (plus up to 3 approved example replies) are added to the system prompt by `learning.guidance_block()`.
+4. **Think before replying** – `learning.plan_reply()` makes a short private plan (intent, needs-human, sentences to avoid) before the reply is written; an explicit request for a person (`reply_guard.asks_for_human`) flags the chat for the human queue.
+5. **Don't repeat** – `reply_guard.strip_repeats()` removes sentences already sent earlier in the chat.
+
+The model is not fine-tuned: improvement comes from approved guidance and examples, and is measured by the approval rate.

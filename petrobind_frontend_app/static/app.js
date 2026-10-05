@@ -378,6 +378,7 @@
       wrap.appendChild(bubble);
       stack.appendChild(wrap);
       stack.scrollTop = stack.scrollHeight;
+      if (direction === "ai") decorateFeedback(wrap);
     }
 
     function escapeHtml(s) {
@@ -436,6 +437,87 @@
       } catch (_) { /* next tick retries */ }
     }
     setInterval(function () { if (!document.hidden) pollThread(); }, 3000);
+
+
+    // ---------- Feedback on AI replies: 👍 / 👎 (+ tags, note, better reply) feeds the Learning page ----------
+    const FB_TAGS = ["Inaccurate", "Too long", "Sounds like a bot", "Repeats itself", "Wrong tone", "Should have handed to a human"];
+    const fbState = {};   // ai_text -> "up" | "down"
+    function mk(tag, cls, text) { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; }
+    function precedingBuyerText(wrap) {
+      let n = wrap.previousElementSibling;
+      while (n) {
+        if (n.getAttribute && n.getAttribute("data-direction") === "buyer") { const t = n.querySelector(".whitespace-pre-wrap"); return t ? t.textContent : ""; }
+        n = n.previousElementSibling;
+      }
+      return "";
+    }
+    function paintFeedback(wrap, rating) {
+      const st = wrap.querySelector(".fb-status"), up = wrap.querySelector(".fb-up"), dn = wrap.querySelector(".fb-down");
+      if (!st) return;
+      up.setAttribute("aria-pressed", String(rating === "up")); dn.setAttribute("aria-pressed", String(rating === "down"));
+      up.className = "fb-up px-1.5 py-0.5 rounded " + (rating === "up" ? "bg-green-600 text-white" : "hover:bg-black/5");
+      dn.className = "fb-down px-1.5 py-0.5 rounded " + (rating === "down" ? "bg-red-600 text-white" : "hover:bg-black/5");
+      st.textContent = rating === "up" ? "Marked good" : rating === "down" ? "Marked for improvement" : "";
+    }
+    async function sendFeedback(wrap, payload) {
+      const text = wrap.querySelector(".whitespace-pre-wrap").textContent;
+      const body = Object.assign({ e164: E164, ai_text: text, buyer_text: precedingBuyerText(wrap) }, payload);
+      const st = wrap.querySelector(".fb-status");
+      try {
+        const r = await inboxFetch("/api/inbox/feedback", { method: "POST", body: body });
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        fbState[text] = payload.rating; paintFeedback(wrap, payload.rating); return true;
+      } catch (e) { if (st) st.textContent = "Could not save feedback"; return false; }
+    }
+    function openFeedbackForm(wrap) {
+      if (wrap.querySelector(".fb-form")) return;
+      const form = mk("div", "fb-form mt-2 pt-2 border-t border-black/10 space-y-1.5");
+      form.appendChild(mk("div", "text-[11px] font-semibold", "What was wrong?"));
+      const chips = mk("div", "flex flex-wrap gap-1");
+      const picked = new Set();
+      FB_TAGS.forEach(function (t) {
+        const b = mk("button", "px-2 py-0.5 rounded-full border border-black/20 text-[11px] bg-white/70", t); b.type = "button"; b.setAttribute("aria-pressed", "false");
+        b.addEventListener("click", function () { if (picked.has(t)) { picked.delete(t); b.setAttribute("aria-pressed", "false"); b.className = "px-2 py-0.5 rounded-full border border-black/20 text-[11px] bg-white/70"; } else { picked.add(t); b.setAttribute("aria-pressed", "true"); b.className = "px-2 py-0.5 rounded-full border border-red-600 text-[11px] bg-red-600 text-white"; } });
+        chips.appendChild(b);
+      });
+      const note = mk("textarea", "w-full rounded border border-black/20 bg-white px-2 py-1 text-xs"); note.rows = 2; note.maxLength = 1000; note.placeholder = "Tell it what to do differently (optional)"; note.setAttribute("aria-label", "What was wrong");
+      const better = mk("textarea", "w-full rounded border border-black/20 bg-white px-2 py-1 text-xs"); better.rows = 2; better.maxLength = 1500; better.placeholder = "How would you have replied? (optional, the best way to teach it)"; better.setAttribute("aria-label", "A better reply");
+      const row = mk("div", "flex justify-end gap-2");
+      const cancel = mk("button", "px-2.5 py-1 rounded border border-black/20 text-xs bg-white", "Cancel"); cancel.type = "button";
+      const save = mk("button", "px-2.5 py-1 rounded bg-red-600 text-white text-xs font-medium", "Send feedback"); save.type = "button";
+      cancel.addEventListener("click", function () { form.remove(); if (!fbState[wrap.querySelector(".whitespace-pre-wrap").textContent]) paintFeedback(wrap, null); });
+      save.addEventListener("click", async function () {
+        save.disabled = true;
+        const ok = await sendFeedback(wrap, { rating: "down", tags: Array.from(picked), note: note.value.trim(), better_reply: better.value.trim() });
+        if (ok) form.remove(); else save.disabled = false;
+      });
+      row.appendChild(cancel); row.appendChild(save);
+      [chips, note, better, row].forEach(function (n) { form.appendChild(n); });
+      wrap.querySelector(".message-bubble").appendChild(form);
+      note.focus();
+    }
+    function decorateFeedback(wrap) {
+      if (!wrap || wrap.querySelector(".fb-row") || wrap.getAttribute("data-direction") !== "ai") return;
+      const bubble = wrap.querySelector(".message-bubble"), textEl = wrap.querySelector(".whitespace-pre-wrap");
+      if (!bubble || !textEl || !textEl.textContent.trim()) return;
+      const row = mk("div", "fb-row mt-1.5 flex items-center gap-1 text-xs text-gray-600");
+      const up = mk("button", "fb-up px-1.5 py-0.5 rounded hover:bg-black/5", "👍"); up.type = "button"; up.setAttribute("aria-label", "Good reply"); up.title = "Good reply";
+      const dn = mk("button", "fb-down px-1.5 py-0.5 rounded hover:bg-black/5", "👎"); dn.type = "button"; dn.setAttribute("aria-label", "Needs improvement"); dn.title = "Needs improvement: tell it why";
+      const st = mk("span", "fb-status ml-1 text-[11px]"); st.setAttribute("aria-live", "polite");
+      up.addEventListener("click", function () { const f = wrap.querySelector(".fb-form"); if (f) f.remove(); sendFeedback(wrap, { rating: "up", tags: [], note: "", better_reply: "" }); });
+      dn.addEventListener("click", function () { openFeedbackForm(wrap); });
+      row.appendChild(mk("span", "text-[11px] text-gray-500 mr-1", "Was this reply good?")); row.appendChild(up); row.appendChild(dn); row.appendChild(st);
+      bubble.appendChild(row);
+      if (fbState[textEl.textContent]) paintFeedback(wrap, fbState[textEl.textContent]);
+    }
+    function decorateAllFeedback() { stack.querySelectorAll('[data-direction="ai"]').forEach(decorateFeedback); }
+    (async function loadFeedbackState() {
+      try {
+        const r = await inboxFetch("/api/inbox/feedback?e164=" + encodeURIComponent(E164));
+        if (r.ok) { (await r.json()).feedback.forEach(function (f) { fbState[f.ai_text] = f.rating; }); }
+      } catch (_) {}
+      decorateAllFeedback();
+    })();
 
     // ---------- FR10: 24h window banner + send form gate ----------
     let windowPollTimer = null;
@@ -903,5 +985,5 @@
   };
 
   // Make fetchWindow available globally for any page that needs it
-  window.fetchWindow = fetchWindow;
+  if (typeof fetchWindow === "function") window.fetchWindow = fetchWindow;
 })();

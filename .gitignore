@@ -38,3 +38,4 @@ htmlcov/
 *.swo
 .contact_names.json
 .audit_log.jsonl
+.ai_learning.json

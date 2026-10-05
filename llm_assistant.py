@@ -35,6 +35,8 @@ except Exception:  # pragma: no cover - dotenv is optional on Render with env in
     pass
 
 import booking
+import learning
+import reply_guard
 import conversation_store
 import notify
 from conversation_store import ConversationSession, get_session
@@ -811,6 +813,7 @@ async def _single_turn_chat(
     session: ConversationSession,
     references: List[RetrievedChunk],
     draft_only: bool = False,
+    extra_system: Optional[str] = None,
 ) -> tuple[Optional[str], set[str]]:
     """Run one LLM chat-completion + tool-execution loop. Returns (final
     assistant reply text for WhatsApp, or None if we should send a
@@ -836,6 +839,8 @@ async def _single_turn_chat(
     }
     messages.append(ref_block)
     messages.append({"role": "system", "content": _format_buyer_memory(session)})
+    if extra_system:
+        messages.append({"role": "system", "content": extra_system})
     messages.extend(session.history)
 
     model = os.getenv("OPENROUTER_MODEL") or OPENROUTER_MODEL_DEFAULT
@@ -1076,7 +1081,29 @@ async def handle_incoming_message(
     # 3. Append the user turn (reference block injected in the LLM call, not history).
     session.append("user", safe_text)
 
-    # 4. Run the LLM turn with tool-calling loop.
+    # 4. Think first, then answer: team-approved guidance + a short private plan
+    #    (what the buyer wants, is a human needed, what not to repeat).
+    extra_system: Optional[str] = None
+    try:
+        guidance = await learning.guidance_block()
+        plan = await learning.plan_reply(
+            buyer_text=safe_text,
+            recent=session.history[-9:-1],
+            ref_titles=[getattr(c, "title", "") for c in references],
+        )
+        extra_system = guidance
+        if plan:
+            extra_system += "\n\n" + learning.plan_note(plan)
+            if plan.get("needs_human") and not draft_only:
+                _flag_needs_human(session, str(plan.get("human_reason") or "Planner: a human is needed")[:300])
+        if reply_guard.asks_for_human(safe_text):
+            extra_system += "\n\nThe buyer asked for a person. Tell them, briefly and naturally, that a colleague will pick this up on this chat."
+            if not draft_only:
+                _flag_needs_human(session, f"Buyer asked for a human: {safe_text[:150]}")
+    except Exception as exc:
+        print(f"[llm] planning/guidance skipped: {type(exc).__name__}: {exc!s}")
+
+    # 4b. Run the LLM turn with tool-calling loop.
     text = None
     called_tools: set[str] = set()
     try:
@@ -1084,6 +1111,7 @@ async def handle_incoming_message(
             session=session,
             references=references,
             draft_only=draft_only,
+            extra_system=extra_system,
         )
     except Exception as exc:
         print(f"[llm] turn exception: {exc!r}")
@@ -1127,6 +1155,13 @@ async def handle_incoming_message(
     # 5. Post-processing: WhatsApp formatting adjustments + Q&A cap nudge.
     cleaned = _clean_for_whatsapp(text)
     cleaned = _fix_placeholder_link(cleaned)
+
+    # Never repeat a sentence already sent earlier in this chat (reads like a template).
+    try:
+        last_user_idx = max((k for k, m in enumerate(session.history) if m.get("role") == "user"), default=0)
+        cleaned = reply_guard.strip_repeats(cleaned, reply_guard.previous_assistant_replies(session.history[:last_user_idx]))
+    except Exception as exc:
+        print(f"[llm] repetition guard skipped: {type(exc).__name__}: {exc!s}")
 
     # Safety net: the model sometimes promises an escalation in its reply
     # text ("I'll arrange a discussion with our senior sales team...")

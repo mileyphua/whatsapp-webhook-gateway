@@ -1,0 +1,135 @@
+{% extends "base.html" %}
+{% block title %}Learning — Petrobind Inbox{% endblock %}
+{% block content %}
+<main class="flex-1 overflow-y-auto bg-gray-50">
+  <div class="max-w-6xl mx-auto px-4 md:px-8 py-6 space-y-6">
+
+    <header class="flex flex-wrap items-end justify-between gap-3">
+      <div>
+        <h1 class="text-xl font-semibold">Learning</h1>
+        <p class="text-sm text-gray-600 max-w-3xl">Rate the AI's replies with 👍 / 👎 inside any chat. Your feedback becomes short lessons about <em>how</em> to reply. Once you approve a lesson, it guides every future reply. Facts always come from the knowledge base, never from lessons.</p>
+      </div>
+      <div class="flex items-center gap-2">
+        <span id="learn-note" class="text-xs text-gray-500" aria-live="polite"></span>
+        <button id="learn-btn" type="button" class="px-4 py-2 rounded-md bg-pb-navy text-white text-sm font-medium">Learn from new feedback</button>
+      </div>
+    </header>
+
+    <section aria-label="Summary" class="grid gap-3 grid-cols-2 md:grid-cols-5" id="stat-cards"></section>
+
+    <section class="bg-white border border-gray-200 rounded-lg p-4" aria-labelledby="h-trend">
+      <h2 id="h-trend" class="text-sm font-semibold mb-1">Reply quality over time</h2>
+      <p class="text-xs text-gray-500 mb-3">Share of rated replies marked good, per day (last 14 days). It should climb as approved lessons take effect.</p>
+      <div id="trend" class="flex items-end gap-2 h-32" role="img" aria-label="Daily approval rate"></div>
+    </section>
+
+    <section aria-labelledby="h-lessons">
+      <h2 id="h-lessons" class="text-sm font-semibold mb-2">Lessons</h2>
+      <div id="lessons" class="space-y-2"></div>
+    </section>
+
+    <section aria-labelledby="h-recent">
+      <h2 id="h-recent" class="text-sm font-semibold mb-2">Recent feedback</h2>
+      <div class="bg-white border border-gray-200 rounded-lg overflow-x-auto">
+        <table class="min-w-full text-sm">
+          <thead class="bg-gray-50 text-left text-xs uppercase tracking-wide text-gray-500"><tr><th class="px-3 py-2">When</th><th class="px-3 py-2">Chat</th><th class="px-3 py-2">Rating</th><th class="px-3 py-2">Buyer said</th><th class="px-3 py-2">AI replied</th><th class="px-3 py-2">Your feedback</th></tr></thead>
+          <tbody id="recent"></tbody>
+        </table>
+      </div>
+    </section>
+  </div>
+</main>
+
+<script>
+(function () {
+  var $ = function (id) { return document.getElementById(id); };
+  function el(tag, cls, text) { var e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; }
+  var KIND = { style: ["Style", "bg-blue-100 text-blue-800"], behavior: ["Behaviour", "bg-indigo-100 text-indigo-800"], knowledge: ["Knowledge base to check", "bg-amber-100 text-amber-800"] };
+
+  function cards(s) {
+    var box = $("stat-cards"); box.textContent = "";
+    [["Approval rate", s.approval_rate == null ? "—" : s.approval_rate + "%"], ["Rated replies", s.total], ["Needs improvement", s.down],
+     ["Active lessons", s.lessons_active], ["Waiting for approval", s.lessons_pending]].forEach(function (c) {
+      var d = el("div", "bg-white border border-gray-200 rounded-lg p-3"); d.appendChild(el("div", "text-xs text-gray-500", c[0])); d.appendChild(el("div", "text-2xl font-semibold tabular-nums", String(c[1]))); box.appendChild(d);
+    });
+    $("learn-btn").textContent = s.unprocessed ? "Learn from " + s.unprocessed + " new rating" + (s.unprocessed === 1 ? "" : "s") : "Learn from new feedback";
+  }
+
+  function trend(daily) {
+    var box = $("trend"); box.textContent = "";
+    if (!daily.length) { box.className = "flex items-center justify-center h-32 text-sm text-gray-500"; box.textContent = "No ratings yet. Open a chat and rate an AI reply."; return; }
+    box.className = "flex items-end gap-2 h-32";
+    daily.forEach(function (d) {
+      var tot = d.up + d.down, pct = tot ? Math.round(100 * d.up / tot) : 0, col = el("div", "flex-1 flex flex-col items-center justify-end h-full min-w-0");
+      col.appendChild(el("div", "text-[10px] text-gray-500", pct + "%"));
+      var bar = el("div", "w-full rounded-t " + (pct >= 70 ? "bg-green-500" : pct >= 40 ? "bg-amber-400" : "bg-red-400")); bar.style.height = Math.max(4, pct) + "%";
+      bar.title = d.date + ": " + d.up + " good, " + d.down + " to improve"; col.appendChild(bar);
+      col.appendChild(el("div", "text-[10px] text-gray-400 mt-1", d.date.slice(5))); box.appendChild(col);
+    });
+  }
+
+  function act(id, method, body) {
+    return fetch("/api/inbox/learning/lessons/" + id, { method: method, credentials: "same-origin", headers: { "Content-Type": "application/json" }, body: body ? JSON.stringify(body) : undefined }).then(load);
+  }
+  function btn(label, cls, fn) { var b = el("button", "px-3 py-1 rounded-md text-xs font-medium " + cls, label); b.type = "button"; b.addEventListener("click", fn); return b; }
+
+  function lessons(list) {
+    var box = $("lessons"); box.textContent = "";
+    if (!list.length) { box.appendChild(el("div", "bg-white border border-dashed border-gray-300 rounded-lg p-6 text-sm text-gray-500 text-center", "No lessons yet. Rate a few replies, then press “Learn from new feedback”.")); return; }
+    var order = { pending: 0, active: 1, disabled: 2 };
+    list.sort(function (a, b) { return order[a.status] - order[b.status] || b.ts - a.ts; });
+    list.forEach(function (l) {
+      var k = KIND[l.kind] || KIND.behavior, card = el("div", "bg-white border rounded-lg p-3 flex flex-wrap items-start justify-between gap-3 " + (l.status === "pending" ? "border-amber-300" : "border-gray-200"));
+      var left = el("div", "min-w-0 flex-1");
+      var tags = el("div", "flex items-center gap-2 mb-1");
+      tags.appendChild(el("span", "px-2 py-0.5 rounded-full text-[11px] font-medium " + k[1], k[0]));
+      tags.appendChild(el("span", "text-[11px] font-semibold " + (l.status === "active" ? "text-green-700" : l.status === "pending" ? "text-amber-700" : "text-gray-500"), l.status === "active" ? "In use" : l.status === "pending" ? "Waiting for your approval" : "Off"));
+      left.appendChild(tags); left.appendChild(el("div", "text-sm text-gray-900", l.text)); card.appendChild(left);
+      var right = el("div", "flex items-center gap-2");
+      if (l.kind === "knowledge") {
+        if (l.status !== "disabled") right.appendChild(btn("Mark as done", "border border-gray-300 hover:bg-gray-50", function () { act(l.id, "PATCH", { status: "disabled" }); }));
+      } else if (l.status === "pending") {
+        right.appendChild(btn("Approve", "bg-green-600 text-white hover:bg-green-700", function () { act(l.id, "PATCH", { status: "active" }); }));
+        right.appendChild(btn("Reject", "border border-gray-300 hover:bg-gray-50", function () { act(l.id, "PATCH", { status: "disabled" }); }));
+      } else if (l.status === "active") {
+        right.appendChild(btn("Turn off", "border border-gray-300 hover:bg-gray-50", function () { act(l.id, "PATCH", { status: "disabled" }); }));
+      } else {
+        right.appendChild(btn("Turn on", "border border-gray-300 hover:bg-gray-50", function () { act(l.id, "PATCH", { status: "active" }); }));
+      }
+      right.appendChild(btn("Delete", "text-red-700 hover:bg-red-50", function () { act(l.id, "DELETE"); }));
+      card.appendChild(right); box.appendChild(card);
+    });
+  }
+
+  function recent(list) {
+    var body = $("recent"); body.textContent = "";
+    if (!list.length) { var tr = el("tr"), td = el("td", "px-3 py-6 text-center text-gray-500", "No feedback yet."); td.colSpan = 6; tr.appendChild(td); body.appendChild(tr); return; }
+    list.forEach(function (f) {
+      var tr = el("tr", "border-t border-gray-100 align-top");
+      tr.appendChild(el("td", "px-3 py-2 text-xs font-mono whitespace-nowrap", new Date(f.ts * 1000).toISOString().replace("T", " ").slice(0, 16)));
+      var a = el("td", "px-3 py-2"), link = el("a", "text-pb-navy underline text-xs font-mono", f.e164); link.href = "/inbox/chats#" + encodeURIComponent(f.e164); a.appendChild(link); tr.appendChild(a);
+      tr.appendChild(el("td", "px-3 py-2 font-semibold " + (f.rating === "up" ? "text-green-700" : "text-red-700"), f.rating === "up" ? "👍 Good" : "👎 Improve"));
+      tr.appendChild(el("td", "px-3 py-2 max-w-xs text-gray-700", f.buyer_text || "—"));
+      tr.appendChild(el("td", "px-3 py-2 max-w-xs text-gray-700", f.ai_text));
+      var fb = [f.tags && f.tags.length ? f.tags.join(", ") : "", f.note, f.better_reply ? "Better: " + f.better_reply : ""].filter(Boolean).join(" · ");
+      tr.appendChild(el("td", "px-3 py-2 max-w-xs text-gray-700", fb || "—")); body.appendChild(tr);
+    });
+  }
+
+  function load() {
+    return fetch("/api/inbox/learning", { credentials: "same-origin" }).then(function (r) { return r.ok ? r.json() : null; }).then(function (j) {
+      if (!j) { $("learn-note").textContent = "Could not load (are you logged in?)"; return; }
+      cards(j.stats); trend(j.stats.daily); lessons(j.lessons); recent(j.recent_feedback);
+    });
+  }
+  $("learn-btn").addEventListener("click", function () {
+    var b = this; b.disabled = true; $("learn-note").textContent = "Reading your feedback…";
+    fetch("/api/inbox/learning/learn", { method: "POST", credentials: "same-origin" }).then(function (r) { return r.json(); }).then(function (j) {
+      $("learn-note").textContent = j.note || (j.new_lessons ? j.new_lessons + " new lesson" + (j.new_lessons === 1 ? "" : "s") + " to review below." : "Nothing new to learn from this feedback.");
+      return load();
+    }).catch(function () { $("learn-note").textContent = "Something went wrong. Try again."; }).finally(function () { b.disabled = false; });
+  });
+  load(); setInterval(function () { if (!document.hidden) load(); }, 15000);
+})();
+</script>
+{% endblock %}
