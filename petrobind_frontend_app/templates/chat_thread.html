@@ -4,7 +4,7 @@
 <div class="flex-1 flex overflow-hidden">
   <div id="claim-banner" class="hidden fixed top-14 left-0 right-0 z-20 px-6 py-2.5 bg-red-600 text-white text-sm font-medium shadow-md flex items-center justify-between">
     <div id="claim-banner-text">
-      ⚠ Chat CLAIMED by another admin. You can read but not send.
+      ⚠ Someone else is replying to this chat. You can read but not send.
     </div>
     <button id="claim-banner-dismiss" class="ml-4 text-white/80 hover:text-white">&times;</button>
   </div>
@@ -62,6 +62,7 @@
           <span id="mode-label">AI replying</span>
         </button>
         <div id="claim-status-text" class="hidden sm:block max-w-[18rem] text-right text-[11px] text-gray-500" aria-live="polite"></div>
+        <button type="button" id="release-lock" hidden class="text-[11px] text-red-700 underline hover:text-red-900">Release their lock (admin)</button>
       </div>
     </div>
 
@@ -270,6 +271,7 @@
     e164: {{ e164 | tojson }},
     session_id: {{ session_id | tojson }},
     admin_name: {{ admin_name | tojson }},
+    is_admin: {{ (is_admin | default(false)) | tojson }},
     last_buyer_wamid: {{ last_buyer_wamid | tojson }},
     supa_url: {{ supa_url | tojson }},
     supa_anon_key: {{ supa_anon_key | tojson }},

@@ -2577,7 +2577,7 @@ async def api_inbox_send_human_message(e164: str, request: Request) -> JSONRespo
             content={
                 "success": False,
                 "detail": (
-                    f"Chat claimed by {held.get('held_by') or 'another admin'}; "
+                    f"Chat claimed by {held.get('held_by') or 'a colleague'}; "
                     f"release claim or wait for expiry ({held.get('expires_in_secs')}s)"
                 ),
                 "held_by": held.get("held_by"),
@@ -3621,7 +3621,7 @@ async def api_inbox_new_conversation(request: Request) -> JSONResponse:
                     "success": False,
                     "inside_24h_window": inside_24h,
                     "detail": (
-                        f"Chat claimed by {held.get('held_by') or 'another admin'}"
+                        f"Chat claimed by {held.get('held_by') or 'a colleague'}"
                     ),
                     "held_by": held.get("held_by"),
                 },

@@ -37,6 +37,7 @@ Supabase and Redis are optional/fire-and-forget: if either is down, WhatsApp rep
 | Page | URL | Purpose |
 |---|---|---|
 | Inbox | `/inbox/chats` | One row per number; search; ⋮ → name / delete; thread opens on the right; AI \| Human switch |
+| Team | `/inbox/team` | Admin adds team members (username + password). Members see only the Inbox and can reply; their name is on the lock and on their messages |
 | Skills & learning | `/inbox/learning` | The AI's skills (when to use / what to do); rate replies (👍/👎 in a chat) → new or improved skills you approve; approval-rate trend |
 | Logs | `/inbox/logs` | Audit trail (logins, takeovers, replies, **chat deletions with transcript copy**, history imports) |
 | Architecture | `/inbox/architecture` | This diagram as a clickable node graph; each node links to the page that shows it |
@@ -57,3 +58,10 @@ The assistant works from a library of **skills**, modelled on Claude skills (`SK
 5. **Don't repeat** – `reply_guard.strip_repeats()` removes sentences already sent earlier in the chat.
 
 The model is not fine-tuned: improvement comes from approved skills and examples, measured by the approval rate. The ratings and "better replies" also form the dataset a future fine-tune would need.
+
+## Accounts and permissions
+
+- **One admin**: logs in with the `INBOX_ADMIN_TOKEN` password (username empty or `admin`). Sees every page.
+- **Team members** (`users_store.py`, Redis hash `inbox_users`; salted PBKDF2 hashes): added by the admin on `/inbox/team`, log in with username + password, see **only the Inbox** and can read, reply, hold a chat, rate AI replies and rename numbers. Admin-only APIs return 403 for them (`_requires_admin`), admin pages redirect them to the Inbox.
+- **Sessions** are signed cookies carrying `role` and `user`; a disabled/removed member is cut off immediately. Logins are throttled (5 failures per IP+account → 5 min).
+- **Locks** (`inbox_claims`) belong to a person (`u:<username>`), show their display name, and the admin can force-release. Human messages store `sent_by` so the thread shows who wrote them.

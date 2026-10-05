@@ -116,9 +116,11 @@
     }
     function applyMode() {
       paintToggle();
+      const rel = document.getElementById("release-lock");
+      if (rel) rel.hidden = !(lockedBy && ctx.is_admin);       // only the admin can break someone's lock
       if (lockedBy) {
         setClaimBannerVisible(true, lockedBy);
-        setClaimStatus(`Another admin (${lockedBy.held_by || "unknown"}) is replying. Read-only.`, { sendEnabled: false });
+        setClaimStatus(`${lockedBy.held_by || "A colleague"} is replying to this chat. Read-only.`, { sendEnabled: false });
       } else if (humanMode) {
         setClaimBannerVisible(false);
         setClaimStatus("You are replying. AI is paused for this chat. Switch back to AI when done.", { sendEnabled: true });
@@ -152,6 +154,11 @@
       humanMode = false; applyMode();
     }
     if (modeSwitch) modeSwitch.addEventListener("click", function () { if (humanMode) goAI(); else goHuman(); });
+    const releaseLockBtn = document.getElementById("release-lock");
+    if (releaseLockBtn) releaseLockBtn.addEventListener("click", async function () {
+      try { await inboxFetch(`/api/inbox/chats/${encodeURIComponent(E164)}/claim?force=1`, { method: "DELETE" }); } catch (_) {}
+      await loadMode();
+    });
     const bannerDismissBtn = document.getElementById("claim-banner-dismiss");
     if (bannerDismissBtn) bannerDismissBtn.addEventListener("click", () => setClaimBannerVisible(false));
 
@@ -169,11 +176,11 @@
       if (el) el.textContent = text;
       if (sendBtn) {
         sendBtn.disabled = !sendEnabled;
-        sendBtn.title = sendEnabled ? "" : (typeEnabled ? "Starting your reply pauses the AI for this chat." : "Another admin is replying.");
+        sendBtn.title = sendEnabled ? "" : (typeEnabled ? "Starting your reply pauses the AI for this chat." : "Someone else is replying.");
       }
       if (textarea) {
         textarea.disabled = !typeEnabled;
-        textarea.placeholder = !typeEnabled ? "Another admin is replying. Read-only."
+        textarea.placeholder = !typeEnabled ? "A colleague is replying to this chat. Read-only."
           : sendEnabled ? `Type your reply to ${E164}… (Shift+Enter for newline, Enter to send)`
           : "The AI is replying. Start typing to take over and reply yourself…";
       }
@@ -186,7 +193,7 @@
       banner.classList.toggle("hidden", !visible);
       if (visible && heldInfo) {
         txt.textContent =
-          `⚠ Another admin (${heldInfo.held_by || "unknown"}) is replying to this chat` +
+          `⚠ ${heldInfo.held_by || "A colleague"} is replying to this chat` +
           (heldInfo.expires_in_secs ? ` (about ${heldInfo.expires_in_secs}s left)` : "") +
           `. You can read but not send.`;
       }
@@ -316,7 +323,7 @@
       btnAccept.addEventListener("click", async function () {
         if (!currentSuggestionText || !textarea) return;
         if (!humanMode) await goHuman();            // sending is a human action: take over from the AI first
-        if (!humanMode) return;                     // another admin holds the chat
+        if (!humanMode) return;                     // a colleague holds the chat
         textarea.value = currentSuggestionText;
         if (sendForm) sendForm.requestSubmit();
       });
