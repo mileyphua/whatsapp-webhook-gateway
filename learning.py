@@ -149,11 +149,11 @@ def _json_from(text: str) -> Optional[dict]:
 
 async def _llm_json(system: str, user: str, *, max_tokens: int, timeout: float) -> Optional[dict]:
     import llm_assistant  # lazy: avoids a circular import at module load
-    client = llm_assistant._openrouter_client()
-    if client is None:
-        return None
     model = os.getenv("OPENROUTER_MODEL") or llm_assistant.OPENROUTER_MODEL_DEFAULT
     try:
+        client = llm_assistant._openrouter_client()
+        if client is None:
+            return None
         resp = await client.chat.completions.create(
             model=model,
             messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],

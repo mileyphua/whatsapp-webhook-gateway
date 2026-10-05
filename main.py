@@ -2349,6 +2349,7 @@ async def inbox_chat_list(request: Request) -> Response:
         return RedirectResponse(url="/inbox/login", status_code=302)
     admin_name = sess.get("name") or INBOX_ADMIN_NAME
     session_id = sess.get("sid") or ""
+    is_admin = sess.get("role") == "admin"
     try:
         chats = await _sb.list_chats(limit=200)
     except Exception as exc:
@@ -2363,9 +2364,10 @@ async def inbox_chat_list(request: Request) -> Response:
         chats=chats,
         admin_name=admin_name,
         session_id=session_id,
-        inbox_admin_token_preview=(
-            INBOX_ADMIN_TOKEN[:6] + "…" + INBOX_ADMIN_TOKEN[-4:] if len(INBOX_ADMIN_TOKEN) > 12 else "****"
-        ),
+        is_admin=is_admin,
+        role=sess.get("role"),
+        inbox_admin_token_preview="",   # never show any part of the admin password
+        
         supa_url=(os.getenv("SUPABASE_URL") or ""),
     )
 
@@ -2380,6 +2382,7 @@ async def inbox_chat_thread(e164: str, request: Request) -> Response:
         return RedirectResponse(url="/inbox/login", status_code=302)
     admin_name = sess_payload.get("name") or INBOX_ADMIN_NAME
     session_id = sess_payload.get("sid") or ""
+    is_admin = sess_payload.get("role") == "admin"
     try:
         msgs = await _sb.thread_messages(e164, limit=300)
     except Exception as exc:
@@ -2396,6 +2399,8 @@ async def inbox_chat_thread(e164: str, request: Request) -> Response:
     return _render_template(
         "chat_thread.html",
         e164=e164,
+        is_admin=is_admin,
+        role=sess_payload.get("role"),
         embed=(request.query_params.get("embed") == "1"),
         contact_name=contact_name,
         messages=msgs,
@@ -2821,7 +2826,7 @@ async def api_inbox_handoff_resolve(e164: str, request: Request) -> JSONResponse
 @app.post("/api/inbox/chats/{e164}/forget-memory")
 async def api_inbox_forget_memory(e164: str, request: Request) -> JSONResponse:
     """Make the AI forget this chat: the next message starts a brand-new conversation. Messages stay visible."""
-    fail = _requires_inbox_bearer(request)
+    fail = _requires_admin(request)
     if fail:
         return fail
     key = contact_names.normalize(e164)
@@ -2847,7 +2852,7 @@ async def api_inbox_forget_memory(e164: str, request: Request) -> JSONResponse:
 @app.delete("/api/inbox/chats/{e164}")
 async def api_inbox_delete_chat(e164: str, request: Request) -> JSONResponse:
     """Permanently delete a conversation (Supabase + Redis + name). A transcript copy is written to the logs."""
-    fail = _requires_inbox_bearer(request)
+    fail = _requires_admin(request)
     if fail:
         return fail
     key = contact_names.normalize(e164)
@@ -2903,7 +2908,7 @@ def _iso_utc(ts: float) -> str:
 @app.post("/api/inbox/admin/import-history")
 async def api_inbox_import_history(request: Request) -> JSONResponse:
     """Copy every conversation held in Redis into Supabase (skips chats Supabase already has)."""
-    fail = _requires_inbox_bearer(request)
+    fail = _requires_admin(request)
     if fail:
         return fail
     if not _sb.ENABLED:
@@ -2960,7 +2965,7 @@ async def api_inbox_import_history(request: Request) -> JSONResponse:
 @app.get("/api/inbox/logs")
 async def api_inbox_logs(request: Request) -> JSONResponse:
     """Audit log: logins, claims, human sends, deletions, imports (newest first)."""
-    fail = _requires_inbox_bearer(request)
+    fail = _requires_admin(request)
     if fail:
         return fail
     qp = request.query_params
@@ -2969,15 +2974,19 @@ async def api_inbox_logs(request: Request) -> JSONResponse:
     return JSONResponse(content={"source": "supabase" if _sb.ENABLED else "local-file", "events": events})
 
 
-def _logged_in_page_ctx(request: Request):
-    """(redirect_or_gate, ctx) for simple inbox pages."""
+def _logged_in_page_ctx(request: Request, admin_only: bool = True):
+    """(redirect_or_gate, ctx) for inbox pages. Team members are sent back to the inbox from admin-only pages."""
     gate = _inbox_page_gating_checks(request)
     if gate:
         return gate, None
     sess = _verify_inbox_session_cookie(request)
     if not sess:
         return RedirectResponse(url="/inbox/login?next=" + request.url.path, status_code=302), None
-    return None, {"admin_name": sess.get("name") or INBOX_ADMIN_NAME, "session_id": sess.get("sid") or "", "supa_url": ""}
+    is_admin = sess.get("role") == "admin"
+    if admin_only and not is_admin:
+        return RedirectResponse(url="/inbox/chats", status_code=302), None
+    return None, {"admin_name": sess.get("name") or INBOX_ADMIN_NAME, "session_id": sess.get("sid") or "", "supa_url": "",
+                  "role": sess.get("role"), "is_admin": is_admin}
 
 
 @app.get("/inbox/logs")
@@ -3064,7 +3073,7 @@ async def api_inbox_list_feedback(request: Request) -> JSONResponse:
 @app.get("/api/inbox/learning")
 async def api_inbox_learning(request: Request) -> JSONResponse:
     """Learning dashboard data: accuracy trend, skills, knowledge-base to-dos, recent feedback."""
-    fail = _requires_inbox_bearer(request)
+    fail = _requires_admin(request)
     if fail:
         return fail
     stored = await feedback_store.list_skills()
@@ -3084,7 +3093,7 @@ def _skill_audit(action: str, item: Dict[str, Any]) -> None:
 @app.post("/api/inbox/learning/skills")
 async def api_inbox_skill_create(request: Request) -> JSONResponse:
     """Create a skill by hand (applies immediately: a human wrote it)."""
-    fail = _requires_inbox_bearer(request)
+    fail = _requires_admin(request)
     if fail:
         return fail
     try:
@@ -3100,7 +3109,7 @@ async def api_inbox_skill_create(request: Request) -> JSONResponse:
 @app.put("/api/inbox/learning/skills/{skill_id}")
 async def api_inbox_skill_edit(skill_id: str, request: Request) -> JSONResponse:
     """Edit a learned skill (a human edit is an approval)."""
-    fail = _requires_inbox_bearer(request)
+    fail = _requires_admin(request)
     if fail:
         return fail
     if skill_id.startswith("builtin-"):
@@ -3120,7 +3129,7 @@ async def api_inbox_skill_edit(skill_id: str, request: Request) -> JSONResponse:
 @app.patch("/api/inbox/learning/skills/{skill_id}")
 async def api_inbox_skill_status(skill_id: str, request: Request) -> JSONResponse:
     """Approve / turn off a skill, or approve / reject a suggested revision ({"proposal": "approve"|"reject"})."""
-    fail = _requires_inbox_bearer(request)
+    fail = _requires_admin(request)
     if fail:
         return fail
     if skill_id.startswith("builtin-"):
@@ -3144,7 +3153,7 @@ async def api_inbox_skill_status(skill_id: str, request: Request) -> JSONRespons
 @app.delete("/api/inbox/learning/skills/{skill_id}")
 async def api_inbox_skill_delete(skill_id: str, request: Request) -> JSONResponse:
     """Delete a learned skill permanently."""
-    fail = _requires_inbox_bearer(request)
+    fail = _requires_admin(request)
     if fail:
         return fail
     if skill_id.startswith("builtin-"):
@@ -3157,7 +3166,7 @@ async def api_inbox_skill_delete(skill_id: str, request: Request) -> JSONRespons
 @app.post("/api/inbox/learning/learn")
 async def api_inbox_learning_learn(request: Request) -> JSONResponse:
     """Turn new feedback into skill proposals now."""
-    fail = _requires_inbox_bearer(request)
+    fail = _requires_admin(request)
     if fail:
         return fail
     return JSONResponse(content=await learning.distill())
@@ -3166,7 +3175,7 @@ async def api_inbox_learning_learn(request: Request) -> JSONResponse:
 @app.patch("/api/inbox/learning/lessons/{lesson_id}")
 async def api_inbox_lesson_status(lesson_id: str, request: Request) -> JSONResponse:
     """Approve (active), disable or re-open (pending) a lesson. Approved lessons guide every reply."""
-    fail = _requires_inbox_bearer(request)
+    fail = _requires_admin(request)
     if fail:
         return fail
     try:
@@ -3186,12 +3195,20 @@ async def api_inbox_lesson_status(lesson_id: str, request: Request) -> JSONRespo
 @app.delete("/api/inbox/learning/lessons/{lesson_id}")
 async def api_inbox_lesson_delete(lesson_id: str, request: Request) -> JSONResponse:
     """Delete a lesson permanently."""
-    fail = _requires_inbox_bearer(request)
+    fail = _requires_admin(request)
     if fail:
         return fail
     await feedback_store.delete_lesson(lesson_id)
     learning.invalidate_cache()
     return JSONResponse(content={"ok": True})
+
+
+@app.get("/inbox/team")
+async def web_inbox_team(request: Request) -> Response:
+    resp, ctx = _logged_in_page_ctx(request)
+    if resp:
+        return resp
+    return _render_template("team.html", **ctx)
 
 
 @app.get("/inbox/learning")
@@ -3440,7 +3457,7 @@ async def api_inbox_list_templates(request: Request) -> JSONResponse:
 
 @app.delete("/api/inbox/templates/cache")
 async def api_inbox_evict_templates_cache(request: Request) -> JSONResponse:
-    fail = _requires_inbox_bearer(request)
+    fail = _requires_admin(request)
     if fail:
         return fail
     global TEMPLATES_CACHE
@@ -3715,7 +3732,7 @@ async def web_inbox_architecture(request: Request) -> Response:
 
 @app.get("/api/inbox/admin/dashboard")
 async def api_inbox_admin_dashboard(request: Request) -> JSONResponse:
-    fail = _requires_inbox_bearer(request)
+    fail = _requires_admin(request)
     if fail:
         return fail
     now_unix = time.time()
@@ -3916,7 +3933,7 @@ async def api_inbox_admin_dashboard(request: Request) -> JSONResponse:
 
 @app.post("/api/inbox/admin/force-redis-scan")
 async def api_inbox_admin_force_redis_scan(request: Request) -> JSONResponse:
-    fail = _requires_inbox_bearer(request)
+    fail = _requires_admin(request)
     if fail:
         return fail
     try:
@@ -3931,7 +3948,7 @@ async def api_inbox_admin_force_redis_scan(request: Request) -> JSONResponse:
 
 @app.post("/api/inbox/admin/evict-templates-cache")
 async def api_inbox_admin_evict_templates(request: Request) -> JSONResponse:
-    fail = _requires_inbox_bearer(request)
+    fail = _requires_admin(request)
     if fail:
         return fail
     global TEMPLATES_CACHE
@@ -3951,7 +3968,7 @@ async def api_inbox_admin_run_followups_scan(request: Request) -> JSONResponse:
     window defer) run exactly as they would for the real Render cron hit.
     Returns exactly the same JSON payload the cron endpoint returns (wrapped).
     """
-    fail = _requires_inbox_bearer(request)
+    fail = _requires_admin(request)
     if fail:
         return fail
     if not FOLLOWUPS_CRON_TOKEN:
@@ -3992,7 +4009,7 @@ async def api_inbox_admin_flush_scheduled(request: Request) -> JSONResponse:
     Same pattern as followups above — in-process TestClient self-call so the
     full idempotent claim_next_pending_scheduled_batch → send path runs.
     """
-    fail = _requires_inbox_bearer(request)
+    fail = _requires_admin(request)
     if fail:
         return fail
     if not FOLLOWUPS_CRON_TOKEN:

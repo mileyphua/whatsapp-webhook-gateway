@@ -9,9 +9,7 @@
         Chats
         <span class="ml-1 px-2 py-0.5 rounded-full bg-gray-200 text-gray-600 text-xs font-mono">{{ chats|length }}</span>
       </div>
-      <div class="text-xs text-gray-500">
-        Token <span class="font-mono">{{ inbox_admin_token_preview }}</span>
-      </div>
+      {% if inbox_admin_token_preview %}<div class="text-xs text-gray-500">Token <span class="font-mono">{{ inbox_admin_token_preview }}</span></div>{% endif %}
     </div>
 
     <div class="px-4 pt-3 mb-3">
@@ -243,8 +241,8 @@
 <!-- ⋮ action menu -->
 <div id="chat-actions" role="menu" hidden class="fixed z-50 w-48 rounded-lg border border-gray-200 bg-white shadow-xl py-1 text-sm">
   <button type="button" role="menuitem" id="act-rename" class="w-full text-left px-3 py-2 hover:bg-gray-50">Set name</button>
-  <button type="button" role="menuitem" id="act-forget" class="w-full text-left px-3 py-2 hover:bg-gray-50">Forget AI memory</button>
-  <button type="button" role="menuitem" id="act-delete" class="w-full text-left px-3 py-2 text-red-700 hover:bg-red-50">Delete chat</button>
+  <button type="button" role="menuitem" id="act-forget" class="w-full text-left px-3 py-2 hover:bg-gray-50"{% if not is_admin %} hidden{% endif %}>Forget AI memory</button>
+  <button type="button" role="menuitem" id="act-delete" class="w-full text-left px-3 py-2 text-red-700 hover:bg-red-50"{% if not is_admin %} hidden{% endif %}>Delete chat</button>
 </div>
 
 <!-- rename popover -->

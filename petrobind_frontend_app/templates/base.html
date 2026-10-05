@@ -50,11 +50,14 @@
     </div>
     <nav aria-label="Main" class="hidden md:flex items-center gap-1 text-sm">
             <a href="/inbox/chats" class="px-3 py-1.5 rounded-md hover:bg-gray-700">Inbox</a>
+      {% if is_admin %}
       <a href="/inbox/learning" class="px-3 py-1.5 rounded-md hover:bg-gray-700">Learning</a>
       <a href="/inbox/logs" class="px-3 py-1.5 rounded-md hover:bg-gray-700">Logs</a>
+      <a href="/inbox/team" class="px-3 py-1.5 rounded-md hover:bg-gray-700">Team</a>
       <a href="/inbox/architecture" class="px-3 py-1.5 rounded-md hover:bg-gray-700">Architecture</a>
       <a href="/inbox/admin" class="px-3 py-1.5 rounded-md hover:bg-gray-700">Ops</a>
       <a href="/inbox/guide" class="px-3 py-1.5 rounded-md hover:bg-gray-700">Guide</a>
+      {% endif %}
     </nav>
     <div class="flex items-center gap-4">
       <button type="button" id="ho-toggle" aria-haspopup="true" aria-expanded="false"
