@@ -118,6 +118,77 @@ async def insert_inbound_message(msg: Dict[str, Any]) -> None:
         )
 
 
+# Without Supabase (local development) the messages people send from the inbox are kept here (and in a small JSON
+# file so a server restart does not lose them) so they still show in the thread and the chat list. Never used in
+# production, where the `messages` table is the source of truth.
+import json as _json
+_LOCAL_OUTBOUND_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".local_outbound.json")
+_LOCAL_OUTBOUND: Dict[str, List[Dict[str, Any]]] = {}
+_LOCAL_MAX_PER_CHAT = 500
+
+
+def _digits(v: str) -> str:
+    return "".join(ch for ch in (v or "") if ch.isdigit())
+
+
+def _load_local_outbound() -> None:
+    try:
+        with open(_LOCAL_OUTBOUND_FILE, "r", encoding="utf-8") as fh:
+            data = _json.load(fh)
+        if isinstance(data, dict):
+            _LOCAL_OUTBOUND.update({str(k): list(v) for k, v in data.items() if isinstance(v, list)})
+    except Exception:
+        pass
+
+
+def _save_local_outbound() -> None:
+    try:
+        with open(_LOCAL_OUTBOUND_FILE, "w", encoding="utf-8") as fh:
+            _json.dump(_LOCAL_OUTBOUND, fh)
+    except Exception:
+        pass
+
+
+def local_outbound_messages(e164: str) -> List[Dict[str, Any]]:
+    return [dict(m) for m in _LOCAL_OUTBOUND.get(_digits(e164), [])]
+
+
+def local_outbound_chats() -> Dict[str, Dict[str, Any]]:
+    """digits -> the newest locally stored message of each chat."""
+    return {k: dict(v[-1]) for k, v in _LOCAL_OUTBOUND.items() if v}
+
+
+def _store_local_outbound(*, e164: str, direction: str, text: str, sent_id: Optional[str], errored: bool, error_detail: Optional[str],
+                          reply_to_wamid: Optional[str], sent_by: Optional[str], media_type: Optional[str],
+                          media_meta: Optional[Dict[str, Any]]) -> None:
+    key = _digits(e164)
+    if not key:
+        return
+    rows = _LOCAL_OUTBOUND.setdefault(key, [])
+    rows.append({
+        "id": f"local-{key}-{len(rows) + 1}-{int(time.time() * 1000)}", "wamid": sent_id or "", "sent_id_from_graph": sent_id,
+        "direction": direction if direction in ("ai", "human", "system") else "system", "e164": key, "text": text,
+        "reply_to_wamid": reply_to_wamid, "media_type": media_type, "filename": (media_meta or {}).get("filename"),
+        "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "errored": errored, "error_detail": error_detail,
+        "meta_statuses_jsonb": {}, "held_by": sent_by,
+    })
+    del rows[:-_LOCAL_MAX_PER_CHAT]
+    _save_local_outbound()
+
+
+def _forget_local_outbound(variants: List[str]) -> None:
+    changed = False
+    for v in variants:
+        if _LOCAL_OUTBOUND.pop(_digits(v), None) is not None:
+            changed = True
+    if changed:
+        _save_local_outbound()
+
+
+if not ENABLED:
+    _load_local_outbound()
+
+
 async def insert_outbound_message(
     *,
     e164: str,
@@ -133,6 +204,8 @@ async def insert_outbound_message(
     media_meta: Optional[Dict[str, Any]] = None,      # {filename, mime, size, media_id}
 ) -> None:
     if not ENABLED:
+        _store_local_outbound(e164=e164, direction=direction, text=text, sent_id=sent_id_from_graph, errored=errored, error_detail=error_detail,
+                              reply_to_wamid=reply_to_wamid, sent_by=sent_by, media_type=media_type, media_meta=media_meta)
         return
     if direction not in {"ai", "human", "system"}:
         direction = "system"
@@ -829,6 +902,7 @@ async def delete_chat(e164_variants: List[str]) -> Dict[str, int]:
     out = {"messages": 0, "claims": 0, "sessions": 0}
     for v in e164_variants:
         _LOCAL_CLAIMS.pop(v, None)
+    _forget_local_outbound(list(e164_variants))
     if not (ENABLED and e164_variants):
         return out
     flt = "in.(" + ",".join('"%s"' % v.replace('"', "") for v in e164_variants) + ")"

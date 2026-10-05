@@ -349,6 +349,13 @@ async def _persist_outbound_safe(
     lost), retried once, and a final failure is written to the log page (audit) so it is never invisible.
     Never raises: the WhatsApp send already happened."""
     if not _sb_enabled():
+        # local development: keep it in the in-process store so the inbox shows it (a no-op in tests that stub _sb)
+        try:
+            await _sb.insert_outbound_message(e164=e164, direction=direction, text=text, reply_to_wamid=reply_to_wamid,
+                                              sent_id_from_graph=sent_id_from_graph, errored=errored, error_detail=error_detail,
+                                              sent_by=sent_by, media_type=media_type, media_meta=media_meta)
+        except Exception as exc:
+            print(f"[PERSIST-WARN] local store failed: {type(exc).__name__}: {exc!s}")
         return
     last: Optional[BaseException] = None
     for attempt in (1, 2):
@@ -2406,6 +2413,17 @@ async def _history_chats() -> List[Dict[str, Any]]:
             "claim_held_by": ((await _sb.claim_is_human_held(sess.phone_number)) or {}).get("held_by"),
             "claim_expires_at": None,
         })
+    by_digits = {contact_names.normalize(r["e164"]): r for r in rows}
+    for digits, last in _sb.local_outbound_chats().items():
+        row = by_digits.get(digits)
+        if row is None:
+            row = {"e164": digits, "inquiry_jsonb": {}, "lead_notified": False, "handoff_notified": False,
+                   "claim_held_by": ((await _sb.claim_is_human_held(digits)) or {}).get("held_by"), "claim_expires_at": None}
+            rows.append(row); by_digits[digits] = row
+        elif str(last["created_at"]) <= str(row.get("last_message_at") or ""):
+            continue
+        row.update({"last_message_at": last["created_at"], "last_message_is_buyer": False, "last_direction": last["direction"],
+                    "last_message_text": str(last["text"])[:200], "last_message_created_at": last["created_at"]})
     rows.sort(key=lambda r: r["last_message_at"], reverse=True)
     return _unique_by_number(rows)
 
@@ -2425,11 +2443,9 @@ async def _history_thread(e164: str) -> List[Dict[str, Any]]:
             if cand.phone_number == e164:
                 sess = cand
                 break
-    if sess is None:
-        return []
-    created = _iso_ts(sess.last_activity_ts)
+    created = _iso_ts(sess.last_activity_ts) if sess is not None else ""
     out: List[Dict[str, Any]] = []
-    for i, m in enumerate(sess.history):
+    for i, m in enumerate(sess.history if sess is not None else []):
         if m.get("role") not in ("user", "assistant") or not m.get("content"):
             continue
         out.append({
@@ -2441,6 +2457,9 @@ async def _history_thread(e164: str) -> List[Dict[str, Any]]:
             "created_at": created,
             "errored": False,
         })
+    local = _sb.local_outbound_messages(e164)
+    if local:
+        out = sorted(out + local, key=lambda r: str(r.get("created_at") or ""))  # stable: same-time AI turns keep their order
     return out
 
 
