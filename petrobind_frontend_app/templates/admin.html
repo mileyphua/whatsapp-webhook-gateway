@@ -4,7 +4,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="/static/admin.css">
+<link rel="stylesheet" href="/static/admin.css?v={{ asset_v() }}">
 <div class="ops-console flex-1 overflow-y-auto">
 <div class="scanlines"></div>
   <main class="ops-main">
@@ -182,5 +182,5 @@
   window.__OPS__ = window.__OPS__ || {};
   window.__OPS__.inboxAdminName = {{ (admin_name or "Petrobind Admin") | tojson }};
 </script>
-<script src="/static/admin.js" defer></script>
+<script src="/static/admin.js?v={{ asset_v() }}" defer></script>
 {% endblock %}

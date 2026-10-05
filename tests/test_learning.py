@@ -23,6 +23,9 @@ class SkillsLoop(unittest.TestCase):
         tmp = tempfile.NamedTemporaryFile(suffix=".json", delete=False); tmp.close(); os.remove(tmp.name)
         fs._FILE = self._file = tmp.name
         learning.invalidate_cache()
+        # a reasoned thumbs-down now starts learning in the background: never let tests reach the real model
+        self._no_net = mock.patch.object(learning, "_llm_json", mock.AsyncMock(return_value=None))
+        self._no_net.start()
         import main
         main.INBOX_ADMIN_TOKEN = main.INBOX_ADMIN_TOKEN or "t" * 20
         main._sb.ENABLED = False
@@ -30,6 +33,7 @@ class SkillsLoop(unittest.TestCase):
         self.c = TestClient(main.app)
 
     def tearDown(self):
+        self._no_net.stop()
         if os.path.exists(self._file):
             os.remove(self._file)
         learning.invalidate_cache()

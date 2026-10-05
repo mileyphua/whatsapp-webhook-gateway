@@ -20,7 +20,7 @@ import conversation_store
 import httpx
 import llm_assistant
 import scheduler
-from fastapi import FastAPI, HTTPException, Query, Request, status
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Query, Request, status
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse, Response
 
 try:
@@ -1909,8 +1909,31 @@ try:
         "static",
     )
     if _static_os2.path.isdir(_static_dir) and _StaticFiles is not None:
-        app.mount("/inbox/static", _StaticFiles(directory=_static_dir, html=False), name="inbox_static")
-        app.mount("/static", _StaticFiles(directory=_static_dir, html=False), name="static_root")
+        class _RevalidatingStatic(_StaticFiles):  # type: ignore[misc, valid-type]
+            """Always revalidate (ETag) so a browser never keeps running an older app.js after a deploy."""
+            async def get_response(self, path, scope):  # type: ignore[override]
+                resp = await super().get_response(path, scope)
+                resp.headers["Cache-Control"] = "no-cache"
+                return resp
+
+        app.mount("/inbox/static", _RevalidatingStatic(directory=_static_dir, html=False), name="inbox_static")
+        app.mount("/static", _RevalidatingStatic(directory=_static_dir, html=False), name="static_root")
+        # Cache-busting token for <script>/<link> URLs: changes whenever any asset file changes.
+        if _JINJA_ENV is not None:
+            _asset_cache = {"at": 0.0, "v": "0"}
+
+            def _asset_v() -> str:
+                """Changes whenever any asset file changes (re-checked at most every 2 s)."""
+                now = time.time()
+                if now - _asset_cache["at"] > 2.0:
+                    try:
+                        mt = max(_static_os2.path.getmtime(_static_os2.path.join(_static_dir, f)) for f in _static_os2.listdir(_static_dir))
+                        _asset_cache.update(at=now, v=format(int(mt), "x"))
+                    except Exception:
+                        _asset_cache["at"] = now
+                return _asset_cache["v"]
+
+            _JINJA_ENV.globals["asset_v"] = _asset_v
 except Exception as _static_exc:  # pragma: no cover — best-effort mount
     print(f"[INBOX] static mount skipped: {type(_static_exc).__name__}: {_static_exc!s}")
 
@@ -2848,7 +2871,7 @@ async def web_inbox_guide(request: Request) -> Response:
 # Reply feedback + learning loop (ratings -> lessons -> approved guidance)
 # ---------------------------------------------------------------------------
 @app.post("/api/inbox/feedback")
-async def api_inbox_add_feedback(request: Request) -> JSONResponse:
+async def api_inbox_add_feedback(request: Request, background: BackgroundTasks) -> JSONResponse:
     """Rate an AI reply (up/down) with optional tags, note and a better reply."""
     fail = _requires_inbox_bearer(request)
     if fail:
@@ -2876,10 +2899,14 @@ async def api_inbox_add_feedback(request: Request) -> JSONResponse:
     learning.invalidate_cache()
     asyncio.create_task(_sb.audit(actor=INBOX_ADMIN_NAME, action="ai_feedback", e164=item["e164"],
                                   detail={"rating": item["rating"], "tags": item["tags"], "has_better_reply": bool(item["better_reply"])}))
+    # A thumbs-down with a reason (tags, note or a better reply) is a strong signal: learn from it right away,
+    # otherwise wait until enough ratings pile up. Either way only *pending* skills are created; a human approves them.
+    strong = item["rating"] == "down" and bool(item["note"] or item["better_reply"] or item["tags"])
     st = await learning.stats()
-    if st["unprocessed"] >= learning.AUTO_LEARN_AFTER:
-        asyncio.create_task(learning.distill())  # creates *pending* lessons only; a human approves them
-    return JSONResponse(content={"ok": True, "feedback": item})
+    learning_started = strong or st["unprocessed"] >= learning.AUTO_LEARN_AFTER
+    if learning_started:
+        background.add_task(learning.distill)
+    return JSONResponse(content={"ok": True, "feedback": item, "learning_started": learning_started})
 
 
 @app.get("/api/inbox/feedback")

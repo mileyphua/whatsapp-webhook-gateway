@@ -227,8 +227,23 @@ def _norm_name(s: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", (s or "").lower()).strip()
 
 
+_distill_running = False
+
+
 async def distill() -> Dict[str, Any]:
-    """Turn unprocessed feedback into skill proposals. Returns a summary dict."""
+    """Turn unprocessed feedback into skill proposals. Single-flight: an overlapping call returns busy
+    (several quick ratings must not create duplicate skills)."""
+    global _distill_running
+    if _distill_running:
+        return {"ok": True, "busy": True, "processed": 0, "new_skills": 0, "updated_skills": 0, "note": "Already learning from your feedback. Check back in a moment."}
+    _distill_running = True
+    try:
+        return await _distill_once()
+    finally:
+        _distill_running = False
+
+
+async def _distill_once() -> Dict[str, Any]:
     fb = [i for i in await fs.list_feedback() if not i.get("processed")]
     if not fb:
         return {"ok": True, "processed": 0, "new_skills": 0, "updated_skills": 0, "note": "No new feedback to learn from."}

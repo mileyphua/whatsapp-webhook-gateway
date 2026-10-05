@@ -124,10 +124,8 @@
         setClaimStatus("You are replying. AI is paused for this chat. Switch back to AI when done.", { sendEnabled: true });
       } else {
         setClaimBannerVisible(false);
-        setClaimStatus("AI is answering this chat (RAG + LLM). Switch to Human to take over.", { sendEnabled: false });
+        setClaimStatus("AI is answering this chat (RAG + LLM). Switch to Human, or just start typing, to take over.", { sendEnabled: false, typeEnabled: true });
       }
-      const ta = document.getElementById("human-text-input");
-      if (ta && !lockedBy && !humanMode) ta.placeholder = "AI is replying. Switch to Human to type a reply.";
     }
     async function loadMode() {
       try {
@@ -162,18 +160,22 @@
     loadMode();
     setInterval(function () { if (humanMode) goHuman(); else loadMode(); }, 30 * 1000);
 
-    function setClaimStatus(text, { sendEnabled = true } = {}) {
+    // sendEnabled: the Send button works (Human mode). typeEnabled: the box accepts text; in AI mode typing
+    // is allowed and simply takes over from the AI, so the box is never a dead end.
+    function setClaimStatus(text, { sendEnabled = true, typeEnabled = sendEnabled } = {}) {
       const el = document.getElementById("claim-status-text");
       const sendBtn = document.getElementById("btn-send-submit");
       const textarea = document.getElementById("human-text-input");
       if (el) el.textContent = text;
       if (sendBtn) {
         sendBtn.disabled = !sendEnabled;
-        sendBtn.title = sendEnabled ? "" : "Switch to Human mode to reply.";
+        sendBtn.title = sendEnabled ? "" : (typeEnabled ? "Starting your reply pauses the AI for this chat." : "Another admin is replying.");
       }
       if (textarea) {
-        textarea.disabled = !sendEnabled;
-        if (sendEnabled) textarea.placeholder = `Type your reply to ${E164}… (Shift+Enter for newline, Enter to send)`;
+        textarea.disabled = !typeEnabled;
+        textarea.placeholder = !typeEnabled ? "Another admin is replying. Read-only."
+          : sendEnabled ? `Type your reply to ${E164}… (Shift+Enter for newline, Enter to send)`
+          : "The AI is replying. Start typing to take over and reply yourself…";
       }
     }
 
@@ -304,16 +306,20 @@
     }
 
     if (btnAccept) {
-      btnAccept.addEventListener("click", function () {
+      btnAccept.addEventListener("click", async function () {
         if (!currentSuggestionText || !textarea) return;
+        if (!humanMode) await goHuman();            // sending is a human action: take over from the AI first
+        if (!humanMode) return;                     // another admin holds the chat
         textarea.value = currentSuggestionText;
         if (sendForm) sendForm.requestSubmit();
       });
     }
     if (btnEdit) {
-      btnEdit.addEventListener("click", function () {
+      btnEdit.addEventListener("click", async function () {
         if (!currentSuggestionText || !textarea) return;
+        if (!humanMode) await goHuman();            // editing means you are replying: pause the AI so Send works
         textarea.value = currentSuggestionText;
+        autoGrowComposer();
         textarea.focus();
         textarea.setSelectionRange(textarea.value.length, textarea.value.length);
         // hide pill to reduce clutter (they requested manual edit)
@@ -439,9 +445,28 @@
     setInterval(function () { if (!document.hidden) pollThread(); }, 3000);
 
 
-    // ---------- Feedback on AI replies: 👍 / 👎 (+ tags, note, better reply) feeds the Learning page ----------
-    const FB_TAGS = ["Inaccurate", "Too long", "Sounds like a bot", "Repeats itself", "Wrong tone", "Should have handed to a human"];
+
+    // ---------- Composer: grows with the text (up to half the screen), can be dragged taller, typing takes over ----------
+    function autoGrowComposer() {
+      const ta = document.getElementById("human-text-input"); if (!ta) return;
+      ta.style.height = "auto";
+      ta.style.height = Math.min(ta.scrollHeight + 2, Math.round(window.innerHeight * 0.5)) + "px";
+    }
+    (function wireComposer() {
+      const ta = document.getElementById("human-text-input"); if (!ta) return;
+      ta.addEventListener("input", function () {
+        autoGrowComposer();
+        if (!humanMode && !lockedBy && ta.value.trim()) goHuman();   // first keystroke pauses the AI for this chat
+      });
+      autoGrowComposer();
+    })();
+
+    // ---------- Feedback on AI replies (ChatGPT-style): good / bad under every AI message ----------
+    // Bad opens a dialog where the admin says why; the server turns that into a suggested skill.
+    const FB_REASONS = ["Wrong or inaccurate information", "Didn't answer the question", "Too long", "Sounds like a bot or repeats itself", "Wrong tone", "Should have handed over to a human"];
     const fbState = {};   // ai_text -> "up" | "down"
+    const SVG_UP = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 10v11"/><path d="M15 5.9 14 10h5.8a2 2 0 0 1 1.9 2.5l-1.8 7A2 2 0 0 1 18 21H7V10l4-8a2.5 2.5 0 0 1 4 3.9Z"/></svg>';
+    const SVG_DOWN = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17 14V3"/><path d="m9 18.1 1-4.1H4.2a2 2 0 0 1-1.9-2.5l1.8-7A2 2 0 0 1 6 3h11v11l-4 8a2.5 2.5 0 0 1-4-3.9Z"/></svg>';
     function mk(tag, cls, text) { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; }
     function precedingBuyerText(wrap) {
       let n = wrap.previousElementSibling;
@@ -451,72 +476,102 @@
       }
       return "";
     }
+    function aiTextOf(wrap) { const t = wrap.querySelector(".whitespace-pre-wrap"); return t ? t.textContent : ""; }
+    let fbToastTimer = null;
+    function fbToast(msg, linkText) {
+      let t = document.getElementById("fb-toast");
+      if (!t) { t = mk("div", "fixed left-1/2 -translate-x-1/2 bottom-6 z-50 max-w-[92vw] rounded-lg bg-gray-900 text-white text-sm px-4 py-2.5 shadow-xl"); t.id = "fb-toast"; t.setAttribute("role", "status"); document.body.appendChild(t); }
+      t.textContent = msg + " ";
+      if (linkText) { const a = mk("a", "underline font-medium", linkText); a.href = "/inbox/learning"; a.target = "_top"; t.appendChild(a); }
+      t.hidden = false; clearTimeout(fbToastTimer); fbToastTimer = setTimeout(function () { t.hidden = true; }, 7000);
+    }
     function paintFeedback(wrap, rating) {
-      const st = wrap.querySelector(".fb-status"), up = wrap.querySelector(".fb-up"), dn = wrap.querySelector(".fb-down");
-      if (!st) return;
+      const up = wrap.querySelector(".fb-up"), dn = wrap.querySelector(".fb-down"); if (!up || !dn) return;
+      const base = "fb-btn inline-flex items-center justify-center w-7 h-7 rounded-md transition ";
       up.setAttribute("aria-pressed", String(rating === "up")); dn.setAttribute("aria-pressed", String(rating === "down"));
-      up.className = "fb-up px-1.5 py-0.5 rounded " + (rating === "up" ? "bg-green-600 text-white" : "hover:bg-black/5");
-      dn.className = "fb-down px-1.5 py-0.5 rounded " + (rating === "down" ? "bg-red-600 text-white" : "hover:bg-black/5");
-      st.textContent = rating === "up" ? "Marked good" : rating === "down" ? "Marked for improvement" : "";
+      up.className = "fb-up " + base + (rating === "up" ? "text-green-700 bg-green-100" : "text-gray-500 hover:text-gray-900 hover:bg-black/5");
+      dn.className = "fb-down " + base + (rating === "down" ? "text-red-700 bg-red-100" : "text-gray-500 hover:text-gray-900 hover:bg-black/5");
     }
     async function sendFeedback(wrap, payload) {
-      const text = wrap.querySelector(".whitespace-pre-wrap").textContent;
-      const body = Object.assign({ e164: E164, ai_text: text, buyer_text: precedingBuyerText(wrap) }, payload);
-      const st = wrap.querySelector(".fb-status");
-      try {
-        const r = await inboxFetch("/api/inbox/feedback", { method: "POST", body: body });
-        if (!r.ok) throw new Error("HTTP " + r.status);
-        fbState[text] = payload.rating; paintFeedback(wrap, payload.rating); return true;
-      } catch (e) { if (st) st.textContent = "Could not save feedback"; return false; }
+      const body = Object.assign({ e164: E164, ai_text: aiTextOf(wrap), buyer_text: precedingBuyerText(wrap) }, payload);
+      const r = await inboxFetch("/api/inbox/feedback", { method: "POST", body: body });
+      if (!r.ok) throw new Error("HTTP " + r.status);
+      const j = await r.json();
+      fbState[body.ai_text] = payload.rating; paintFeedback(wrap, payload.rating);
+      return j;
     }
-    function openFeedbackForm(wrap) {
-      if (wrap.querySelector(".fb-form")) return;
-      const form = mk("div", "fb-form mt-2 pt-2 border-t border-black/10 space-y-1.5");
-      form.appendChild(mk("div", "text-[11px] font-semibold", "What was wrong?"));
-      const chips = mk("div", "flex flex-wrap gap-1");
+    function feedbackDialog() {
+      let d = document.getElementById("fb-dialog"); if (d) return d;
+      d = mk("dialog", "rounded-2xl p-0 w-[92vw] max-w-lg border-0 shadow-2xl"); d.id = "fb-dialog"; d.setAttribute("aria-labelledby", "fb-title");
+      const box = mk("div", "p-5 space-y-3");
+      box.appendChild(Object.assign(mk("h2", "text-lg font-semibold text-gray-900", "What went wrong with this reply?"), { id: "fb-title" }));
+      box.appendChild(Object.assign(mk("blockquote", "text-sm text-gray-600 bg-gray-50 border-l-4 border-gray-300 rounded px-3 py-2 max-h-24 overflow-y-auto whitespace-pre-wrap"), { id: "fb-quote" }));
+      const chips = mk("div", "flex flex-wrap gap-1.5"); chips.id = "fb-chips"; chips.setAttribute("role", "group"); chips.setAttribute("aria-label", "Reasons");
+      box.appendChild(chips);
+      const lab1 = mk("label", "block"); lab1.appendChild(mk("span", "block text-xs font-medium text-gray-700 mb-0.5", "Tell the AI what to do differently"));
+      const note = mk("textarea", "w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"); note.id = "fb-note"; note.rows = 2; note.maxLength = 1000; note.placeholder = "e.g. Don't quote a price, ask for quantity and destination first"; lab1.appendChild(note); box.appendChild(lab1);
+      const lab2 = mk("label", "block"); lab2.appendChild(mk("span", "block text-xs font-medium text-gray-700 mb-0.5", "How would you have replied? (the fastest way to teach it)"));
+      const better = mk("textarea", "w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"); better.id = "fb-better"; better.rows = 3; better.maxLength = 1500; lab2.appendChild(better); box.appendChild(lab2);
+      box.appendChild(Object.assign(mk("div", "text-xs text-red-600"), { id: "fb-err", hidden: true }));
+      const row = mk("div", "flex items-center justify-between gap-3");
+      row.appendChild(mk("span", "text-[11px] text-gray-500", "Your feedback is turned into a skill suggestion that you approve before the AI uses it."));
+      const btns = mk("div", "flex gap-2 shrink-0");
+      const cancel = mk("button", "px-4 py-2 rounded-full border border-gray-300 text-sm font-medium text-gray-700 hover:bg-gray-50", "Cancel"); cancel.type = "button"; cancel.id = "fb-cancel";
+      const submit = mk("button", "px-4 py-2 rounded-full bg-gray-900 text-white text-sm font-medium disabled:opacity-40", "Submit"); submit.type = "button"; submit.id = "fb-submit";
+      btns.appendChild(cancel); btns.appendChild(submit); row.appendChild(btns); box.appendChild(row);
+      d.appendChild(box); document.body.appendChild(d);
+      cancel.addEventListener("click", function () { d.close(); });
+      return d;
+    }
+    function openFeedbackDialog(wrap) {
+      const d = feedbackDialog(), chips = d.querySelector("#fb-chips"), note = d.querySelector("#fb-note"), better = d.querySelector("#fb-better"), submit = d.querySelector("#fb-submit"), err = d.querySelector("#fb-err");
+      d.querySelector("#fb-quote").textContent = aiTextOf(wrap);
+      note.value = ""; better.value = ""; err.hidden = true; chips.textContent = "";
       const picked = new Set();
-      FB_TAGS.forEach(function (t) {
-        const b = mk("button", "px-2 py-0.5 rounded-full border border-black/20 text-[11px] bg-white/70", t); b.type = "button"; b.setAttribute("aria-pressed", "false");
-        b.addEventListener("click", function () { if (picked.has(t)) { picked.delete(t); b.setAttribute("aria-pressed", "false"); b.className = "px-2 py-0.5 rounded-full border border-black/20 text-[11px] bg-white/70"; } else { picked.add(t); b.setAttribute("aria-pressed", "true"); b.className = "px-2 py-0.5 rounded-full border border-red-600 text-[11px] bg-red-600 text-white"; } });
+      function refresh() { submit.disabled = !(picked.size || note.value.trim() || better.value.trim()); }
+      FB_REASONS.forEach(function (t) {
+        const b = mk("button", "px-3 py-1.5 rounded-full border border-gray-300 text-sm text-gray-700 hover:bg-gray-50", t); b.type = "button"; b.setAttribute("aria-pressed", "false");
+        b.addEventListener("click", function () {
+          if (picked.has(t)) { picked.delete(t); b.setAttribute("aria-pressed", "false"); b.className = "px-3 py-1.5 rounded-full border border-gray-300 text-sm text-gray-700 hover:bg-gray-50"; }
+          else { picked.add(t); b.setAttribute("aria-pressed", "true"); b.className = "px-3 py-1.5 rounded-full border border-gray-900 bg-gray-900 text-sm text-white"; }
+          refresh();
+        });
         chips.appendChild(b);
       });
-      const note = mk("textarea", "w-full rounded border border-black/20 bg-white px-2 py-1 text-xs"); note.rows = 2; note.maxLength = 1000; note.placeholder = "Tell it what to do differently (optional)"; note.setAttribute("aria-label", "What was wrong");
-      const better = mk("textarea", "w-full rounded border border-black/20 bg-white px-2 py-1 text-xs"); better.rows = 2; better.maxLength = 1500; better.placeholder = "How would you have replied? (optional, the best way to teach it)"; better.setAttribute("aria-label", "A better reply");
-      const row = mk("div", "flex justify-end gap-2");
-      const cancel = mk("button", "px-2.5 py-1 rounded border border-black/20 text-xs bg-white", "Cancel"); cancel.type = "button";
-      const save = mk("button", "px-2.5 py-1 rounded bg-red-600 text-white text-xs font-medium", "Send feedback"); save.type = "button";
-      cancel.addEventListener("click", function () { form.remove(); if (!fbState[wrap.querySelector(".whitespace-pre-wrap").textContent]) paintFeedback(wrap, null); });
-      save.addEventListener("click", async function () {
-        save.disabled = true;
-        const ok = await sendFeedback(wrap, { rating: "down", tags: Array.from(picked), note: note.value.trim(), better_reply: better.value.trim() });
-        if (ok) form.remove(); else save.disabled = false;
-      });
-      row.appendChild(cancel); row.appendChild(save);
-      [chips, note, better, row].forEach(function (n) { form.appendChild(n); });
-      wrap.querySelector(".message-bubble").appendChild(form);
-      note.focus();
+      note.oninput = refresh; better.oninput = refresh; refresh();
+      submit.onclick = async function () {
+        submit.disabled = true; submit.textContent = "Sending…"; err.hidden = true;
+        try {
+          const j = await sendFeedback(wrap, { rating: "down", tags: Array.from(picked), note: note.value.trim(), better_reply: better.value.trim() });
+          d.close();
+          fbToast(j.learning_started ? "Thanks. The AI is turning this into a skill suggestion." : "Thanks, feedback saved.", j.learning_started ? "Review it in Skills & learning →" : "");
+        } catch (e) { err.textContent = "Could not save feedback. Please try again."; err.hidden = false; }
+        finally { submit.textContent = "Submit"; refresh(); }
+      };
+      d.showModal(); note.focus();
     }
     function decorateFeedback(wrap) {
       if (!wrap || wrap.querySelector(".fb-row") || wrap.getAttribute("data-direction") !== "ai") return;
-      const bubble = wrap.querySelector(".message-bubble"), textEl = wrap.querySelector(".whitespace-pre-wrap");
-      if (!bubble || !textEl || !textEl.textContent.trim()) return;
-      const row = mk("div", "fb-row mt-1.5 flex items-center gap-1 text-xs text-gray-600");
-      const up = mk("button", "fb-up px-1.5 py-0.5 rounded hover:bg-black/5", "👍"); up.type = "button"; up.setAttribute("aria-label", "Good reply"); up.title = "Good reply";
-      const dn = mk("button", "fb-down px-1.5 py-0.5 rounded hover:bg-black/5", "👎"); dn.type = "button"; dn.setAttribute("aria-label", "Needs improvement"); dn.title = "Needs improvement: tell it why";
-      const st = mk("span", "fb-status ml-1 text-[11px]"); st.setAttribute("aria-live", "polite");
-      up.addEventListener("click", function () { const f = wrap.querySelector(".fb-form"); if (f) f.remove(); sendFeedback(wrap, { rating: "up", tags: [], note: "", better_reply: "" }); });
-      dn.addEventListener("click", function () { openFeedbackForm(wrap); });
-      row.appendChild(mk("span", "text-[11px] text-gray-500 mr-1", "Was this reply good?")); row.appendChild(up); row.appendChild(dn); row.appendChild(st);
-      bubble.appendChild(row);
-      if (fbState[textEl.textContent]) paintFeedback(wrap, fbState[textEl.textContent]);
+      const bubble = wrap.querySelector(".message-bubble");
+      if (!bubble || !aiTextOf(wrap).trim()) return;
+      const row = mk("div", "fb-row mt-1 -mb-0.5 flex items-center gap-0.5"); row.setAttribute("role", "group"); row.setAttribute("aria-label", "Rate this reply");
+      const up = mk("button", "fb-up"); up.type = "button"; up.innerHTML = SVG_UP; up.setAttribute("aria-label", "Good response"); up.title = "Good response";
+      const dn = mk("button", "fb-down"); dn.type = "button"; dn.innerHTML = SVG_DOWN; dn.setAttribute("aria-label", "Bad response"); dn.title = "Bad response";
+      up.addEventListener("click", async function () {
+        try { await sendFeedback(wrap, { rating: "up", tags: [], note: "", better_reply: "" }); fbToast("Thanks for the feedback."); } catch (_) { fbToast("Could not save feedback. Please try again."); }
+      });
+      dn.addEventListener("click", function () { openFeedbackDialog(wrap); });
+      row.appendChild(up); row.appendChild(dn); bubble.appendChild(row);
+      paintFeedback(wrap, fbState[aiTextOf(wrap)] || null);
     }
     function decorateAllFeedback() { stack.querySelectorAll('[data-direction="ai"]').forEach(decorateFeedback); }
+    decorateAllFeedback();   // buttons appear immediately; saved ratings are painted in once loaded
     (async function loadFeedbackState() {
       try {
         const r = await inboxFetch("/api/inbox/feedback?e164=" + encodeURIComponent(E164));
         if (r.ok) { (await r.json()).feedback.forEach(function (f) { fbState[f.ai_text] = f.rating; }); }
       } catch (_) {}
-      decorateAllFeedback();
+      stack.querySelectorAll('[data-direction="ai"]').forEach(function (w) { paintFeedback(w, fbState[aiTextOf(w)] || null); });
     })();
 
     // ---------- FR10: 24h window banner + send form gate ----------
@@ -568,9 +623,8 @@
              </span>
              <span class="text-green-700 font-mono text-xs">${closesAt ? new Date(closesAt * 1000).toLocaleTimeString() : ""}</span>
            </div>`;
-        const canType = humanMode && !lockedBy;   // typing only in Human mode
-        if (textarea) { textarea.disabled = !canType; textarea.style.opacity = "1"; }
-        if (sendBtn) sendBtn.disabled = !canType;
+        if (textarea) { textarea.disabled = !!lockedBy; textarea.style.opacity = "1"; }
+        if (sendBtn) sendBtn.disabled = !(humanMode && !lockedBy);   // Send needs Human mode
         if (overlay) overlay.classList.add("hidden");
       } else {
         banner.className = "w-full sticky top-0 z-40 px-4 md:px-10 py-2.5 banner-slideIn";
