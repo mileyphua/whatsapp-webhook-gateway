@@ -14,6 +14,7 @@ load_dotenv()
 
 import booking
 import contact_names
+import users_store
 import reply_guard
 import feedback_store
 import learning
@@ -58,6 +59,18 @@ try:
         _JINJA_TEMPLATE_ERROR = f"Template directory not found: {_template_dir!r}"
 except Exception as _jinja_exc:  # pragma: no cover - jinja2 is in requirements.txt but tolerate absence
     _JINJA_TEMPLATE_ERROR = f"Jinja2 import failed: {type(_jinja_exc).__name__}: {_jinja_exc!s}"
+# --- new shared-inbox env (Petrobind Global only, optional) ---
+# INBOX_ADMIN_TOKEN gates both /api/inbox/* (bearer) AND the /inbox/* HTML pages.
+INBOX_ADMIN_TOKEN: str = os.getenv("INBOX_ADMIN_TOKEN") or ""
+INBOX_ADMIN_NAME: str = os.getenv("INBOX_ADMIN_NAME") or "Petrobind Admin"
+INBOX_SESSION_EXPIRE_MINUTES: int = int(os.getenv("INBOX_SESSION_EXPIRE_MINUTES", "60") or "60") or 60
+# Session cookies are SIGNED with this key so nobody can hand-make one. It must be defined before the
+# serializer below uses it (it used to come after, which silently disabled signing).
+_INBOX_COOKIE_SIGNING_KEY: bytes = (
+    os.getenv("INBOX_COOKIE_SIGNING_KEY")
+    or (INBOX_ADMIN_TOKEN + "___jarvis-petrobind-inbox-v1")
+).encode("utf-8")[:64] or b"jarvis-petrobind-inbox-v1-default-key-change-me"
+
 try:
     from itsdangerous import URLSafeTimedSerializer as _Serializer  # type: ignore
     if len(_INBOX_COOKIE_SIGNING_KEY) >= 8:
@@ -71,18 +84,6 @@ except Exception as _its_exc:  # pragma: no cover - itsdangerous in requirements
 from rag import load_index_if_needed
 
 app = FastAPI(title="WhatsApp Webhook Gateway", version="1.1.0")
-
-# --- new shared-inbox env (Petrobind Global only, optional) ---
-# INBOX_ADMIN_TOKEN gates both /api/inbox/* (bearer) AND the /inbox/* HTML pages.
-INBOX_ADMIN_TOKEN: str = os.getenv("INBOX_ADMIN_TOKEN") or ""
-INBOX_ADMIN_NAME: str = os.getenv("INBOX_ADMIN_NAME") or "Petrobind Admin"
-INBOX_SESSION_EXPIRE_MINUTES: int = int(os.getenv("INBOX_SESSION_EXPIRE_MINUTES", "60") or "60") or 60
-# Cheap unsigned login session cookie for V1 (single-admin). Signing prevents
-# a visitor editing the cookie manually; not a full auth stack.
-_INBOX_COOKIE_SIGNING_KEY: bytes = (
-    os.getenv("INBOX_COOKIE_SIGNING_KEY")
-    or (INBOX_ADMIN_TOKEN + "___jarvis-petrobind-inbox-v1")
-).encode("utf-8")[:64] or b"jarvis-petrobind-inbox-v1-default-key-change-me"
 
 TEMPLATES_CACHE: Optional[Tuple[float, List[Dict[str, Any]]]] = None
 TEMPLATES_CACHE_TTL = 300
@@ -228,6 +229,12 @@ _NONTEXT_MEDIA_REPLY: dict[str, str] = {
     "unknown": "",
 }
 
+
+
+@app.on_event("startup")
+async def _team_cache_startup() -> None:
+    await _refresh_users_cache()
+    asyncio.create_task(_users_cache_loop())
 
 
 @app.on_event("startup")
@@ -1961,7 +1968,50 @@ except Exception as _static_exc:  # pragma: no cover — best-effort mount
 # Shared Inbox HTML pages (/inbox/*) — Jinja2 + signed cookie session auth
 # ============================================================================
 
-def _issue_inbox_session(*, held_by_name: str) -> tuple[str, str]:
+# ---- Team accounts: one admin (the INBOX_ADMIN_TOKEN password) + members the admin adds ----
+# Members see only the inbox. The cache lets the (sync) auth checks notice a disabled/deleted member within
+# seconds without a database call on every request; the admin's own edits refresh it immediately.
+_USERS_CACHE: Dict[str, Dict[str, Any]] = {}
+_LOGIN_FAILS: Dict[str, List[float]] = {}
+LOGIN_MAX_FAILS = 5
+LOGIN_WINDOW_SEC = 300
+
+
+async def _refresh_users_cache() -> None:
+    try:
+        users = await users_store._all()
+    except Exception as exc:
+        print(f"[TEAM] user cache refresh failed: {type(exc).__name__}: {exc!s}")
+        return
+    _USERS_CACHE.clear()
+    _USERS_CACHE.update(users)
+
+
+async def _users_cache_loop() -> None:
+    while True:
+        await asyncio.sleep(20)
+        await _refresh_users_cache()
+
+
+def _client_ip(request: Request) -> str:
+    xff = request.headers.get("x-forwarded-for")
+    if xff:
+        return xff.split(",")[0].strip()
+    return request.client.host if request.client else "?"
+
+
+def _login_key(request: Request, username: str) -> str:
+    return f"{_client_ip(request)}|{(username or 'admin').strip().lower()}"
+
+
+def _login_locked(key: str) -> bool:
+    now = time.time()
+    fails = [t for t in _LOGIN_FAILS.get(key, []) if now - t < LOGIN_WINDOW_SEC]
+    _LOGIN_FAILS[key] = fails
+    return len(fails) >= LOGIN_MAX_FAILS
+
+
+def _issue_inbox_session(*, held_by_name: str, role: str = "admin", user: str = "admin") -> tuple[str, str]:
     """Create a new inbox admin session. Returns (session_id: str, signed_cookie_value: str).
 
     Session payload: {sid, sub="admin", name, iat}
@@ -1971,16 +2021,15 @@ def _issue_inbox_session(*, held_by_name: str) -> tuple[str, str]:
     sid = _secrets.token_urlsafe(24) if _secrets else f"sid-{int(time.time()*1000)}"
     payload = {
         "sid": sid,
-        "sub": "admin",
+        "sub": "admin" if role == "admin" else "agent",
+        "role": role,
+        "user": user,
         "name": held_by_name or INBOX_ADMIN_NAME,
         "iat": int(time.time()),
     }
-    signed = sid  # fallback if itsdangerous missing → unsigned, risk but usable
-    if _ITS_DANGEROUS_OK and _URL_SAFE_SERIALIZER is not None:
-        signed = _URL_SAFE_SERIALIZER.dumps(payload)
-    else:
-        import json as _json_for_cookie
-        signed = _base64.urlsafe_b64encode(_json_for_cookie.dumps(payload).encode("utf-8")).decode("ascii").rstrip("=")
+    if not (_ITS_DANGEROUS_OK and _URL_SAFE_SERIALIZER is not None):
+        raise RuntimeError("cookie signing unavailable: refusing to issue an unsigned session")
+    signed = _URL_SAFE_SERIALIZER.dumps(payload)
     return sid, signed
 
 
@@ -1992,27 +2041,41 @@ def _verify_inbox_session_cookie(request: Request) -> Optional[dict]:
     raw = request.cookies.get("inbox_session")
     if not raw:
         return None
-    payload: Optional[dict] = None
-    if _ITS_DANGEROUS_OK and _URL_SAFE_SERIALIZER is not None:
-        try:
-            max_age = INBOX_SESSION_EXPIRE_MINUTES * 60
-            payload = _URL_SAFE_SERIALIZER.loads(raw, max_age=max_age)
-        except Exception:
-            return None
-    else:
-        # Fallback: parse the base64 payload (no signature verification — only when itsdangerous broken in dev)
-        try:
-            import json as _json_for_cookie
-            padding = "=" * (-len(raw) % 4)
-            data = _base64.urlsafe_b64decode((raw + padding).encode("ascii"))
-            payload = _json_for_cookie.loads(data.decode("utf-8"))
-        except Exception:
-            return None
-    if not isinstance(payload, dict) or payload.get("sub") != "admin":
+    if not (_ITS_DANGEROUS_OK and _URL_SAFE_SERIALIZER is not None):
+        return None                         # fail closed: without signing no cookie can be trusted
+    try:
+        payload = _URL_SAFE_SERIALIZER.loads(raw, max_age=INBOX_SESSION_EXPIRE_MINUTES * 60)
+    except Exception:
         return None
-    if "sid" not in payload:
+    if not isinstance(payload, dict) or "sid" not in payload:
         return None
-    return payload
+    sub = payload.get("sub")
+    if sub == "admin":                      # includes cookies issued before roles existed
+        payload["role"], payload["user"] = "admin", "admin"
+        return payload
+    if sub == "agent":
+        member = _USERS_CACHE.get(str(payload.get("user") or ""))
+        if not member or member.get("disabled"):
+            return None                     # removed or disabled: the cookie stops working
+        payload["role"], payload["name"] = "agent", member.get("name") or payload.get("user")
+        return payload
+    return None
+
+
+def _auth_info(request: Request) -> Optional[dict]:
+    """Who is calling? {role: admin|agent, user, name, sid} or None. The bearer token and old cookies are the admin."""
+    via_header = _bearer_token(request)
+    if INBOX_ADMIN_TOKEN and via_header and _hmac_compare(via_header, INBOX_ADMIN_TOKEN):
+        return {"role": "admin", "user": "admin", "name": INBOX_ADMIN_NAME, "sid": ""}
+    p = _verify_inbox_session_cookie(request)
+    if p:
+        return {"role": p["role"], "user": p["user"], "name": p.get("name") or INBOX_ADMIN_NAME, "sid": p.get("sid", "")}
+    return None
+
+
+def _hmac_compare(a: str, b: str) -> bool:
+    import hmac as _hmac
+    return _hmac.compare_digest(a.encode("utf-8"), b.encode("utf-8"))
 
 
 def _inbox_page_gating_checks(request: Request) -> Optional[Response]:
@@ -2031,6 +2094,8 @@ def _inbox_page_gating_checks(request: Request) -> Optional[Response]:
                "<code>python3 -c 'import secrets; print(secrets.token_urlsafe(32))</code>, " \
                "add it to env, restart.</p></body></html>")
         return HTMLResponse(content=body, status_code=503)
+    if not (_ITS_DANGEROUS_OK and _URL_SAFE_SERIALIZER is not None):
+        return HTMLResponse(content="<h1>503 — Login unavailable</h1><p>Session signing is not available on the server (is <code>itsdangerous</code> installed?).</p>", status_code=503)
     if _JINJA_ENV is None:
         body = (
             "<html><body><h1>503 — Templates Missing</h1>"
@@ -2104,13 +2169,28 @@ async def inbox_login_submit(request: Request) -> Response:
     except Exception:
         form_data = {}
     password = ""
+    username = ""
     if form_data is not None:
         password = (form_data.get("password") or "").strip()
-    if not password or password != INBOX_ADMIN_TOKEN:
-        # Bad password → redirect back to login with error flash
+        username = users_store.normalize_username(form_data.get("username") or "")
+    key = _login_key(request, username)
+    if _login_locked(key):
+        return RedirectResponse(url="/inbox/login?error=too-many", status_code=302)
+    role = user = name = None
+    if username in ("", "admin"):
+        if password and INBOX_ADMIN_TOKEN and _hmac_compare(password, INBOX_ADMIN_TOKEN):
+            role, user, name = "admin", "admin", INBOX_ADMIN_NAME
+    else:
+        member = await users_store.get_user(username)
+        if users_store.verify_password(member, password):
+            role, user, name = "agent", member["username"], member["name"]
+            _USERS_CACHE[user] = member
+    if role is None:
+        _LOGIN_FAILS.setdefault(key, []).append(time.time())
         return RedirectResponse(url="/inbox/login?error=bad-password", status_code=302)
-    # Good password → issue signed session cookie
-    session_id, signed_cookie = _issue_inbox_session(held_by_name=INBOX_ADMIN_NAME)
+    _LOGIN_FAILS.pop(key, None)
+    # Good credentials → issue signed session cookie
+    session_id, signed_cookie = _issue_inbox_session(held_by_name=name, role=role, user=user)
     secure_flag = _request_is_https(request)
     cookie_attrs = {
         "key": "inbox_session",
@@ -2136,9 +2216,9 @@ async def inbox_login_submit(request: Request) -> Response:
         max_age=INBOX_SESSION_EXPIRE_MINUTES * 60,
     )
     asyncio.create_task(_sb.audit(
-        actor=INBOX_ADMIN_NAME,
+        actor=name,
         action="login",
-        detail={"session_id": session_id},
+        detail={"session_id": session_id, "role": role, "user": user},
     ))
     return resp
 
@@ -2375,15 +2455,32 @@ def _requires_inbox_bearer(request: Request) -> Optional[JSONResponse]:
             content={"detail": "INBOX_ADMIN_TOKEN not configured on server"},
             status_code=503,
         )
-    via_header = _bearer_token(request)
-    header_ok = bool(via_header and via_header == INBOX_ADMIN_TOKEN)
-    cookie_ok = _verify_inbox_session_cookie(request) is not None
-    if not (header_ok or cookie_ok):
+    if _auth_info(request) is None:
         return JSONResponse(
             content={"detail": "Unauthorized: need Bearer INBOX_ADMIN_TOKEN header OR valid signed inbox_session cookie"},
             status_code=status.HTTP_401_UNAUTHORIZED,
         )
     return None
+
+
+def _requires_admin(request: Request) -> Optional[JSONResponse]:
+    """Like _requires_inbox_bearer, but only the admin passes (team members get 403)."""
+    fail = _requires_inbox_bearer(request)
+    if fail:
+        return fail
+    if (_auth_info(request) or {}).get("role") != "admin":
+        return JSONResponse(content={"detail": "Admin only"}, status_code=status.HTTP_403_FORBIDDEN)
+    return None
+
+
+@app.get("/api/inbox/me")
+async def api_inbox_me(request: Request) -> JSONResponse:
+    """Who am I logged in as, and what may I do?"""
+    fail = _requires_inbox_bearer(request)
+    if fail:
+        return fail
+    info = _auth_info(request) or {}
+    return JSONResponse(content={"role": info.get("role"), "user": info.get("user"), "name": info.get("name")})
 
 
 @app.get("/api/inbox/chats")
