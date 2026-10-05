@@ -109,9 +109,15 @@ async function crawl(path, label, jar) {
   check("menu: ⋮ opens the options", !$(L, "#chat-actions").hidden, "still hidden");
   click(L, "#act-rename"); await sleep(100);
   const nameInput = $(L, "#chat-menu-input, #chat-menu input[type=text]");
-  check("menu: Rename shows a name box", !!nameInput, "no input");
+  check("menu: Set name shows a name box that STAYS open (what a person sees)", !!nameInput && !$(L, "#chat-menu").hidden, "popover hidden=" + $(L, "#chat-menu").hidden);
   if (nameInput) { nameInput.value = "Audit Buyer"; nameInput.dispatchEvent(new L.w.Event("input", { bubbles: true })); click(L, "#chat-menu-save"); await sleep(600);
-    check("menu: Save stores the name", calls(L, /PUT \/api\/inbox\/chats\/60120000001\/name/).some((c) => c.status === 200), JSON.stringify(calls(L, /name/))); }
+    check("menu: Save stores the name", calls(L, /PUT \/api\/inbox\/chats\/60120000001\/name/).some((c) => c.status === 200), JSON.stringify(calls(L, /name/)));
+    check("menu: the saved name shows in the chat list and the box closes", /Audit Buyer/.test(($(L, `li[data-e164="${A}"]`) || { textContent: "" }).textContent) && $(L, "#chat-menu").hidden, ($(L, `li[data-e164="${A}"]`) || { textContent: "" }).textContent.slice(0, 80) + " hidden=" + $(L, "#chat-menu").hidden); }
+  // the list refreshes itself every few seconds: opening ⋮ then waiting must not break "Set name"
+  click(L, `li[data-e164="${A}"] .chat-menu-btn`); await sleep(4600);
+  click(L, "#act-rename"); await sleep(150);
+  check("menu: Set name still works after the list refreshed in the background", !$(L, "#chat-menu").hidden && $(L, "#chat-menu-input").value === "Audit Buyer", "hidden=" + $(L, "#chat-menu").hidden + " value=" + $(L, "#chat-menu-input").value);
+  click(L, "#chat-menu-cancel"); check("menu: Cancel closes the name box", $(L, "#chat-menu").hidden, "still open");
   // forget memory
   click(L, `li[data-e164="${A}"] .chat-menu-btn`); click(L, "#act-forget"); await sleep(100);
   check("menu: Forget opens its confirmation", $(L, "#forget-dialog").hasAttribute("open"), "dialog closed");
@@ -214,6 +220,12 @@ async function crawl(path, label, jar) {
   check("logout: signs out and returns to the login page", lo.status === 302 && /login/.test(lo.headers.get("location") || ""), lo.status + " " + lo.headers.get("location"));
 
   for (const [path, label] of [["/inbox/team", "Team page"], ["/inbox/learning", "Learning page"], ["/inbox/logs", "Logs page"], ["/inbox/admin", "Ops page"], ["/inbox/guide", "Guide page"], ["/inbox/architecture", "Architecture page"]]) await crawl(path, label, admin);
+
+  const O = await openPage("/inbox/admin", admin); await sleep(1200);
+  const imp = $(O, '.ops-act[data-action="import-history"]');
+  check("Ops: Import history is switched off, with the reason, when Supabase is not set up", imp && imp.disabled && /Supabase/.test(imp.title), imp && (imp.disabled + " " + imp.title));
+  check("Ops: other actions stay available", !$(O, '.ops-act[data-action="force-redis-scan"]').disabled, "disabled");
+  O.w.close();
 
   const failed = results.filter((r) => !r.ok);
   console.log(JSON.stringify({ total: results.length, failed: failed.length, results }));

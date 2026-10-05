@@ -82,7 +82,27 @@
   }
 
   // -------- Panels render ---------------------------------------------------
+  // Actions that only make sense when a service is set up are switched off (with the reason) when it is not.
+  function syncActionAvailability(checks) {
+    if (!checks || typeof checks !== "object") return;
+    const needs = [
+      ["import-history", checks.supabase_inbox, "Needs Supabase, which is not set up on this server (nothing to import)."],
+      ["run-followups", checks.followups_configured, "Needs FOLLOWUPS_CRON_TOKEN to be set on the server."],
+      ["flush-scheduled", checks.followups_configured, "Needs FOLLOWUPS_CRON_TOKEN to be set on the server."],
+    ];
+    needs.forEach(function (n) {
+      const el = $('.ops-act[data-action="' + n[0] + '"]');
+      if (!el) return;
+      const off = n[1] === false;
+      el.disabled = off;
+      el.title = off ? n[2] : "";
+      el.style.opacity = off ? "0.5" : "";
+      el.style.cursor = off ? "not-allowed" : "";
+    });
+  }
+
   function renderChecks(checks) {
+    syncActionAvailability(checks);
     const grid = $("#checks-grid");
     if (!grid) return;
     if (!checks || typeof checks !== "object") {
@@ -318,7 +338,12 @@
         return;
       }
       if (!res.ok) {
-        toast("Action failed: " + name, "HTTP " + res.status + " — " + JSON.stringify(res.payload || {}).slice(0, 240), "bad");
+        const why = res.payload && (res.payload.detail || res.payload.error || res.payload.message);
+        if (res.status === 503) {       // a feature this server isn't set up for: say so plainly instead of a red "failed"
+          toast("Not available on this server: " + name, why || "A service this action needs is not configured.", "warn");
+        } else {
+          toast("Action failed: " + name, "HTTP " + res.status + " — " + (why || JSON.stringify(res.payload || {}).slice(0, 240)), "bad");
+        }
         return;
       }
       const summary = JSON.stringify(res.payload || {}).replace(/[{}"]/g, " ").replace(/\s+/g, " ").trim().slice(0, 200);

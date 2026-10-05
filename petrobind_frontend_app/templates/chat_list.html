@@ -274,17 +274,22 @@
   });
 
   // ---- rename
-  document.getElementById("act-rename").addEventListener("click", function () {
+  document.getElementById("act-rename").addEventListener("click", function (ev) {
+    ev.stopPropagation();    // otherwise the page-wide "click outside closes popovers" handler shuts the box the instant it opens
     actions.hidden = true;
-    document.getElementById("chat-menu-num").textContent = current.getAttribute("data-e164");
+    var e164 = current.getAttribute("data-e164");
+    var live = document.querySelector('#chat-scroll li[data-e164="' + e164 + '"]');      // the list re-draws itself every few seconds
+    if (live) { current = live; lastBtn = live.querySelector(".chat-menu-btn") || lastBtn; }
+    document.getElementById("chat-menu-num").textContent = e164;
     input.value = current.getAttribute("data-name") || "";
+    err.hidden = true;
     place(menu, lastBtn); input.focus(); input.select();
   });
   function save(name) {
     if (!current) return;
     fetch("/api/inbox/chats/" + encodeURIComponent(current.getAttribute("data-e164")) + "/name", {
       method: "PUT", credentials: "same-origin", headers: {"Content-Type": "application/json"}, body: JSON.stringify({name: name})
-    }).then(function (r) { return r.json(); }).then(function (j) {
+    }).then(function (r) { if (r.status === 401) { location.href = "/inbox/login"; throw new Error("Your session ended - log in again"); } return r.json(); }).then(function (j) {
       if (!j.ok) throw new Error(j.detail || "failed");
       closeAll(); refresh();
     }).catch(function (e) { err.textContent = "Could not save: " + e.message; err.hidden = false; });
@@ -332,7 +337,7 @@
     var btn = this, e164 = forgetTarget; if (!e164) return;
     btn.disabled = true; btn.textContent = "Forgetting\u2026";
     fetch("/api/inbox/chats/" + encodeURIComponent(e164) + "/forget-memory", { method: "POST", credentials: "same-origin" })
-      .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); })
+      .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, status: r.status, j: j }; }, function () { return { ok: r.ok, status: r.status, j: {} }; }); })
       .then(function (res) { if (res.status === 401) { location.href = "/inbox/login"; return; } if (!res.ok) throw new Error(res.j.detail || "failed"); forgetDlg.close(); listToast("Done. The AI no longer remembers this chat."); refresh(); })
       .catch(function (e) { var d = document.getElementById("forget-err"); d.textContent = "Could not reset: " + e.message; d.hidden = false; })
       .finally(function () { btn.disabled = false; btn.textContent = "Forget"; });
@@ -378,7 +383,7 @@
       applyFilter(); mark();
     }).catch(function () {});
   }
-  setInterval(function () { if (!document.hidden && menu.hidden) refresh(); }, 4000);
+  setInterval(function () { if (!document.hidden && menu.hidden && actions.hidden) refresh(); }, 4000);
 })();
 </script>
 {% endblock %}
