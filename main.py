@@ -320,8 +320,7 @@ async def _persist_inbound_safe(msg: Dict[str, Any]) -> None:
     if not _sb_enabled():
         return
     try:
-        async with asyncio.timeout(2.0):  # type: ignore[attr-defined]
-            await _sb.insert_inbound_message(msg)  # type: ignore[attr-defined]
+        await asyncio.wait_for(_sb.insert_inbound_message(msg), timeout=2.0)  # wait_for works on every Python version
     except Exception as exc:
         wamid = msg.get("id")
         print(
@@ -341,11 +340,15 @@ async def _persist_outbound_safe(
     error_detail: Optional[str] = None,
     sent_by: Optional[str] = None,
 ) -> None:
+    """Save a message we sent to the inbox database. Awaited by the sender (not a background task that can be
+    lost), retried once, and a final failure is written to the log page (audit) so it is never invisible.
+    Never raises: the WhatsApp send already happened."""
     if not _sb_enabled():
         return
-    try:
-        async with asyncio.timeout(2.0):  # type: ignore[attr-defined]
-            await _sb.insert_outbound_message(  # type: ignore[attr-defined]
+    last: Optional[BaseException] = None
+    for attempt in (1, 2):
+        try:
+            await asyncio.wait_for(_sb.insert_outbound_message(  # wait_for works on every Python version
                 e164=e164,
                 direction=direction,
                 text=text,
@@ -354,12 +357,19 @@ async def _persist_outbound_safe(
                 errored=errored,
                 error_detail=error_detail,
                 sent_by=sent_by,
-            )
-    except Exception as exc:
-        print(
-            f"[PERSIST-WARN] outbound save to={e164!r} dir={direction!r} failed: "
-            f"{type(exc).__name__}: {str(exc)[:120]}"
-        )
+            ), timeout=4.0)
+            return
+        except Exception as exc:
+            last = exc
+            if attempt == 1:
+                await asyncio.sleep(0.4)
+    err = f"{type(last).__name__}: {str(last)[:160]}"
+    print(f"[PERSIST-WARN] outbound save to={e164!r} dir={direction!r} failed twice: {err}")
+    try:
+        await _sb.audit(actor="system", action="persist_failed", e164=e164,
+                        detail={"kind": "outbound", "direction": direction, "error": err, "text_preview": (text or "")[:80]})
+    except Exception:
+        pass
 
 
 async def _claim_is_held_by_other(e164: str, my_session_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
@@ -1050,24 +1060,24 @@ async def send_whatsapp_text(
         if 200 <= r.status_code < 300:
             sent_id = (body.get("messages") or [{}])[0].get("id") if body else None
             # --- additive: persist successful send to shared inbox DB ---
-            asyncio.create_task(_persist_outbound_safe(
+            await _persist_outbound_safe(
                 e164=to,
                 direction=sender_direction,
                 text=text,
                 reply_to_wamid=reply_to_message_id,
                 sent_id_from_graph=sent_id,
                 sent_by=sent_by,
-            ))
+            )
             return body
         # --- additive: persist failed send with errored flag ---
-        asyncio.create_task(_persist_outbound_safe(
+        await _persist_outbound_safe(
             e164=to,
             direction=sender_direction,
             text=text,
             reply_to_wamid=reply_to_message_id,
             errored=True,
             error_detail=str(body.get("error", {}).get("message", r.text))[:500],
-        ))
+        )
         raise RuntimeError(
             f"WhatsApp API {r.status_code} (pnid={resolved_pnid}): "
             f"{body.get('error', {}).get('message', r.text)}"
@@ -1608,8 +1618,7 @@ async def followups_scan(request: Request) -> JSONResponse:
             if not _sb_enabled():
                 return
             try:
-                async with asyncio.timeout(2.0):  # type: ignore[attr-defined]
-                    await _sb.insert_outbound_schedule(r)  # type: ignore[attr-defined]
+                await asyncio.wait_for(_sb.insert_outbound_schedule(r), timeout=2.0)
             except Exception as exc:
                 print(
                     f"[PERSIST-WARN] outbound_schedule deferred save e164={r.get('e164')!r} "
