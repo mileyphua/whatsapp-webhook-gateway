@@ -9,6 +9,15 @@ raise into the reply path.
   ai_lessons  : id -> {id, ts, text, kind, status, source_ids}
                 kind   = style | behavior | knowledge
                 status = pending | active | disabled
+                (now used for "knowledge base to check" to-dos; behaviour lives in skills)
+  ai_skills   : id -> {id, ts, name, description, instructions, always, status,
+                       proposal, source_ids}
+                A skill mirrors a SKILL.md: `description` says WHEN to use it (always
+                visible to the planner), `instructions` say WHAT to do and why (loaded
+                only when the skill applies, or always if `always`).
+                status   = pending | active | disabled
+                proposal = None | {description, instructions, always, ts}: a suggested
+                           revision of an active skill, waiting for human approval
 """
 import json
 import os
@@ -26,6 +35,9 @@ _lock = threading.Lock()
 
 FEEDBACK = "ai_feedback"
 LESSONS = "ai_lessons"
+SKILLS = "ai_skills"
+MAX_DESC = 300
+MAX_INSTR = 900
 MAX_TEXT = 2000
 
 
@@ -167,3 +179,86 @@ async def set_lesson_status(lesson_id: str, status: str) -> Optional[Dict[str, A
 
 async def delete_lesson(lesson_id: str) -> None:
     await _hdel(LESSONS, lesson_id)
+
+
+# ------------------------------------------------------------------- skills
+
+def _clean_skill_fields(name: str, description: str, instructions: str) -> Dict[str, str]:
+    name, description, instructions = (name or "").strip()[:60], (description or "").strip()[:MAX_DESC], (instructions or "").strip()[:MAX_INSTR]
+    if not name or not description or not instructions:
+        raise ValueError("a skill needs a name, a 'when to use' description and instructions")
+    return {"name": name, "description": description, "instructions": instructions}
+
+
+async def list_skills(status: Optional[str] = None) -> List[Dict[str, Any]]:
+    items = list((await _hgetall(SKILLS)).values())
+    if status:
+        items = [i for i in items if i.get("status") == status]
+    items.sort(key=lambda i: (i.get("name") or "").lower())
+    return items
+
+
+async def create_skill(*, name: str, description: str, instructions: str, always: bool = False,
+                       status: str = "pending", source_ids: Optional[List[str]] = None) -> Dict[str, Any]:
+    f = _clean_skill_fields(name, description, instructions)
+    sid = uuid.uuid4().hex[:12]
+    item = {"id": sid, "ts": time.time(), **f, "always": bool(always), "status": status,
+            "proposal": None, "source_ids": (source_ids or [])[:30]}
+    await _hset(SKILLS, sid, item)
+    return item
+
+
+async def get_skill(skill_id: str) -> Optional[Dict[str, Any]]:
+    return (await _hgetall(SKILLS)).get(skill_id)
+
+
+async def edit_skill(skill_id: str, *, name: str, description: str, instructions: str, always: bool) -> Optional[Dict[str, Any]]:
+    """A human edit is an approval: it applies immediately and clears any pending proposal."""
+    item = await get_skill(skill_id)
+    if not item:
+        return None
+    item.update(_clean_skill_fields(name, description, instructions))
+    item["always"] = bool(always)
+    item["proposal"] = None
+    await _hset(SKILLS, skill_id, item)
+    return item
+
+
+async def propose_skill_update(skill_id: str, *, description: str, instructions: str, always: bool, source_ids: List[str]) -> Optional[Dict[str, Any]]:
+    item = await get_skill(skill_id)
+    if not item:
+        return None
+    f = _clean_skill_fields(item["name"], description, instructions)
+    if f["description"] == item["description"] and f["instructions"] == item["instructions"] and bool(always) == item.get("always"):
+        return item  # nothing actually changes
+    item["proposal"] = {"description": f["description"], "instructions": f["instructions"], "always": bool(always), "ts": time.time()}
+    item["source_ids"] = list(dict.fromkeys((item.get("source_ids") or []) + source_ids))[:30]
+    await _hset(SKILLS, skill_id, item)
+    return item
+
+
+async def resolve_proposal(skill_id: str, approve: bool) -> Optional[Dict[str, Any]]:
+    item = await get_skill(skill_id)
+    if not item or not item.get("proposal"):
+        return item
+    if approve:
+        p = item["proposal"]
+        item.update(description=p["description"], instructions=p["instructions"], always=bool(p.get("always")))
+    item["proposal"] = None
+    await _hset(SKILLS, skill_id, item)
+    return item
+
+
+async def set_skill_status(skill_id: str, status: str) -> Optional[Dict[str, Any]]:
+    if status not in ("pending", "active", "disabled"):
+        raise ValueError("bad status")
+    item = await get_skill(skill_id)
+    if not item:
+        return None
+    item["status"] = status
+    await _hset(SKILLS, skill_id, item)
+    return item
+
+
+async def delete_skill(skill_id: str) -> None:
+    await _hdel(SKILLS, skill_id)

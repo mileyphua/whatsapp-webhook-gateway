@@ -1,4 +1,4 @@
-"""Feedback -> lessons -> approved guidance loop (file backend, LLM faked, no network)."""
+"""Feedback -> skills loop (file backend, LLM faked, no network)."""
 import asyncio
 import os
 import tempfile
@@ -12,13 +12,16 @@ import feedback_store as fs
 import learning
 from fastapi.testclient import TestClient
 
+PRICING = {"name": "Pricing questions", "always": False,
+           "description": "Buyer asks how much something costs, for a quote, or to negotiate a price.",
+           "instructions": "Ask for quantity and destination first, because price depends on both. Never quote a number yourself; hand over to a colleague."}
 
-class LearningLoop(unittest.TestCase):
+
+class SkillsLoop(unittest.TestCase):
     def setUp(self):
         fs._REDIS_URL = fs._REDIS_TOKEN = ""
-        self._tmp = tempfile.NamedTemporaryFile(suffix=".json", delete=False)
-        self._tmp.close(); os.remove(self._tmp.name)
-        fs._FILE = self._tmp.name
+        tmp = tempfile.NamedTemporaryFile(suffix=".json", delete=False); tmp.close(); os.remove(tmp.name)
+        fs._FILE = self._file = tmp.name
         learning.invalidate_cache()
         import main
         main.INBOX_ADMIN_TOKEN = main.INBOX_ADMIN_TOKEN or "t" * 20
@@ -27,50 +30,93 @@ class LearningLoop(unittest.TestCase):
         self.c = TestClient(main.app)
 
     def tearDown(self):
-        if os.path.exists(self._tmp.name):
-            os.remove(self._tmp.name)
+        if os.path.exists(self._file):
+            os.remove(self._file)
         learning.invalidate_cache()
 
-    def test_full_loop(self):
+    def _rate(self, **kw):
+        body = dict({"e164": "60100000009", "ai_text": "Great question! The price is $500.", "buyer_text": "price VG30?", "rating": "down",
+                     "tags": ["Sounds like a bot"], "note": "Don't quote prices", "better_reply": "Depends on volume. How many tonnes and where to?"}, **kw)
+        self.assertEqual(self.c.post("/api/inbox/feedback", headers=self.H, json=body).status_code, 200)
+
+    def _skills(self):
+        return self.c.get("/api/inbox/learning", headers=self.H).json()["skills"]
+
+    def test_feedback_becomes_an_approved_skill_used_only_when_it_fits(self):
         c, H = self.c, self.H
-        body = {"e164": "60100000009", "ai_text": "Great question! Thanks for reaching out. Thanks for reaching out.",
-                "buyer_text": "price VG30?", "rating": "down", "tags": ["Sounds like a bot", "Repeats itself"],
-                "note": "Stop opening with Great question", "better_reply": "VG30 depends on volume. How many tonnes?"}
-        self.assertEqual(c.post("/api/inbox/feedback", headers=H, json=body).status_code, 200)
-        # re-rating the same reply overwrites rather than duplicating
-        c.post("/api/inbox/feedback", headers=H, json=dict(body, note="Stop opening with Great question!!"))
-        c.post("/api/inbox/feedback", headers=H, json={"e164": "60100000009", "ai_text": "VG30 needs a volume. How many tonnes?", "buyer_text": "price VG30?", "rating": "up"})
-        self.assertEqual(c.post("/api/inbox/feedback", headers=H, json=dict(body, rating="meh")).status_code, 422)
+        self._rate()
+        self._rate(ai_text="VG30 needs a volume first. How many tonnes?", rating="up", better_reply="", note="")
         st = c.get("/api/inbox/learning", headers=H).json()["stats"]
         self.assertEqual((st["total"], st["up"], st["down"], st["approval_rate"]), (2, 1, 1, 50))
 
-        # nothing changes in the prompt until a human approves a lesson
-        before = asyncio.run(learning.guidance_block())
-        fake = {"lessons": [{"text": "Never open with praise like 'Great question'; answer directly.", "kind": "style"},
-                            {"text": "Check the knowledge base for: VG30 lead time", "kind": "knowledge"}]}
+        fake = {"skills": [PRICING], "knowledge_checks": ["Check the knowledge base for: VG30 lead time"]}
         with mock.patch.object(learning, "_llm_json", mock.AsyncMock(return_value=fake)):
             res = c.post("/api/inbox/learning/learn", headers=H).json()
-        self.assertEqual((res["processed"], res["new_lessons"]), (1 + 1, 2))
-        lessons = c.get("/api/inbox/learning", headers=H).json()["lessons"]
-        self.assertTrue(all(l["status"] == "pending" for l in lessons))
-        learning.invalidate_cache()
-        self.assertNotIn("Never open with praise", asyncio.run(learning.guidance_block()))
+        self.assertEqual((res["processed"], res["new_skills"], res["updated_skills"]), (2, 1, 0))
+        learned = [s for s in self._skills() if not s.get("builtin")]
+        self.assertEqual([s["status"] for s in learned], ["pending"])
 
-        style = next(l for l in lessons if l["kind"] == "style")
-        self.assertEqual(c.patch(f"/api/inbox/learning/lessons/{style['id']}", headers=H, json={"status": "active"}).status_code, 200)
-        after = asyncio.run(learning.guidance_block())
-        self.assertIn("Never open with praise", after)
-        self.assertIn("How many tonnes?", after)          # approved better reply used as an example
-        self.assertNotIn("knowledge base for: VG30", after)  # knowledge items never enter the prompt
-        self.assertIn("Writing like a person", before)    # base rules always present
+        # pending skills do nothing to the prompt
+        skills = asyncio.run(learning.active_skills())
+        self.assertNotIn("Pricing questions", [s["name"] for s in skills])
 
-        # nothing left to learn => no LLM call
-        with mock.patch.object(learning, "_llm_json", mock.AsyncMock(side_effect=AssertionError("should not call"))):
-            self.assertEqual(c.post("/api/inbox/learning/learn", headers=H).json()["processed"], 0)
+        sid = learned[0]["id"]
+        self.assertEqual(c.patch(f"/api/inbox/learning/skills/{sid}", headers=H, json={"status": "active"}).status_code, 200)
+        skills = asyncio.run(learning.active_skills())
+        ids = [s["id"] for s in skills]
+        self.assertIn(sid, ids)
+        # only loaded when selected; the always-on voice skill is always there
+        with_it = learning.build_guidance(skills, [sid])
+        without = learning.build_guidance(skills, [])
+        self.assertIn("Ask for quantity and destination first", with_it)
+        self.assertNotIn("Ask for quantity and destination first", without)
+        self.assertIn("Sound like a person", without)
+        self.assertIn("How many tonnes and where to?", with_it)      # approved better reply used as an example
+        # catalog shown to the planner lists the WHEN of non-always skills only
+        cat = learning.catalog_text(skills)
+        self.assertIn("Buyer asks how much", cat)
+        self.assertNotIn("Sound like a person", cat)
+        # knowledge checks are surfaced separately and never injected
+        know = c.get("/api/inbox/learning", headers=H).json()["knowledge"]
+        self.assertEqual(len(know), 1)
+        self.assertNotIn("VG30 lead time", with_it)
+
+        # more feedback on the same situation proposes a REVISION, applied only after approval
+        self._rate(ai_text="Sure. About $480 per tonne.", buyer_text="how much for 100t?", note="Also never quote numbers")
+        revised = dict(PRICING, instructions="Ask for quantity and destination first. Never quote a number; say a colleague will confirm.")
+        with mock.patch.object(learning, "_llm_json", mock.AsyncMock(return_value={"skills": [revised], "knowledge_checks": []})):
+            res = c.post("/api/inbox/learning/learn", headers=H).json()
+        self.assertEqual((res["new_skills"], res["updated_skills"]), (0, 1))
+        s = next(x for x in self._skills() if x["id"] == sid)
+        self.assertIn("say a colleague will confirm", s["proposal"]["instructions"])
+        self.assertNotIn("say a colleague will confirm", s["instructions"])
+        c.patch(f"/api/inbox/learning/skills/{sid}", headers=H, json={"proposal": "approve"})
+        s = next(x for x in self._skills() if x["id"] == sid)
+        self.assertIsNone(s["proposal"]); self.assertIn("say a colleague will confirm", s["instructions"])
+
+    def test_manual_skill_and_builtin_protection(self):
+        c, H = self.c, self.H
+        r = c.post("/api/inbox/learning/skills", headers=H, json={"name": "Shipping", "description": "Buyer asks about delivery time", "instructions": "Ask the port first because lead time depends on it."})
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json()["skill"]["status"], "active")           # a human wrote it, so it is live
+        self.assertEqual(c.post("/api/inbox/learning/skills", headers=H, json={"name": "x"}).status_code, 422)
+        for call in (lambda: c.patch("/api/inbox/learning/skills/builtin-hand-over", headers=H, json={"status": "disabled"}),
+                     lambda: c.delete("/api/inbox/learning/skills/builtin-human-voice", headers=H)):
+            self.assertEqual(call().status_code, 400)
+
+    def test_selection_fallback_and_planner_validation(self):
+        skills = learning.BUILTIN_SKILLS + [dict(PRICING, id="p1", status="active")]
+        self.assertEqual(learning.select_without_planner(skills, "can you give me a quote for the price?")[:1], ["p1"])
+        self.assertEqual(learning.select_without_planner(skills, "hello"), [])
+        fake = {"intent": "price", "needs_human": False, "skills": ["p1", "made-up-id"], "points": ["ask quantity"], "avoid": []}
+        with mock.patch.object(learning, "_llm_json", mock.AsyncMock(return_value=fake)):
+            plan = asyncio.run(learning.plan_reply(buyer_text="how much", recent=[], ref_titles=[], skills=skills))
+        self.assertEqual(plan["skills"], ["p1"])   # unknown ids are dropped
 
     def test_requires_auth(self):
         self.assertEqual(self.c.post("/api/inbox/feedback", json={}).status_code, 401)
         self.assertEqual(self.c.get("/api/inbox/learning").status_code, 401)
+        self.assertEqual(self.c.post("/api/inbox/learning/skills", json={}).status_code, 401)
 
 
 if __name__ == "__main__":

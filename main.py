@@ -2894,20 +2894,100 @@ async def api_inbox_list_feedback(request: Request) -> JSONResponse:
 
 @app.get("/api/inbox/learning")
 async def api_inbox_learning(request: Request) -> JSONResponse:
-    """Learning dashboard data: accuracy trend, lessons, recent feedback."""
+    """Learning dashboard data: accuracy trend, skills, knowledge-base to-dos, recent feedback."""
     fail = _requires_inbox_bearer(request)
     if fail:
         return fail
+    stored = await feedback_store.list_skills()
+    skills = [dict(b, proposal=None) for b in learning.BUILTIN_SKILLS] + stored
     return JSONResponse(content={
         "stats": await learning.stats(),
-        "lessons": await feedback_store.list_lessons(),
+        "skills": skills,
+        "knowledge": [l for l in await feedback_store.list_lessons() if l.get("kind") == "knowledge"],
         "recent_feedback": (await feedback_store.list_feedback())[:50],
     })
 
 
+def _skill_audit(action: str, item: Dict[str, Any]) -> None:
+    asyncio.create_task(_sb.audit(actor=INBOX_ADMIN_NAME, action=action, detail={"skill": item.get("name"), "status": item.get("status")}))
+
+
+@app.post("/api/inbox/learning/skills")
+async def api_inbox_skill_create(request: Request) -> JSONResponse:
+    """Create a skill by hand (applies immediately: a human wrote it)."""
+    fail = _requires_inbox_bearer(request)
+    if fail:
+        return fail
+    try:
+        b: Dict[str, Any] = await request.json()
+        item = await feedback_store.create_skill(name=str(b.get("name") or ""), description=str(b.get("description") or ""),
+                                                 instructions=str(b.get("instructions") or ""), always=bool(b.get("always")), status="active")
+    except ValueError as exc:
+        return JSONResponse(content={"detail": str(exc)}, status_code=422)
+    learning.invalidate_cache(); _skill_audit("skill_created", item)
+    return JSONResponse(content={"ok": True, "skill": item})
+
+
+@app.put("/api/inbox/learning/skills/{skill_id}")
+async def api_inbox_skill_edit(skill_id: str, request: Request) -> JSONResponse:
+    """Edit a learned skill (a human edit is an approval)."""
+    fail = _requires_inbox_bearer(request)
+    if fail:
+        return fail
+    if skill_id.startswith("builtin-"):
+        return JSONResponse(content={"detail": "Built-in skills can't be edited"}, status_code=400)
+    try:
+        b: Dict[str, Any] = await request.json()
+        item = await feedback_store.edit_skill(skill_id, name=str(b.get("name") or ""), description=str(b.get("description") or ""),
+                                               instructions=str(b.get("instructions") or ""), always=bool(b.get("always")))
+    except ValueError as exc:
+        return JSONResponse(content={"detail": str(exc)}, status_code=422)
+    if item is None:
+        return JSONResponse(content={"detail": "skill not found"}, status_code=404)
+    learning.invalidate_cache(); _skill_audit("skill_edited", item)
+    return JSONResponse(content={"ok": True, "skill": item})
+
+
+@app.patch("/api/inbox/learning/skills/{skill_id}")
+async def api_inbox_skill_status(skill_id: str, request: Request) -> JSONResponse:
+    """Approve / turn off a skill, or approve / reject a suggested revision ({"proposal": "approve"|"reject"})."""
+    fail = _requires_inbox_bearer(request)
+    if fail:
+        return fail
+    if skill_id.startswith("builtin-"):
+        return JSONResponse(content={"detail": "Built-in skills can't be changed"}, status_code=400)
+    try:
+        b: Dict[str, Any] = await request.json()
+        if b.get("proposal") in ("approve", "reject"):
+            item = await feedback_store.resolve_proposal(skill_id, b["proposal"] == "approve")
+            action = "skill_update_" + ("approved" if b["proposal"] == "approve" else "rejected")
+        else:
+            item = await feedback_store.set_skill_status(skill_id, str(b.get("status") or ""))
+            action = "skill_" + str(b.get("status"))
+    except ValueError:
+        return JSONResponse(content={"detail": "status must be pending, active or disabled"}, status_code=422)
+    if item is None:
+        return JSONResponse(content={"detail": "skill not found"}, status_code=404)
+    learning.invalidate_cache(); _skill_audit(action, item)
+    return JSONResponse(content={"ok": True, "skill": item})
+
+
+@app.delete("/api/inbox/learning/skills/{skill_id}")
+async def api_inbox_skill_delete(skill_id: str, request: Request) -> JSONResponse:
+    """Delete a learned skill permanently."""
+    fail = _requires_inbox_bearer(request)
+    if fail:
+        return fail
+    if skill_id.startswith("builtin-"):
+        return JSONResponse(content={"detail": "Built-in skills can't be deleted"}, status_code=400)
+    await feedback_store.delete_skill(skill_id)
+    learning.invalidate_cache()
+    return JSONResponse(content={"ok": True})
+
+
 @app.post("/api/inbox/learning/learn")
 async def api_inbox_learning_learn(request: Request) -> JSONResponse:
-    """Turn new feedback into pending lessons now."""
+    """Turn new feedback into skill proposals now."""
     fail = _requires_inbox_bearer(request)
     if fail:
         return fail

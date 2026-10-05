@@ -40,6 +40,34 @@ class SingleTurnSignature(unittest.TestCase):
         self.assertTrue(any("GUIDANCE-MARKER" in c for c in sys_msgs))
 
 
+class EndToEnd(unittest.TestCase):
+    def test_person_request_loads_handover_skill_and_flags_human(self):
+        import json
+        import feedback_store as fs
+        import learning
+        fs._REDIS_URL = fs._REDIS_TOKEN = ""
+        cs._REDIS_URL = cs._REDIS_TOKEN = ""
+        fs._FILE = "/tmp/_e2e_skills.json"
+        learning.invalidate_cache()
+        plan = json.dumps({"intent": "wants a person", "needs_human": True, "human_reason": "asked for a call",
+                           "skills": [], "points": ["confirm handover"], "avoid": [], "tone": "brief"})
+        client, calls = _fake_client([plan, "Of course, a colleague will pick this up here shortly."])
+
+        async def no_refs(_q):
+            return []
+
+        with mock.patch.object(L, "_openrouter_client", return_value=client), mock.patch.object(L, "retrieve", no_refs), \
+                mock.patch.object(L, "index_is_ready", lambda: False):
+            reply = asyncio.run(L.handle_incoming_message(phone_number="60188800001", inbound_text="Can I speak to a real person please?"))
+        sess = cs._SESSIONS["60188800001"]
+        self.assertTrue(sess.needs_human_since)                      # chat is in the human queue
+        self.assertEqual(calls["n"], 2)                               # plan first, then the reply
+        reply_prompt = " ".join(m["content"] for m in calls["messages"][-1] if m["role"] == "system")
+        self.assertIn("Hand over to a human", reply_prompt)          # skill chosen because a person was requested
+        self.assertIn("Sound like a person", reply_prompt)           # always-on skill
+        self.assertIn("colleague", reply)
+
+
 class ReplyGuard(unittest.TestCase):
     def test_human_requests(self):
         for t in ("Can I speak to a real person?", "can someone call me", "I want a human", "talk to your sales director"):

@@ -1,13 +1,13 @@
 {% extends "base.html" %}
-{% block title %}Learning — Petrobind Inbox{% endblock %}
+{% block title %}Skills & learning — Petrobind Inbox{% endblock %}
 {% block content %}
 <main class="flex-1 overflow-y-auto bg-gray-50">
   <div class="max-w-6xl mx-auto px-4 md:px-8 py-6 space-y-6">
 
     <header class="flex flex-wrap items-end justify-between gap-3">
       <div>
-        <h1 class="text-xl font-semibold">Learning</h1>
-        <p class="text-sm text-gray-600 max-w-3xl">Rate the AI's replies with 👍 / 👎 inside any chat. Your feedback becomes short lessons about <em>how</em> to reply. Once you approve a lesson, it guides every future reply. Facts always come from the knowledge base, never from lessons.</p>
+        <h1 class="text-xl font-semibold">Skills &amp; learning</h1>
+        <p class="text-sm text-gray-600 max-w-3xl">The AI answers using <b>skills</b>: each one says <em>when</em> it applies and <em>what to do</em>. Rate replies with 👍 / 👎 inside any chat and your feedback is grouped into skills, new ones or improvements to existing ones. Nothing changes the replies until you approve it. Facts always come from the knowledge base, never from skills.</p>
       </div>
       <div class="flex items-center gap-2">
         <span id="learn-note" class="text-xs text-gray-500" aria-live="polite"></span>
@@ -19,13 +19,23 @@
 
     <section class="bg-white border border-gray-200 rounded-lg p-4" aria-labelledby="h-trend">
       <h2 id="h-trend" class="text-sm font-semibold mb-1">Reply quality over time</h2>
-      <p class="text-xs text-gray-500 mb-3">Share of rated replies marked good, per day (last 14 days). It should climb as approved lessons take effect.</p>
+      <p class="text-xs text-gray-500 mb-3">Share of rated replies marked good, per day (last 14 days). It should climb as approved skills take effect.</p>
       <div id="trend" class="flex items-end gap-2 h-32" role="img" aria-label="Daily approval rate"></div>
     </section>
 
-    <section aria-labelledby="h-lessons">
-      <h2 id="h-lessons" class="text-sm font-semibold mb-2">Lessons</h2>
-      <div id="lessons" class="space-y-2"></div>
+    <section aria-labelledby="h-skills">
+      <div class="flex items-center justify-between mb-2">
+        <h2 id="h-skills" class="text-sm font-semibold">Skills</h2>
+        <button id="new-skill-btn" type="button" class="px-3 py-1.5 rounded-md border border-gray-300 bg-white text-sm hover:bg-gray-50">+ New skill</button>
+      </div>
+      <div id="new-skill-form" hidden class="bg-white border border-gray-200 rounded-lg p-4 mb-3"></div>
+      <div id="skills" class="space-y-2"></div>
+    </section>
+
+    <section aria-labelledby="h-know" id="know-section" hidden>
+      <h2 id="h-know" class="text-sm font-semibold mb-1">Knowledge base to check</h2>
+      <p class="text-xs text-gray-500 mb-2">Feedback said a fact may be wrong. Fix the source material, then mark it done. These never go into the AI's instructions.</p>
+      <div id="know" class="space-y-2"></div>
     </section>
 
     <section aria-labelledby="h-recent">
@@ -44,12 +54,17 @@
 (function () {
   var $ = function (id) { return document.getElementById(id); };
   function el(tag, cls, text) { var e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; }
-  var KIND = { style: ["Style", "bg-blue-100 text-blue-800"], behavior: ["Behaviour", "bg-indigo-100 text-indigo-800"], knowledge: ["Knowledge base to check", "bg-amber-100 text-amber-800"] };
+  function btn(label, cls, fn) { var b = el("button", "px-3 py-1 rounded-md text-xs font-medium " + cls, label); b.type = "button"; b.addEventListener("click", fn); return b; }
+  function api(path, method, body) {
+    return fetch("/api/inbox/learning/" + path, { method: method, credentials: "same-origin", headers: { "Content-Type": "application/json" }, body: body ? JSON.stringify(body) : undefined })
+      .then(function (r) { return r.json().then(function (j) { if (!r.ok) throw new Error(j.detail || "failed"); return j; }); });
+  }
+  var editing = {};   // skill id -> true while its edit form is open (kept across auto-refresh)
 
   function cards(s) {
     var box = $("stat-cards"); box.textContent = "";
     [["Approval rate", s.approval_rate == null ? "—" : s.approval_rate + "%"], ["Rated replies", s.total], ["Needs improvement", s.down],
-     ["Active lessons", s.lessons_active], ["Waiting for approval", s.lessons_pending]].forEach(function (c) {
+     ["Skills in use", s.skills_active], ["Waiting for approval", s.skills_waiting]].forEach(function (c) {
       var d = el("div", "bg-white border border-gray-200 rounded-lg p-3"); d.appendChild(el("div", "text-xs text-gray-500", c[0])); d.appendChild(el("div", "text-2xl font-semibold tabular-nums", String(c[1]))); box.appendChild(d);
     });
     $("learn-btn").textContent = s.unprocessed ? "Learn from " + s.unprocessed + " new rating" + (s.unprocessed === 1 ? "" : "s") : "Learn from new feedback";
@@ -68,36 +83,81 @@
     });
   }
 
-  function act(id, method, body) {
-    return fetch("/api/inbox/learning/lessons/" + id, { method: method, credentials: "same-origin", headers: { "Content-Type": "application/json" }, body: body ? JSON.stringify(body) : undefined }).then(load);
+  // ---- skill form (used for "New skill" and "Edit")
+  function skillForm(init, onSave, onCancel) {
+    var f = el("div", "space-y-2");
+    function field(label, ctrl, hint) { var w = el("label", "block"); w.appendChild(el("span", "block text-xs font-medium text-gray-700 mb-0.5", label)); w.appendChild(ctrl); if (hint) w.appendChild(el("span", "block text-[11px] text-gray-500 mt-0.5", hint)); return w; }
+    var name = el("input", "w-full border border-gray-300 rounded px-2 py-1.5 text-sm"); name.maxLength = 60; name.value = init.name || "";
+    var when = el("textarea", "w-full border border-gray-300 rounded px-2 py-1.5 text-sm"); when.rows = 2; when.maxLength = 300; when.value = init.description || "";
+    var what = el("textarea", "w-full border border-gray-300 rounded px-2 py-1.5 text-sm"); what.rows = 4; what.maxLength = 900; what.value = init.instructions || "";
+    var always = el("input"); always.type = "checkbox"; always.checked = !!init.always;
+    var aw = el("label", "flex items-center gap-2 text-sm"); aw.appendChild(always); aw.appendChild(el("span", null, "Use on every reply (only for tone and habits that always apply)"));
+    var err = el("div", "text-xs text-red-600"); err.hidden = true;
+    var row = el("div", "flex justify-end gap-2");
+    row.appendChild(btn("Cancel", "border border-gray-300 hover:bg-gray-50", onCancel));
+    row.appendChild(btn("Save skill", "bg-pb-navy text-white", function () {
+      onSave({ name: name.value, description: when.value, instructions: what.value, always: always.checked }).catch(function (e) { err.textContent = e.message; err.hidden = false; });
+    }));
+    f.appendChild(field("Name", name)); f.appendChild(field("When should the AI use it?", when, "Describe the situation, e.g. “Buyer asks about delivery time or shipping”."));
+    f.appendChild(field("What should it do, and why?", what, "Explain the reason too; the AI follows guidance better when it knows why. No prices or product facts.")); f.appendChild(aw); f.appendChild(err); f.appendChild(row);
+    return f;
   }
-  function btn(label, cls, fn) { var b = el("button", "px-3 py-1 rounded-md text-xs font-medium " + cls, label); b.type = "button"; b.addEventListener("click", fn); return b; }
 
-  function lessons(list) {
-    var box = $("lessons"); box.textContent = "";
-    if (!list.length) { box.appendChild(el("div", "bg-white border border-dashed border-gray-300 rounded-lg p-6 text-sm text-gray-500 text-center", "No lessons yet. Rate a few replies, then press “Learn from new feedback”.")); return; }
+  var STATUS = { active: ["In use", "text-green-700"], pending: ["Waiting for your approval", "text-amber-700"], disabled: ["Off", "text-gray-500"] };
+
+  function skillCard(s) {
+    var card = el("div", "bg-white border rounded-lg p-3 " + (s.status === "pending" || s.proposal ? "border-amber-300" : "border-gray-200"));
+    var top = el("div", "flex flex-wrap items-start justify-between gap-3");
+    var left = el("div", "min-w-0 flex-1"), tags = el("div", "flex flex-wrap items-center gap-2 mb-1");
+    tags.appendChild(el("span", "font-semibold text-sm text-gray-900", s.name));
+    if (s.builtin) tags.appendChild(el("span", "px-2 py-0.5 rounded-full text-[11px] bg-gray-100 text-gray-700", "Built-in"));
+    tags.appendChild(el("span", "px-2 py-0.5 rounded-full text-[11px] " + (s.always ? "bg-blue-100 text-blue-800" : "bg-indigo-100 text-indigo-800"), s.always ? "Every reply" : "When it fits"));
+    var st = STATUS[s.status] || STATUS.active; tags.appendChild(el("span", "text-[11px] font-semibold " + st[1], st[0]));
+    left.appendChild(tags);
+    var when = el("div", "text-sm text-gray-700"); var wl = el("span", "font-medium", "When: "); when.appendChild(wl); when.appendChild(document.createTextNode(s.description)); left.appendChild(when);
+    var det = el("details", "mt-1"); det.appendChild(el("summary", "text-xs text-pb-navy cursor-pointer", "What it does")); det.appendChild(el("p", "mt-1 text-sm text-gray-800 whitespace-pre-wrap", s.instructions)); left.appendChild(det);
+    top.appendChild(left);
+    var right = el("div", "flex flex-wrap items-center gap-2");
+    if (!s.builtin) {
+      if (s.status === "pending") { right.appendChild(btn("Approve", "bg-green-600 text-white hover:bg-green-700", function () { api("skills/" + s.id, "PATCH", { status: "active" }).then(load); })); }
+      else if (s.status === "active") right.appendChild(btn("Turn off", "border border-gray-300 hover:bg-gray-50", function () { api("skills/" + s.id, "PATCH", { status: "disabled" }).then(load); }));
+      else right.appendChild(btn("Turn on", "border border-gray-300 hover:bg-gray-50", function () { api("skills/" + s.id, "PATCH", { status: "active" }).then(load); }));
+      right.appendChild(btn("Edit", "border border-gray-300 hover:bg-gray-50", function () { editing[s.id] = true; load(); }));
+      right.appendChild(btn("Delete", "text-red-700 hover:bg-red-50", function () { api("skills/" + s.id, "DELETE").then(load); }));
+    }
+    top.appendChild(right); card.appendChild(top);
+
+    if (s.proposal) {
+      var p = el("div", "mt-3 rounded-md bg-amber-50 border border-amber-200 p-3");
+      p.appendChild(el("div", "text-xs font-semibold text-amber-800 mb-1", "Suggested update from your latest feedback"));
+      var pw = el("div", "text-sm text-gray-800"); pw.appendChild(el("span", "font-medium", "When: ")); pw.appendChild(document.createTextNode(s.proposal.description)); p.appendChild(pw);
+      p.appendChild(el("p", "mt-1 text-sm text-gray-800 whitespace-pre-wrap", s.proposal.instructions));
+      var pr = el("div", "mt-2 flex gap-2");
+      pr.appendChild(btn("Approve update", "bg-green-600 text-white hover:bg-green-700", function () { api("skills/" + s.id, "PATCH", { proposal: "approve" }).then(load); }));
+      pr.appendChild(btn("Keep current", "border border-gray-300 bg-white hover:bg-gray-50", function () { api("skills/" + s.id, "PATCH", { proposal: "reject" }).then(load); }));
+      p.appendChild(pr); card.appendChild(p);
+    }
+    if (editing[s.id]) {
+      var form = skillForm(s, function (v) { return api("skills/" + s.id, "PUT", v).then(function () { delete editing[s.id]; return load(); }); }, function () { delete editing[s.id]; load(); });
+      form.className += " mt-3 pt-3 border-t border-gray-200"; card.appendChild(form);
+    }
+    return card;
+  }
+
+  function skills(list) {
+    var box = $("skills"); box.textContent = "";
     var order = { pending: 0, active: 1, disabled: 2 };
-    list.sort(function (a, b) { return order[a.status] - order[b.status] || b.ts - a.ts; });
-    list.forEach(function (l) {
-      var k = KIND[l.kind] || KIND.behavior, card = el("div", "bg-white border rounded-lg p-3 flex flex-wrap items-start justify-between gap-3 " + (l.status === "pending" ? "border-amber-300" : "border-gray-200"));
-      var left = el("div", "min-w-0 flex-1");
-      var tags = el("div", "flex items-center gap-2 mb-1");
-      tags.appendChild(el("span", "px-2 py-0.5 rounded-full text-[11px] font-medium " + k[1], k[0]));
-      tags.appendChild(el("span", "text-[11px] font-semibold " + (l.status === "active" ? "text-green-700" : l.status === "pending" ? "text-amber-700" : "text-gray-500"), l.status === "active" ? "In use" : l.status === "pending" ? "Waiting for your approval" : "Off"));
-      left.appendChild(tags); left.appendChild(el("div", "text-sm text-gray-900", l.text)); card.appendChild(left);
-      var right = el("div", "flex items-center gap-2");
-      if (l.kind === "knowledge") {
-        if (l.status !== "disabled") right.appendChild(btn("Mark as done", "border border-gray-300 hover:bg-gray-50", function () { act(l.id, "PATCH", { status: "disabled" }); }));
-      } else if (l.status === "pending") {
-        right.appendChild(btn("Approve", "bg-green-600 text-white hover:bg-green-700", function () { act(l.id, "PATCH", { status: "active" }); }));
-        right.appendChild(btn("Reject", "border border-gray-300 hover:bg-gray-50", function () { act(l.id, "PATCH", { status: "disabled" }); }));
-      } else if (l.status === "active") {
-        right.appendChild(btn("Turn off", "border border-gray-300 hover:bg-gray-50", function () { act(l.id, "PATCH", { status: "disabled" }); }));
-      } else {
-        right.appendChild(btn("Turn on", "border border-gray-300 hover:bg-gray-50", function () { act(l.id, "PATCH", { status: "active" }); }));
-      }
-      right.appendChild(btn("Delete", "text-red-700 hover:bg-red-50", function () { act(l.id, "DELETE"); }));
-      card.appendChild(right); box.appendChild(card);
+    list.sort(function (a, b) { return (b.proposal ? 1 : 0) - (a.proposal ? 1 : 0) || order[a.status] - order[b.status] || (b.builtin ? 1 : 0) - (a.builtin ? 1 : 0) || a.name.localeCompare(b.name); });
+    list.forEach(function (s) { box.appendChild(skillCard(s)); });
+    if (list.filter(function (s) { return !s.builtin; }).length === 0) box.appendChild(el("div", "bg-white border border-dashed border-gray-300 rounded-lg p-5 text-sm text-gray-500 text-center", "No learned skills yet. Rate a few replies in the chats, then press “Learn from new feedback”. You can also add one yourself with “+ New skill”."));
+  }
+
+  function knowledge(list) {
+    var open = list.filter(function (l) { return l.status !== "disabled"; }), box = $("know"); box.textContent = "";
+    $("know-section").hidden = open.length === 0;
+    open.forEach(function (l) {
+      var c = el("div", "bg-white border border-amber-200 rounded-lg p-3 flex items-center justify-between gap-3"); c.appendChild(el("div", "text-sm text-gray-900", l.text));
+      c.appendChild(btn("Mark as done", "border border-gray-300 hover:bg-gray-50", function () { api("lessons/" + l.id, "PATCH", { status: "disabled" }).then(load); })); box.appendChild(c);
     });
   }
 
@@ -117,19 +177,26 @@
   }
 
   function load() {
+    if (Object.keys(editing).length || !$("new-skill-form").hidden) { /* don't wipe an open form on auto-refresh */ }
     return fetch("/api/inbox/learning", { credentials: "same-origin" }).then(function (r) { return r.ok ? r.json() : null; }).then(function (j) {
       if (!j) { $("learn-note").textContent = "Could not load (are you logged in?)"; return; }
-      cards(j.stats); trend(j.stats.daily); lessons(j.lessons); recent(j.recent_feedback);
+      cards(j.stats); trend(j.stats.daily); skills(j.skills); knowledge(j.knowledge); recent(j.recent_feedback);
     });
   }
+
+  $("new-skill-btn").addEventListener("click", function () {
+    var box = $("new-skill-form"); if (!box.hidden) { box.hidden = true; return; }
+    box.textContent = ""; box.hidden = false;
+    box.appendChild(skillForm({}, function (v) { return api("skills", "POST", v).then(function () { box.hidden = true; return load(); }); }, function () { box.hidden = true; }));
+  });
   $("learn-btn").addEventListener("click", function () {
     var b = this; b.disabled = true; $("learn-note").textContent = "Reading your feedback…";
-    fetch("/api/inbox/learning/learn", { method: "POST", credentials: "same-origin" }).then(function (r) { return r.json(); }).then(function (j) {
-      $("learn-note").textContent = j.note || (j.new_lessons ? j.new_lessons + " new lesson" + (j.new_lessons === 1 ? "" : "s") + " to review below." : "Nothing new to learn from this feedback.");
+    api("learn", "POST").then(function (j) {
+      $("learn-note").textContent = j.note || ((j.new_skills || j.updated_skills) ? (j.new_skills ? j.new_skills + " new skill" + (j.new_skills === 1 ? "" : "s") : "") + (j.new_skills && j.updated_skills ? " and " : "") + (j.updated_skills ? j.updated_skills + " suggested update" + (j.updated_skills === 1 ? "" : "s") : "") + " to review below." : "Nothing new to learn from this feedback.");
       return load();
     }).catch(function () { $("learn-note").textContent = "Something went wrong. Try again."; }).finally(function () { b.disabled = false; });
   });
-  load(); setInterval(function () { if (!document.hidden) load(); }, 15000);
+  load(); setInterval(function () { if (!document.hidden && !Object.keys(editing).length && $("new-skill-form").hidden) load(); }, 15000);
 })();
 </script>
 {% endblock %}

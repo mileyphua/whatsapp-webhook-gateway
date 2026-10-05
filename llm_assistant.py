@@ -1085,23 +1085,28 @@ async def handle_incoming_message(
     #    (what the buyer wants, is a human needed, what not to repeat).
     extra_system: Optional[str] = None
     try:
-        guidance = await learning.guidance_block()
+        skills = await learning.active_skills()
         plan = await learning.plan_reply(
             buyer_text=safe_text,
             recent=session.history[-9:-1],
             ref_titles=[getattr(c, "title", "") for c in references],
+            skills=skills,
         )
-        extra_system = guidance
+        asked_human = reply_guard.asks_for_human(safe_text)
+        selected = list((plan or {}).get("skills") or []) or learning.select_without_planner(skills, safe_text)
+        if asked_human or (plan or {}).get("needs_human"):
+            selected.append("builtin-hand-over")   # the hand-over skill applies whenever a human is needed
+        extra_system = learning.build_guidance(skills, selected)
         if plan:
             extra_system += "\n\n" + learning.plan_note(plan)
             if plan.get("needs_human") and not draft_only:
                 _flag_needs_human(session, str(plan.get("human_reason") or "Planner: a human is needed")[:300])
-        if reply_guard.asks_for_human(safe_text):
+        if asked_human:
             extra_system += "\n\nThe buyer asked for a person. Tell them, briefly and naturally, that a colleague will pick this up on this chat."
             if not draft_only:
                 _flag_needs_human(session, f"Buyer asked for a human: {safe_text[:150]}")
     except Exception as exc:
-        print(f"[llm] planning/guidance skipped: {type(exc).__name__}: {exc!s}")
+        print(f"[llm] planning/skills skipped: {type(exc).__name__}: {exc!s}")
 
     # 4b. Run the LLM turn with tool-calling loop.
     text = None
