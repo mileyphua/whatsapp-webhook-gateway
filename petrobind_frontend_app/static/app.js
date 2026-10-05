@@ -407,8 +407,7 @@
         system: `<div class="text-[10px] font-bold uppercase tracking-wider text-amber-700/80 mb-0.5">system note</div>`,
       };
       const label = labelMap[direction] || "";
-      const ts = created_at ? new Date(created_at) : new Date();
-      const timeStr = ts.toISOString().replace("T", " ").slice(0, 19);
+      const timeStr = window.PBTime.format(created_at || new Date());
       const erroredHtml = errored
         ? `<div class="mt-1.5 text-[11px] text-red-700 bg-red-50 rounded px-2 py-1 border border-red-100">⚠ Send failed</div>`
         : "";
@@ -445,7 +444,7 @@
         attHtml +
         erroredHtml +
         `<div class="mt-1 flex items-center justify-end gap-2">
-           <div class="text-[10px] text-gray-400"><time>${timeStr}</time></div>
+           <div class="text-[10px] text-gray-400"><time title="GMT+8">${timeStr}</time></div>
          </div>`;
       wrap.appendChild(bubble);
       stack.appendChild(wrap);
@@ -782,7 +781,7 @@
                <svg class="w-4 h-4 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
                <strong>24-hour reply window OPEN</strong> — expires in <span id="window-expires-text">${formatDuration(secondsLeft)}</span>. Freeform messages allowed.
              </span>
-             <span class="text-green-700 font-mono text-xs">${closesAt ? new Date(closesAt * 1000).toLocaleTimeString() : ""}</span>
+             <span class="text-green-700 font-mono text-xs">${closesAt ? "closes " + window.PBTime.timeOnly(closesAt) + " " + window.PBTime.LABEL : ""}</span>
            </div>`;
         if (textarea) { textarea.disabled = !!lockedBy; textarea.style.opacity = "1"; }
         syncAttach();
@@ -907,12 +906,12 @@
         : "bg-pb-humanBubble text-gray-900 rounded-tr-sm border border-blue-100";
       bubble.className =
         "message-bubble template-bubble max-w-[80%] md:max-w-[70%] px-3.5 py-2 rounded-2xl text-[15px] leading-relaxed shadow-sm " + cls;
-      const timeStr = new Date().toISOString().replace("T", " ").slice(0, 19);
+      const timeStr = window.PBTime.format(new Date());
       bubble.innerHTML =
         labelDiv +
         `<div class="whitespace-pre-wrap break-words">${escapeHtml(previewText)}</div>` +
         `<div class="mt-1 flex items-center justify-end gap-2">
-           <div class="text-[10px] text-gray-400"><time>${timeStr}</time></div>
+           <div class="text-[10px] text-gray-400"><time title="GMT+8">${timeStr}</time></div>
          </div>`;
       wrap.appendChild(bubble);
       tStack.appendChild(wrap);

@@ -166,7 +166,7 @@
     if (!list.length) { var tr = el("tr"), td = el("td", "px-3 py-6 text-center text-gray-500", "No feedback yet."); td.colSpan = 6; tr.appendChild(td); body.appendChild(tr); return; }
     list.forEach(function (f) {
       var tr = el("tr", "border-t border-gray-100 align-top");
-      tr.appendChild(el("td", "px-3 py-2 text-xs font-mono whitespace-nowrap", new Date(f.ts * 1000).toISOString().replace("T", " ").slice(0, 16)));
+      tr.appendChild(el("td", "px-3 py-2 text-xs font-mono whitespace-nowrap", window.PBTime.format(f.ts)));
       var a = el("td", "px-3 py-2"), link = el("a", "text-pb-navy underline text-xs font-mono", f.e164); link.href = "/inbox/chats#" + encodeURIComponent(f.e164); a.appendChild(link); tr.appendChild(a);
       tr.appendChild(el("td", "px-3 py-2 font-semibold " + (f.rating === "up" ? "text-green-700" : "text-red-700"), f.rating === "up" ? "👍 Good" : "👎 Improve"));
       tr.appendChild(el("td", "px-3 py-2 max-w-xs text-gray-700", f.buyer_text || "—"));

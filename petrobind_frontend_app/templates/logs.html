@@ -88,7 +88,7 @@
     rows.forEach(function (ev, i) {
       var id = (ev.id != null ? ev.id : ev.ts + i), l = label(ev.action), tr = el("tr", "border-t border-gray-100 align-top hover:bg-gray-50");
       var hasMore = ev.detail_jsonb && Object.keys(ev.detail_jsonb).length;
-      tr.appendChild(el("td", "px-3 py-2 font-mono text-xs whitespace-nowrap", String(ev.ts || "").replace("T", " ").slice(0, 19)));
+      tr.appendChild(el("td", "px-3 py-2 font-mono text-xs whitespace-nowrap", window.PBTime.format(ev.ts, { seconds: true })));
       tr.appendChild(el("td", "px-3 py-2", ev.actor || ""));
       var tdw = el("td", "px-3 py-2"); tdw.appendChild(el("span", "inline-block px-2 py-0.5 rounded-full text-xs font-medium " + l[1], l[0])); tr.appendChild(tdw);
       var nm = names[(ev.e164 || "").replace(/\D/g, "")];

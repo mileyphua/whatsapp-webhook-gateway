@@ -68,7 +68,7 @@
                   </div>
                   {% if chat.last_message_created_at %}
                   <div class="text-xs text-gray-400 whitespace-nowrap shrink-0">
-                    <time>{{ chat.last_message_created_at[:16].replace('T', ' ') }}</time>
+                    <time title="{{ tz_label }}">{{ chat.last_message_created_at | gmt8 }}</time>
                   </div>
                   {% endif %}
                 </div>

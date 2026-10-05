@@ -1,0 +1,121 @@
+"""Throwaway inbox for the button audit: local mode (no Supabase/Redis), WhatsApp replaced by a fake, two seeded chats.
+Run:  python3 tests/ui_audit/server.py PORT      Chats: 60120000001 (buyer wrote 2h ago, window OPEN), 60120000002 (30h ago, CLOSED)."""
+import asyncio
+import os
+import sys
+import tempfile
+import time
+
+for k in ("UPSTASH_REDIS_REST_URL", "UPSTASH_REDIS_REST_TOKEN", "SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY"):
+    os.environ[k] = ""
+ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+sys.path.insert(0, ROOT)
+tmp = tempfile.mkdtemp(prefix="ui_audit_")
+
+import contact_names, feedback_store, supabase_client as sb, users_store, conversation_store  # noqa: E402
+users_store._REDIS_URL = users_store._REDIS_TOKEN = ""
+users_store._FILE = os.path.join(tmp, "users.json")
+contact_names._FILE = os.path.join(tmp, "names.json")
+feedback_store._FILE = os.path.join(tmp, "learning.json")
+sb._AUDIT_FILE = os.path.join(tmp, "audit.jsonl")
+sb._LOCAL_OUTBOUND_FILE = os.path.join(tmp, "outbound.json")
+sb.ENABLED = False
+
+import main  # noqa: E402
+import uvicorn  # noqa: E402
+
+main.INBOX_ADMIN_TOKEN = "audit-admin-pass-123456"
+main.WHATSAPP_APP_SECRET = ""
+main.WABA_ID, main.ACCESS_TOKEN, main.PHONE_NUMBER_ID = "WABA1", "fake-token", "PNID1"
+main._global_proactive_rate_limiter = lambda k: (True, 0)
+main._per_e164_rate_limiter = lambda k: (True, 0)
+
+TEMPLATES = [
+    {"name": "enquiry_followup", "category": "UTILITY", "language": "en_US", "status": "APPROVED",
+     "components": [{"type": "BODY", "text": "Hello {{1}}, following up on {{2}}. Reply here."}]},
+    {"name": "introductory_follow_up", "category": "UTILITY", "language": "en", "status": "APPROVED",
+     "components": [{"type": "HEADER", "format": "DOCUMENT"}, {"type": "BODY", "text": "Hi {{1}}, this is {{2}} from Petrobind."}]},
+    {"name": "has_video", "category": "MARKETING", "language": "en", "status": "APPROVED",
+     "components": [{"type": "HEADER", "format": "VIDEO"}, {"type": "BODY", "text": "Watch"}]},
+]
+PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
+SENT = []
+
+
+class FakeWhatsApp:
+    def __init__(self, *a, **k): pass
+    async def __aenter__(self): return self
+    async def __aexit__(self, *a): return False
+
+    @staticmethod
+    def _r(status, body=None, content=b"", ctype="application/json"):
+        class R:
+            headers = {"content-type": ctype}; text = str(body)
+        R.status_code = status; R.content = content or b"{}"
+        R.json = lambda self=None: body
+        return R()
+
+    async def get(self, url, headers=None, params=None, **k):
+        if "/message_templates" in url:
+            return self._r(200, {"data": TEMPLATES})
+        if url.startswith("https://graph.facebook.com/") and "/WABA1" not in url:
+            return self._r(200, {"url": "https://lookaside.fbsbx.com/x", "mime_type": "image/png", "file_size": len(PNG)})
+        return self._r(200, None, PNG, "image/png")
+
+    async def post(self, url, json=None, headers=None, data=None, files=None, **k):
+        if url.endswith("/media"):
+            SENT.append({"kind": "media-upload", "file": files["file"][0]})
+            return self._r(200, {"id": "MEDIA_AUDIT_1"})
+        SENT.append({"kind": "message", "body": json})
+        return self._r(200, {"messages": [{"id": "wamid.AUDIT%d" % len(SENT)}]})
+
+
+main.httpx.AsyncClient = FakeWhatsApp
+
+
+async def fake_handle(**kw):
+    return "Audit suggested reply."
+
+main.llm_assistant.handle_incoming_message = fake_handle
+
+
+@main.app.get("/_sent")
+async def _sent():
+    return SENT
+
+main.app.router.routes.insert(0, main.app.router.routes.pop())
+
+
+SEEDED = []
+
+
+async def seed():
+    if SEEDED:
+        return
+    SEEDED.append(1)
+    now = time.time()
+    A, B = "60120000001", "60120000002"
+
+    async def buyer(n, text, hours, wamid, **extra):
+        msg = {"id": wamid, "from": n, "type": "text", "text": {"body": text}, "timestamp": str(int(now - hours * 3600))}
+        msg.update(extra)
+        await main._persist_inbound_safe(msg)
+        await main._note_buyer_message(n, now - hours * 3600)
+
+    await buyer(A, "Hello, what is your bitumen 60/70 price?", 2.0, "wamid.A1")
+    await main._persist_outbound_safe(e164=A, direction="ai", text="Hi, this is Jane from Petrobind. How many tonnes do you need?", sent_id_from_graph="wamid.AI1")
+    await buyer(A, "", 1.0, "wamid.A2", type="image", image={"id": "IMGAUDIT123", "mime_type": "image/png", "caption": "our site"})
+    await buyer(B, "Hi, are you open?", 30.0, "wamid.B1")
+    await main._persist_outbound_safe(e164=B, direction="ai", text="Yes, how can I help?", sent_id_from_graph="wamid.AI2")
+    s = await conversation_store.get_session(B)
+    s.needs_human_since, s.needs_human_reason = now - 600, "buyer asked for a person"
+    try:
+        await users_store.create_user(username="mei", name="Mei Ling", password="mei-password-1")
+    except ValueError:
+        pass                                   # already there (startup can run more than once)
+    await main._refresh_users_cache()
+
+main.app.add_event_handler("startup", seed)
+
+if __name__ == "__main__":
+    uvicorn.run(main.app, host="127.0.0.1", port=int(sys.argv[1]), log_level="warning")

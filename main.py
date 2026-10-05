@@ -3,6 +3,7 @@ from dataclasses import asdict
 import datetime
 import json
 import os
+import re
 import time
 from collections import deque as _rate_deque
 from pydantic import BaseModel
@@ -65,6 +66,7 @@ except Exception as _jinja_exc:  # pragma: no cover - jinja2 is in requirements.
 # INBOX_ADMIN_TOKEN gates both /api/inbox/* (bearer) AND the /inbox/* HTML pages.
 INBOX_ADMIN_TOKEN: str = os.getenv("INBOX_ADMIN_TOKEN") or ""
 INBOX_ADMIN_NAME: str = os.getenv("INBOX_ADMIN_NAME") or "Petrobind Admin"
+GMT8_LABEL = "GMT+8"          # every time shown in the inbox is in this zone (see _gmt8)
 INBOX_SESSION_EXPIRE_MINUTES: int = int(os.getenv("INBOX_SESSION_EXPIRE_MINUTES", "60") or "60") or 60
 # Session cookies are SIGNED with this key so nobody can hand-make one. It must be defined before the
 # serializer below uses it (it used to come after, which silently disabled signing).
@@ -2095,6 +2097,8 @@ try:
                 return _asset_cache["v"]
 
             _JINJA_ENV.globals["asset_v"] = _asset_v
+            _JINJA_ENV.filters["gmt8"] = lambda v, seconds=False: _gmt8(v, seconds)
+            _JINJA_ENV.globals["tz_label"] = GMT8_LABEL
 except Exception as _static_exc:  # pragma: no cover — best-effort mount
     print(f"[INBOX] static mount skipped: {type(_static_exc).__name__}: {_static_exc!s}")
 
@@ -2403,6 +2407,29 @@ async def inbox_root(request: Request) -> Response:
 # show past conversations straight from the Redis/in-process sessions so the
 # inbox is never blank.  Never used when Supabase is enabled.
 # ---------------------------------------------------------------------------
+def _gmt8(value: Any, seconds: bool = False) -> str:
+    """Show a stored time (UTC ISO string, unix seconds, or datetime) as GMT+8 in 12-hour form: 2026-10-06 3:04 AM."""
+    if value is None or value == "":
+        return ""
+    try:
+        if isinstance(value, (int, float)):
+            dt = datetime.datetime.fromtimestamp(float(value), tz=datetime.timezone.utc)
+        elif isinstance(value, datetime.datetime):
+            dt = value
+        else:
+            text = str(value).strip().replace(" ", "T", 1) if len(str(value)) > 10 and str(value)[10] == " " else str(value).strip()
+            text = re.sub(r"\.\d+", "", text)               # fractions of a second: older Pythons only parse 3 or 6 digits
+            dt = datetime.datetime.fromisoformat(text.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=datetime.timezone.utc)        # the server stores times in UTC
+        dt = dt.astimezone(datetime.timezone(datetime.timedelta(hours=8)))
+    except Exception:
+        return str(value)
+    hour12 = dt.hour % 12 or 12
+    clock = f"{hour12}:{dt.minute:02d}" + (f":{dt.second:02d}" if seconds else "") + (" AM" if dt.hour < 12 else " PM")
+    return f"{dt:%Y-%m-%d} {clock}"
+
+
 def _iso_ts(ts: float) -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(ts or 0))
 
@@ -4230,6 +4257,21 @@ async def api_inbox_admin_evict_templates(request: Request) -> JSONResponse:
     return JSONResponse(content={"ok": True, "evicted_previous_cache": previous})
 
 
+async def _run_cron_endpoint(handler, path: str) -> Tuple[int, Any]:
+    """Run one of the cron endpoints (follow-ups scan, scheduled flush) inside THIS app, exactly as the external cron
+    would hit it, but without opening a second app: a nested test client re-ran every startup handler (reloading the
+    knowledge index, starting another background loop) on each button click."""
+    from starlette.requests import Request as _Req
+    req = _Req({"type": "http", "method": "POST", "path": path, "query_string": b"", "headers": [
+        (b"authorization", f"Bearer {FOLLOWUPS_CRON_TOKEN}".encode("utf-8"))]})
+    resp = await handler(req)
+    try:
+        body = json.loads(bytes(resp.body or b"{}"))
+    except Exception:
+        body = {"raw": str(getattr(resp, "body", b""))[:500]}
+    return int(getattr(resp, "status_code", 500) or 500), body
+
+
 @app.post("/api/inbox/admin/run-followups-scan")
 async def api_inbox_admin_run_followups_scan(request: Request) -> JSONResponse:
     """Admin-button equivalent of the Render cron POST /followups-scan.
@@ -4249,30 +4291,11 @@ async def api_inbox_admin_run_followups_scan(request: Request) -> JSONResponse:
             content={"ok": False, "error": "FOLLOWUPS_CRON_TOKEN env var not set on server — cannot trigger followups cron"},
             status_code=503,
         )
-    # NOTE: route is fully idempotent so calling via self-HTTP TestClient is
-    # perfectly safe.  This avoids needing to bind the endpoint closure to a
-    # fake Request with a valid asgi scope for the async pattern of the inner
-    # guard code.  Starlette TestClient runs on a temporary in-memory
-    # transport — no network socket opened, no host/port required.
-    from starlette.testclient import TestClient as _TC  # type: ignore
-    with _TC(app, raise_server_exceptions=False) as tc:
-        rresp = tc.post(
-            "/followups-scan",
-            headers={"Authorization": f"Bearer {FOLLOWUPS_CRON_TOKEN}"},
-        )
-        try:
-            body = rresp.json()
-        except Exception:
-            body = {"raw": rresp.text[:500]}
-        status = rresp.status_code if isinstance(rresp.status_code, int) else 500
-        return JSONResponse(
-            content={
-                "ok": 200 <= status < 300,
-                "http_status": status,
-                "followups_scan_result": body,
-            },
-            status_code=status if 200 <= status < 300 else 502,
-        )
+    status, body = await _run_cron_endpoint(followups_scan, "/followups-scan")
+    return JSONResponse(
+        content={"ok": 200 <= status < 300, "http_status": status, "followups_scan_result": body},
+        status_code=status if 200 <= status < 300 else 502,
+    )
 
 
 @app.post("/api/inbox/admin/flush-scheduled-sends")
@@ -4290,25 +4313,11 @@ async def api_inbox_admin_flush_scheduled(request: Request) -> JSONResponse:
             content={"ok": False, "error": "FOLLOWUPS_CRON_TOKEN env var not set on server — cannot trigger scheduled flush"},
             status_code=503,
         )
-    from starlette.testclient import TestClient as _TC  # type: ignore
-    with _TC(app, raise_server_exceptions=False) as tc:
-        rresp = tc.post(
-            "/scheduled-send-flush",
-            headers={"Authorization": f"Bearer {FOLLOWUPS_CRON_TOKEN}"},
-        )
-        try:
-            body = rresp.json()
-        except Exception:
-            body = {"raw": rresp.text[:500]}
-        status = rresp.status_code if isinstance(rresp.status_code, int) else 500
-        return JSONResponse(
-            content={
-                "ok": 200 <= status < 300,
-                "http_status": status,
-                "flush_result": body,
-            },
-            status_code=status if 200 <= status < 300 else 502,
-        )
+    status, body = await _run_cron_endpoint(scheduled_send_flush, "/scheduled-send-flush")
+    return JSONResponse(
+        content={"ok": 200 <= status < 300, "http_status": status, "flush_result": body},
+        status_code=status if 200 <= status < 300 else 502,
+    )
 
 
 @app.api_route(

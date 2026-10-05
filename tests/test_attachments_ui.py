@@ -13,6 +13,9 @@ TEMPLATES = os.path.join(ROOT, "petrobind_frontend_app", "templates")
 
 def render(messages):
     env = jinja2.Environment(loader=jinja2.FileSystemLoader(TEMPLATES), autoescape=True)
+    import main
+    env.filters["gmt8"] = lambda v, seconds=False: main._gmt8(v, seconds)
+    env.globals["tz_label"] = "GMT+8"
     env.globals["asset_v"] = lambda: "t"
     return env.get_template("chat_thread.html").render(e164="60123456789", embed=True, messages=messages, admin_name="x", session_id="s",
                                                        last_buyer_wamid="", supa_url="", supa_anon_key="", contact_name="", is_admin=True)

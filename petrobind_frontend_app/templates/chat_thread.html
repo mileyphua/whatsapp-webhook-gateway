@@ -153,7 +153,7 @@
 
           <div class="mt-1 flex items-center justify-end gap-2 {% if is_system %}opacity-70{% endif %}">
             <div class="text-[10px] text-gray-400">
-              <time>{{ (m.created_at or '')[:19].replace('T', ' ') }}</time>
+              <time title="{{ tz_label }}">{{ m.created_at | gmt8 }}</time>
               {% if m.sent_id_from_graph %}<span class="ml-1 text-gray-300 font-mono">{{ m.sent_id_from_graph[-8:] }}</span>{% endif %}
             </div>
           </div>

@@ -28,8 +28,7 @@
   }
   function fmtIso(iso) {
     if (!iso) return "—";
-    try { return String(iso).replace("T", " ").replace("Z", " UTC").slice(0, 26); }
-    catch { return String(iso).slice(0,25); }
+    return window.PBTime.format(iso, { seconds: true }) + " GMT+8";
   }
   function tabnum(v) { return '<span class="tabnum">' + String(v) + "</span>"; }
   function $(sel) { return document.querySelector(sel); }
@@ -267,14 +266,14 @@
       }
       lastData = res.payload;
       const freshAt = $("#p-health-fresh");
-      if (freshAt) freshAt.textContent = "refreshed " + (new Date().toLocaleTimeString());
+      if (freshAt) freshAt.textContent = "refreshed " + window.PBTime.timeOnly(new Date(), { seconds: true }) + " GMT+8";
       renderChecks(lastData.checks);
       renderSessions(lastData.sessions, lastData.process);
       renderClaims(lastData.claims);
       renderSchedules(lastData.outbound_schedules);
       renderTemplates(lastData.templates);
       renderScheduler(lastData.scheduler);
-      if (isManual) toast("Dashboard refreshed", "Fetched live backend state at " + (new Date().toLocaleTimeString()), "ok");
+      if (isManual) toast("Dashboard refreshed", "Fetched live backend state at " + window.PBTime.timeOnly(new Date(), { seconds: true }) + " GMT+8", "ok");
     } catch (err) {
       toast("Network error", String(err && err.message || err), "bad");
     }
@@ -368,15 +367,10 @@
       try { fetch("/inbox/logout", { method: "GET", credentials: "same-origin" }).finally(function () { location.href = "/inbox/login"; }); }
       catch { location.href = "/inbox/login"; }
     });
-    // Server UTC clock tick (1s): show browser time, but label says UTC so show localized from string is fine
+    // Clock in GMT+8 (the team's time), whatever timezone this computer is set to
     const utcBox = $("#server-utc");
     if (utcBox) {
-      setInterval(function () {
-        const n = new Date();
-        const s = n.getUTCFullYear() + "-" + pad2(n.getUTCMonth()+1) + "-" + pad2(n.getUTCDate()) +
-          " " + pad2(n.getUTCHours()) + ":" + pad2(n.getUTCMinutes()) + ":" + pad2(n.getUTCSeconds()) + " UTC";
-        utcBox.textContent = s;
-      }, 1000);
+      setInterval(function () { utcBox.textContent = window.PBTime.format(new Date(), { seconds: true }) + " GMT+8"; }, 1000);
     }
     scheduleNext();
   }
