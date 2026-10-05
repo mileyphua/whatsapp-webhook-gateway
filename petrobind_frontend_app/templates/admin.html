@@ -29,6 +29,12 @@
       <a href="/inbox/admin" class="ops-nav-item active">
         <span class="ops-nav-ico">🖥️</span><span>Backend Console</span>
       </a>
+      <a href="/inbox/logs" class="ops-nav-item">
+        <span class="ops-nav-ico">📜</span><span>Logs</span>
+      </a>
+      <a href="/inbox/guide" class="ops-nav-item">
+        <span class="ops-nav-ico">📘</span><span>Guide</span>
+      </a>
       <a href="/inbox/architecture" class="ops-nav-item">
         <span class="ops-nav-ico">🧩</span><span>Architecture</span>
       </a>
@@ -96,6 +102,13 @@
         <span class="ops-act-body">
           <span class="ops-act-title">FLUSH SCHEDULED SENDS</span>
           <span class="ops-act-sub">Claim pending outbound_schedules rows, send now</span>
+        </span>
+      </button>
+      <button class="ops-act" data-action="import-history">
+        <span class="ops-act-ico">📥</span>
+        <span class="ops-act-body">
+          <span class="ops-act-title">IMPORT CHAT HISTORY</span>
+          <span class="ops-act-sub">Copy Redis conversations into Supabase (safe to re-run)</span>
         </span>
       </button>
     </section>

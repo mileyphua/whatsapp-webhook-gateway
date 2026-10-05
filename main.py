@@ -2674,6 +2674,174 @@ async def api_inbox_handoff_resolve(e164: str, request: Request) -> JSONResponse
     return JSONResponse(content={"ok": True, "cleared": cleared})
 
 
+# ---------------------------------------------------------------------------
+# Admin: delete a chat (with transcript kept in the logs) / import old history
+# ---------------------------------------------------------------------------
+@app.delete("/api/inbox/chats/{e164}")
+async def api_inbox_delete_chat(e164: str, request: Request) -> JSONResponse:
+    """Permanently delete a conversation (Supabase + Redis + name). A transcript copy is written to the logs."""
+    fail = _requires_inbox_bearer(request)
+    if fail:
+        return fail
+    key = contact_names.normalize(e164)
+    if not key:
+        return JSONResponse(content={"detail": "invalid number"}, status_code=400)
+    try:
+        await conversation_store.redis_scan_all_sessions()
+    except Exception:
+        pass
+    sess = _find_session_by_number(e164)
+    variants = {e164, key, "+" + key}
+    if sess is not None:
+        variants.add(sess.phone_number)
+    msgs: List[Dict[str, Any]] = []
+    try:
+        msgs = await _sb.thread_messages(e164, limit=300)
+    except Exception:
+        msgs = []
+    if not msgs:
+        msgs = await _history_thread(sess.phone_number if sess is not None else e164)
+    names = await contact_names.get_all()
+    name = names.get(key, "")
+    transcript = [
+        {"direction": m.get("direction"), "text": str(m.get("text") or "")[:1000], "at": m.get("created_at")}
+        for m in msgs[-200:]
+    ]
+    removed = await _sb.delete_chat(sorted(variants))
+    for v in variants:
+        await conversation_store.reset_session(v)
+    try:
+        await contact_names.set_name(e164, "")
+    except Exception:
+        pass
+    await _sb.audit(
+        actor=INBOX_ADMIN_NAME,
+        action="chat_delete",
+        e164=e164,
+        detail={
+            "contact_name": name,
+            "messages_in_transcript": len(transcript),
+            "supabase_removed": removed,
+            "redis_session_removed": sess is not None,
+            "transcript": transcript,
+        },
+    )
+    return JSONResponse(content={"ok": True, "e164": e164, "supabase_removed": removed, "logged": True})
+
+
+def _iso_utc(ts: float) -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ts))
+
+
+@app.post("/api/inbox/admin/import-history")
+async def api_inbox_import_history(request: Request) -> JSONResponse:
+    """Copy every conversation held in Redis into Supabase (skips chats Supabase already has)."""
+    fail = _requires_inbox_bearer(request)
+    if fail:
+        return fail
+    if not _sb.ENABLED:
+        return JSONResponse(content={"detail": "Supabase is not configured on this server"}, status_code=503)
+    try:
+        await conversation_store.redis_scan_all_sessions(force=True)
+    except Exception as exc:
+        print(f"[INBOX] import redis scan failed: {type(exc).__name__}: {exc!s}")
+    summary = {"chats_imported": 0, "messages_imported": 0, "skipped_already_in_supabase": 0, "skipped_empty": 0, "failed": 0}
+    now = time.time()
+    for sess in list(conversation_store.all_sessions()):
+        turns = [(m["role"], str(m["content"])) for m in sess.history if m.get("role") in ("user", "assistant") and m.get("content")]
+        if not turns:
+            summary["skipped_empty"] += 1
+            continue
+        if await _sb.count_messages(sess.phone_number) > 0:
+            summary["skipped_already_in_supabase"] += 1
+            continue
+        t0 = sess.first_seen_ts or sess.last_activity_ts
+        t1 = max(sess.last_activity_ts, t0)
+        n = len(turns)
+        rows = []
+        for i, (role, text) in enumerate(turns):
+            ts = min(now, t0 + max((t1 - t0) * i / max(n - 1, 1), i))
+            rows.append({
+                "direction": "buyer" if role == "user" else "ai",
+                "e164": sess.phone_number,
+                "text": text,
+                "created_at": _iso_utc(ts),
+                "payload_jsonb": {"imported_from": "redis"},
+            })
+        sent = await _sb.import_messages(sess.phone_number, rows)
+        if not sent:
+            summary["failed"] += 1
+            continue
+        await _sb.mirror_session(
+            e164=sess.phone_number,
+            inquiry_dict=asdict(sess.inquiry),
+            history_list=list(sess.history[-200:]),
+            is_new_prospect=sess.inquiry.is_new_prospect,
+            lead_notified=bool(sess.lead_notified),
+            handoff_notified=bool(sess.handoff_notified),
+            booking_intent_notified=bool(sess.booking_intent_notified),
+            booking_link_shared_at_ts=sess.booking_link_shared_at,
+            followup_nudge_1_ts=sess.booking_followup_sent_at,
+            followup_nudge_2_ts=sess.inquiry_followup_sent_at,
+        )
+        summary["chats_imported"] += 1
+        summary["messages_imported"] += sent
+    await _sb.audit(actor=INBOX_ADMIN_NAME, action="history_import", detail=summary)
+    return JSONResponse(content={"ok": True, **summary})
+
+
+@app.get("/api/inbox/logs")
+async def api_inbox_logs(request: Request) -> JSONResponse:
+    """Audit log: logins, claims, human sends, deletions, imports (newest first)."""
+    fail = _requires_inbox_bearer(request)
+    if fail:
+        return fail
+    qp = request.query_params
+    limit = int(qp.get("limit", "200")) if (qp.get("limit") or "200").isdigit() else 200
+    events = await _sb.list_audit(limit=limit, action=qp.get("action") or None, q=qp.get("q") or None)
+    return JSONResponse(content={"source": "supabase" if _sb.ENABLED else "local-file", "events": events})
+
+
+def _logged_in_page_ctx(request: Request):
+    """(redirect_or_gate, ctx) for simple inbox pages."""
+    gate = _inbox_page_gating_checks(request)
+    if gate:
+        return gate, None
+    sess = _verify_inbox_session_cookie(request)
+    if not sess:
+        return RedirectResponse(url="/inbox/login?next=" + request.url.path, status_code=302), None
+    return None, {"admin_name": sess.get("name") or INBOX_ADMIN_NAME, "session_id": sess.get("sid") or "", "supa_url": ""}
+
+
+@app.get("/inbox/logs")
+async def web_inbox_logs(request: Request) -> Response:
+    resp, ctx = _logged_in_page_ctx(request)
+    if resp:
+        return resp
+    return _render_template("logs.html", **ctx)
+
+
+@app.get("/inbox/guide")
+async def web_inbox_guide(request: Request) -> Response:
+    resp, ctx = _logged_in_page_ctx(request)
+    if resp:
+        return resp
+    endpoints = []
+    for r in app.routes:
+        path = getattr(r, "path", "")
+        if not (path.startswith("/api/inbox") or path.startswith("/inbox") or path in ("/health", "/webhook", "/followups-scan")):
+            continue
+        if path.startswith("/inbox/static"):
+            continue
+        doc = ((getattr(r.endpoint, "__doc__", "") or "").strip().split("\n")[0]) if hasattr(r, "endpoint") else ""
+        for m in sorted(getattr(r, "methods", None) or []):
+            if m in ("HEAD", "OPTIONS"):
+                continue
+            endpoints.append({"method": m, "path": path, "doc": doc})
+    endpoints.sort(key=lambda e: (e["path"], e["method"]))
+    return _render_template("guide.html", endpoints=endpoints, **ctx)
+
+
 @app.get("/api/inbox/chats/{e164}/suggestion")
 async def api_inbox_ai_suggestion(e164: str, request: Request) -> JSONResponse:
     """Return a suggested AI reply to the buyer's latest message.

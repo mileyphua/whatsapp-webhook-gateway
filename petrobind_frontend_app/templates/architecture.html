@@ -53,8 +53,10 @@
     <small>How a WhatsApp message flows: AI (RAG) answers FAQs, a human can take over any chat in real time</small></h1>
   <nav aria-label="Console">
     <a href="/inbox/chats">Inbox</a>
-    <a href="/inbox/admin">Ops Console</a>
+    <a href="/inbox/logs">Logs</a>
     <a href="/inbox/architecture" aria-current="page">Architecture</a>
+    <a href="/inbox/admin">Ops Console</a>
+    <a href="/inbox/guide">Guide</a>
   </nav>
 </header>
 <main>
@@ -84,40 +86,40 @@
 
   // check = key in /api/inbox/admin/dashboard → checks (optional)
   var NODES = [
-    { id: "buyer",   c: 0, r: 2, kind: "",      t: "Buyer", s: "WhatsApp · Meta Cloud API",
+    { id: "buyer", href: "/inbox/chats", hrefLabel: "Open Inbox",   c: 0, r: 2, kind: "",      t: "Buyer", s: "WhatsApp · Meta Cloud API",
       d: "A customer messages the Petrobind WhatsApp number. Meta delivers it to our webhook and carries the reply back.",
       where: "Meta WhatsApp Business", check: "whatsapp_env" },
-    { id: "webhook", c: 1, r: 2, kind: "ai",    t: "POST /webhook", s: "verify signature · dedupe",
+    { id: "webhook", href: "/health", hrefLabel: "Open health check", c: 1, r: 2, kind: "ai",    t: "POST /webhook", s: "verify signature · dedupe",
       d: "Entry point. Verifies Meta's signature, drops duplicate message ids (wamid), then hands the text to the assistant. Always answers 200 fast.",
       where: "main.py → /webhook", check: "whatsapp_env" },
-    { id: "gate",    c: 2, r: 2, kind: "",      t: "Human has this chat?", s: "claim mutex check",
+    { id: "gate", href: "/inbox/logs", hrefLabel: "See takeover events in Logs",    c: 2, r: 2, kind: "",      t: "Human has this chat?", s: "claim mutex check",
       d: "Before sending anything, the assistant checks whether a human operator has claimed the chat. No claim: the AI replies. Claimed: the AI only drafts a suggestion and stays silent to the buyer.",
       where: "llm_assistant.py → handle_incoming_message · supabase inbox_claims", check: "supabase_inbox" },
-    { id: "rag",     c: 3, r: 0, kind: "ai",    t: "RAG retrieve", s: "FAQ / product knowledge",
+    { id: "rag", href: "/inbox/guide#howto", hrefLabel: "Read how it works in the Guide",     c: 3, r: 0, kind: "ai",    t: "RAG retrieve", s: "FAQ / product knowledge",
       d: "Always runs on every inbound text. Finds the best knowledge chunks for the question. If nothing relevant is found for a product/spec question, the LLM is skipped and a safe handoff reply is sent (zero-hallucination guardrail).",
       where: "rag/ package · llm_assistant.py retrieve()", check: "rag_index_ready" },
-    { id: "llm",     c: 4, r: 0, kind: "ai",    t: "LLM · gpt-5-mini", s: "via OpenRouter",
+    { id: "llm", href: "/inbox/guide#howto", hrefLabel: "Read how it works in the Guide",     c: 4, r: 0, kind: "ai",    t: "LLM · gpt-5-mini", s: "via OpenRouter",
       d: "Writes the reply from the retrieved FAQ context, in Petrobind's sales tone. Can call tools (e.g. notify the team).",
       where: "llm_assistant.py", check: "llm_ready" },
-    { id: "send",    c: 4, r: 1, kind: "",      t: "Send via Meta API", s: "text · or template outside 24h",
+    { id: "send", href: "/inbox/logs", hrefLabel: "See sent replies in Logs",    c: 4, r: 1, kind: "",      t: "Send via Meta API", s: "text · or template outside 24h",
       d: "Single exit to WhatsApp. AI replies and human replies both go out here. Outside the 24-hour window only approved templates are allowed.",
       where: "main.py → send_whatsapp_text / send-template", check: "whatsapp_env" },
-    { id: "email",   c: 3, r: 1, kind: "ai",    t: "Email handoff", s: "Gmail relay → sales team",
+    { id: "email", href: "/inbox/admin", hrefLabel: "Open Ops console",   c: 3, r: 1, kind: "ai",    t: "Email handoff", s: "Gmail relay → sales team",
       d: "When the AI can't answer safely, the team is emailed the conversation so a human can reach out.",
       where: "notify.py", check: "email_configured" },
-    { id: "draft",   c: 3, r: 3, kind: "human", t: "AI draft suggestion", s: "shown as a pill, not sent",
+    { id: "draft", href: "/inbox/chats", hrefLabel: "Open Inbox",   c: 3, r: 3, kind: "human", t: "AI draft suggestion", s: "shown as a pill, not sent",
       d: "While a human holds the chat, the AI still reads the message and prepares a suggested reply. The operator can click to use or edit it. Nothing is sent automatically.",
       where: "GET /api/inbox/chats/{e164}/suggestion", check: null },
-    { id: "inbox",   c: 4, r: 3, kind: "human", t: "Human Inbox UI", s: "/inbox/chats · real time",
+    { id: "inbox", href: "/inbox/chats", hrefLabel: "Open Inbox",   c: 4, r: 3, kind: "human", t: "Human Inbox UI", s: "/inbox/chats · real time",
       d: "Operators see every message (buyer, AI and human) live. Click Claim to take over; typing a reply sends it to the buyer through Meta. Release hands the chat back to the AI.",
       where: "petrobind_frontend_app/ · /inbox/chats, /inbox/chat/{e164}", check: null },
-    { id: "supa",    c: 2, r: 4, kind: "store", t: "Supabase (Postgres)", s: "messages · claims · schedules",
+    { id: "supa", href: "/inbox/logs", hrefLabel: "Open Logs (stored in Supabase)",    c: 2, r: 4, kind: "store", t: "Supabase (Postgres)", s: "messages · claims · schedules",
       d: "Shared inbox storage and the Realtime feed that pushes new messages to the inbox. Fire-and-forget: if it is down, WhatsApp replies still work.",
       where: "supabase_client.py · supabase/migrations/", check: "supabase_inbox" },
-    { id: "redis",   c: 1, r: 4, kind: "store", t: "Upstash Redis", s: "conversation sessions",
+    { id: "redis", href: "/inbox/admin", hrefLabel: "Open Ops console (Redis sessions)",   c: 1, r: 4, kind: "store", t: "Upstash Redis", s: "conversation sessions",
       d: "Keeps each buyer's conversation memory so it survives redeploys and idle sleep.",
       where: "conversation_store.py", check: "redis_scan_available" },
-    { id: "cron",    c: 0, r: 4, kind: "",      t: "Follow-up cron", s: "GitHub Actions · quiet hours",
+    { id: "cron", href: "/inbox/admin", hrefLabel: "Open Ops console (follow-ups)",    c: 0, r: 4, kind: "",      t: "Follow-up cron", s: "GitHub Actions · quiet hours",
       d: "Periodically scans idle conversations and sends scheduled follow-ups, respecting buyer-local quiet hours and weekends.",
       where: ".github/workflows/followups-cron.yml · scheduler.py", check: "followups_configured" }
   ];
@@ -178,7 +180,8 @@
     if (selected) selected.g.classList.remove("sel");
     n.g.classList.add("sel"); selected = n;
     var st = n.check ? (status[n.check] === undefined ? "no live data yet" : (status[n.check] ? "healthy ✓" : "not configured ✗")) : "no live check for this node";
-    detail.innerHTML = "<h2>" + esc(n.t) + "</h2><p>" + esc(n.d) + "</p><p>Code: <code>" + esc(n.where) + "</code></p><p>Live status: " + esc(st) + "</p>";
+    detail.innerHTML = "<h2>" + esc(n.t) + "</h2><p>" + esc(n.d) + "</p><p>Code: <code>" + esc(n.where) + "</code></p><p>Live status: " + esc(st) + "</p>" +
+      (n.href ? '<p><a href="' + esc(n.href) + '" style="color:#e8651a;font-weight:600">' + esc(n.hrefLabel || "Open page") + ' →</a></p>' : "");
   }
 
   NODES.forEach(function (n) {

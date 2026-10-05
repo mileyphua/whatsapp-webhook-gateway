@@ -679,8 +679,23 @@ async def admin_sessions_count_db() -> int:
 # audit log
 # ================================================================
 
+_AUDIT_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".audit_log.jsonl")
+
+
+def _audit_file_append(actor: str, action: str, e164: Optional[str], detail: Optional[Dict[str, Any]]) -> None:
+    """Dev fallback (no Supabase): keep the log in a local JSONL file."""
+    try:
+        row = {"ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "actor": actor, "action": action,
+               "e164": e164, "detail_jsonb": detail or {}}
+        with open(_AUDIT_FILE, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
+
 async def _audit(actor: str, action: str, *, e164: Optional[str] = None, detail: Optional[Dict[str, Any]] = None) -> None:
     if not ENABLED:
+        _audit_file_append(actor, action, e164, detail)
         return
     try:
         async with _client() as c:
@@ -701,3 +716,82 @@ async def _audit(actor: str, action: str, *, e164: Optional[str] = None, detail:
 async def audit(actor: str, action: str, *, e164: Optional[str] = None, detail: Optional[Dict[str, Any]] = None) -> None:
     """Public alias so callers outside this file can audit things."""
     await _audit(actor=actor, action=action, e164=e164, detail=detail)
+
+
+async def list_audit(limit: int = 200, action: Optional[str] = None, q: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Newest-first audit events (Supabase, or the local JSONL file in dev)."""
+    limit = max(1, min(1000, int(limit)))
+    rows: List[Dict[str, Any]] = []
+    if ENABLED:
+        params: Dict[str, str] = {"order": "ts.desc", "limit": str(limit)}
+        if action:
+            params["action"] = f"eq.{action}"
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(10.0, connect=3.0)) as c:
+                r = await c.get(f"{_REST_BASE}/audit_events", headers={**_HEADERS}, params=params)
+            rows = r.json() if r.status_code < 300 else []
+        except Exception:
+            rows = []
+    else:
+        try:
+            with open(_AUDIT_FILE, "r", encoding="utf-8") as fh:
+                rows = [json.loads(line) for line in fh if line.strip()]
+        except Exception:
+            rows = []
+        rows.reverse()
+        if action:
+            rows = [r for r in rows if r.get("action") == action]
+        rows = rows[:limit]
+    if q:
+        ql = q.lower()
+        rows = [r for r in rows if ql in json.dumps(r, ensure_ascii=False).lower()]
+    return rows
+
+
+# ================================================================
+# import / delete a whole chat (admin)
+# ================================================================
+
+_LONG_TIMEOUT = httpx.Timeout(20.0, connect=3.0)
+
+
+async def count_messages(e164: str) -> int:
+    if not ENABLED:
+        return 0
+    try:
+        async with httpx.AsyncClient(timeout=_LONG_TIMEOUT) as c:
+            r = await c.get(f"{_REST_BASE}/messages", headers={**_HEADERS, "Prefer": "count=exact"},
+                            params={"e164": f"eq.{e164}", "select": "id", "limit": "1"})
+        return int((r.headers.get("content-range") or "*/0").split("/")[-1] or 0)
+    except Exception:
+        return 0
+
+
+async def import_messages(e164: str, rows: List[Dict[str, Any]]) -> int:
+    """Bulk-insert already-built message rows for one chat. Returns rows sent (0 on failure)."""
+    if not (ENABLED and rows):
+        return 0
+    try:
+        async with httpx.AsyncClient(timeout=_LONG_TIMEOUT) as c:
+            r = await c.post(f"{_REST_BASE}/messages", headers={**_HEADERS, "Prefer": "return=minimal"}, json=rows)
+        return len(rows) if r.status_code < 300 else 0
+    except Exception:
+        return 0
+
+
+async def delete_chat(e164_variants: List[str]) -> Dict[str, int]:
+    """Delete a chat everywhere in Supabase: messages, claim, session row."""
+    out = {"messages": 0, "claims": 0, "sessions": 0}
+    if not (ENABLED and e164_variants):
+        return out
+    flt = "in.(" + ",".join('"%s"' % v.replace('"', "") for v in e164_variants) + ")"
+    hdr = {**_HEADERS, "Prefer": "return=minimal,count=exact"}
+    async with httpx.AsyncClient(timeout=_LONG_TIMEOUT) as c:
+        for table, key in (("messages", "messages"), ("inbox_claims", "claims"), ("sessions", "sessions")):
+            try:
+                r = await c.delete(f"{_REST_BASE}/{table}", headers=hdr, params={"e164": flt})
+                if r.status_code < 300:
+                    out[key] = int((r.headers.get("content-range") or "*/0").split("/")[-1] or 0)
+            except Exception as exc:
+                print(f"[supabase_client] delete_chat {table} failed: {type(exc).__name__}: {exc!s}")
+    return out

@@ -37,3 +37,4 @@ htmlcov/
 *.swp
 *.swo
 .contact_names.json
+.audit_log.jsonl

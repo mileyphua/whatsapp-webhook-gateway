@@ -1,0 +1,109 @@
+{% extends "base.html" %}
+{% block title %}Platform guide — Petrobind Inbox{% endblock %}
+{% block content %}
+<main class="flex-1 overflow-y-auto bg-gray-50">
+  <div class="max-w-5xl mx-auto px-4 md:px-8 py-6 space-y-8">
+    <header>
+      <h1 class="text-2xl font-semibold">Petrobind Global — platform guide</h1>
+      <p class="mt-1 text-gray-600">What each page does, how a message flows, where data lives, and every API endpoint. The AI (RAG + LLM) answers by default; a human can take over any chat.</p>
+    </header>
+
+    <nav aria-label="On this page" class="flex flex-wrap gap-2 text-sm">
+      <a class="px-3 py-1 rounded-full bg-white border border-gray-200 hover:border-gray-400" href="#pages">Pages</a>
+      <a class="px-3 py-1 rounded-full bg-white border border-gray-200 hover:border-gray-400" href="#howto">How do I…</a>
+      <a class="px-3 py-1 rounded-full bg-white border border-gray-200 hover:border-gray-400" href="#data">Where data lives</a>
+      <a class="px-3 py-1 rounded-full bg-white border border-gray-200 hover:border-gray-400" href="#api">API reference</a>
+      <a class="px-3 py-1 rounded-full bg-white border border-gray-200 hover:border-gray-400" href="#env">Settings</a>
+    </nav>
+
+    <section id="pages" aria-labelledby="h-pages">
+      <h2 id="h-pages" class="text-lg font-semibold mb-3">Pages</h2>
+      <div class="grid gap-3 sm:grid-cols-2">
+        {% for href, title, desc in [
+          ("/inbox/chats", "Inbox", "One row per buyer number. Search, ⋮ menu to name or delete a chat, click to open the conversation on the right. Switch AI | Human at the top right of a chat."),
+          ("/inbox/logs", "Logs", "Audit trail of logins, takeovers, human replies, chat deletions (with a saved transcript) and history imports."),
+          ("/inbox/architecture", "Architecture", "Node diagram of the full stack: WhatsApp → webhook → RAG → LLM → send, plus the human path. Click a node for details and its page."),
+          ("/inbox/admin", "Ops console", "Live backend state: health checks, Redis sessions, claims, scheduled sends, template cache. Buttons to force scans and import history."),
+          ("/health", "Health JSON", "Public status of every dependency (WhatsApp, LLM, RAG index, Supabase, Redis, email, follow-ups)."),
+        ] %}
+        <a href="{{ href }}" class="block p-4 rounded-lg bg-white border border-gray-200 hover:border-pb-navy transition">
+          <div class="font-semibold text-pb-navy">{{ title }} <span aria-hidden="true">→</span></div>
+          <div class="mt-1 text-sm text-gray-600">{{ desc }}</div>
+          <div class="mt-1 font-mono text-xs text-gray-400">{{ href }}</div>
+        </a>
+        {% endfor %}
+      </div>
+    </section>
+
+    <section id="howto" aria-labelledby="h-how">
+      <h2 id="h-how" class="text-lg font-semibold mb-3">How do I…</h2>
+      <dl class="space-y-3 text-sm">
+        <div class="bg-white border border-gray-200 rounded-lg p-4"><dt class="font-semibold">…take over a chat from the AI?</dt>
+          <dd class="mt-1 text-gray-700">Open the chat and flip the switch at the top right to <b>Human</b>. The AI stops replying to that buyer and the reply box unlocks. Flip back to <b>AI</b> to hand it back; the AI answers the buyer's next message. Human mode lapses by itself 30 minutes after you stop viewing the chat.</dd></div>
+        <div class="bg-white border border-gray-200 rounded-lg p-4"><dt class="font-semibold">…know a human is needed?</dt>
+          <dd class="mt-1 text-gray-700">When the AI escalates, a popup appears and the <b>Needs human</b> tab (top bar) lists the chat with a countdown. WhatsApp only allows free-text replies for 24 hours after the buyer's last message; the same countdown sits beside the phone number in the chat. After it closes, only approved templates can be sent.</dd></div>
+        <div class="bg-white border border-gray-200 rounded-lg p-4"><dt class="font-semibold">…name a number?</dt>
+          <dd class="mt-1 text-gray-700">In the Inbox click the <b>⋮</b> next to the number → type a reference name → Save. Search then matches the name or the number.</dd></div>
+        <div class="bg-white border border-gray-200 rounded-lg p-4"><dt class="font-semibold">…delete a chat?</dt>
+          <dd class="mt-1 text-gray-700">Inbox → <b>⋮</b> → <b>Delete chat</b> → confirm. The conversation is removed from Supabase and Redis and its name is cleared. A transcript copy and who deleted it are kept on the <a class="underline" href="/inbox/logs">Logs</a> page. If the buyer writes again later, a fresh chat starts.</dd></div>
+        <div class="bg-white border border-gray-200 rounded-lg p-4"><dt class="font-semibold">…load old conversations into the inbox?</dt>
+          <dd class="mt-1 text-gray-700">Ops console → <b>Import chat history</b>. It copies every conversation held in Redis into Supabase and skips chats already there. Safe to run again. Message times are estimated because Redis keeps only the last-activity time.</dd></div>
+      </dl>
+    </section>
+
+    <section id="data" aria-labelledby="h-data">
+      <h2 id="h-data" class="text-lg font-semibold mb-3">Where data lives</h2>
+      <div class="bg-white border border-gray-200 rounded-lg overflow-x-auto">
+        <table class="min-w-full text-sm">
+          <thead class="bg-gray-50 text-left text-xs uppercase tracking-wide text-gray-500"><tr><th class="px-3 py-2">Store</th><th class="px-3 py-2">Holds</th><th class="px-3 py-2">If it is down</th></tr></thead>
+          <tbody>
+            <tr class="border-t"><td class="px-3 py-2 font-medium">Upstash Redis</td><td class="px-3 py-2">AI conversation memory per buyer, handoff flags, reference names</td><td class="px-3 py-2">AI forgets context after a restart</td></tr>
+            <tr class="border-t"><td class="px-3 py-2 font-medium">Supabase <span class="font-mono text-xs">messages</span></td><td class="px-3 py-2">Every buyer, AI and human message (what the inbox shows)</td><td class="px-3 py-2">Replies still work; the inbox falls back to Redis history</td></tr>
+            <tr class="border-t"><td class="px-3 py-2 font-medium">Supabase <span class="font-mono text-xs">sessions</span></td><td class="px-3 py-2">Per-number summary used by the chat list</td><td class="px-3 py-2">Same as above</td></tr>
+            <tr class="border-t"><td class="px-3 py-2 font-medium">Supabase <span class="font-mono text-xs">inbox_claims</span></td><td class="px-3 py-2">Who (if anyone) is replying instead of the AI</td><td class="px-3 py-2">AI keeps replying (human mode cannot hold)</td></tr>
+            <tr class="border-t"><td class="px-3 py-2 font-medium">Supabase <span class="font-mono text-xs">audit_events</span></td><td class="px-3 py-2">The Logs page</td><td class="px-3 py-2">Logs go to a local file in dev only</td></tr>
+            <tr class="border-t"><td class="px-3 py-2 font-medium">Supabase <span class="font-mono text-xs">outbound_schedules</span></td><td class="px-3 py-2">Follow-ups waiting for the buyer's quiet hours to end</td><td class="px-3 py-2">Follow-ups are skipped, not lost</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="api" aria-labelledby="h-api">
+      <h2 id="h-api" class="text-lg font-semibold mb-1">API reference <span class="text-sm font-normal text-gray-500">({{ endpoints|length }} endpoints, generated from the running server)</span></h2>
+      <p class="text-sm text-gray-600 mb-3">/api/inbox/* needs either the login cookie or <span class="font-mono">Authorization: Bearer &lt;INBOX_ADMIN_TOKEN&gt;</span>.</p>
+      <label for="api-filter" class="sr-only">Filter endpoints</label>
+      <input id="api-filter" type="search" placeholder="Filter endpoints…" class="mb-2 border border-gray-300 rounded-md px-3 py-1.5 text-sm w-72 max-w-full">
+      <div class="bg-white border border-gray-200 rounded-lg overflow-x-auto">
+        <table class="min-w-full text-sm" id="api-table">
+          <thead class="bg-gray-50 text-left text-xs uppercase tracking-wide text-gray-500"><tr><th class="px-3 py-2">Method</th><th class="px-3 py-2">Path</th><th class="px-3 py-2">What it does</th></tr></thead>
+          <tbody>
+            {% for e in endpoints %}
+            <tr class="border-t border-gray-100"><td class="px-3 py-1.5 font-mono text-xs font-semibold {% if e.method == 'GET' %}text-green-700{% elif e.method == 'DELETE' %}text-red-700{% else %}text-blue-700{% endif %}">{{ e.method }}</td><td class="px-3 py-1.5 font-mono text-xs break-all">{{ e.path }}</td><td class="px-3 py-1.5 text-gray-600">{{ e.doc }}</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="env" aria-labelledby="h-env">
+      <h2 id="h-env" class="text-lg font-semibold mb-3">Settings (environment variables on Render)</h2>
+      <ul class="text-sm space-y-1 text-gray-700 list-disc pl-5">
+        <li><span class="font-mono">INBOX_ADMIN_TOKEN</span> – the inbox login password and API bearer token.</li>
+        <li><span class="font-mono">SUPABASE_URL</span>, <span class="font-mono">SUPABASE_SERVICE_ROLE_KEY</span> – server-side database access (never put the service key in the browser).</li>
+        <li><span class="font-mono">SUPABASE_ANON_KEY</span> – optional; enables instant Realtime push. The inbox also polls every 3 seconds without it.</li>
+        <li><span class="font-mono">UPSTASH_REDIS_REST_URL</span> / <span class="font-mono">…_TOKEN</span> – conversation memory.</li>
+        <li><span class="font-mono">FOLLOWUPS_CRON_TOKEN</span> – lets the scheduled follow-up job call the server.</li>
+      </ul>
+    </section>
+  </div>
+</main>
+<script>
+(function () {
+  var f = document.getElementById("api-filter");
+  f.addEventListener("input", function () {
+    var q = f.value.trim().toLowerCase();
+    document.querySelectorAll("#api-table tbody tr").forEach(function (tr) { tr.hidden = q && tr.textContent.toLowerCase().indexOf(q) === -1; });
+  });
+})();
+</script>
+{% endblock %}

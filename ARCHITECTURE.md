@@ -31,3 +31,16 @@ flowchart LR
 6. **Follow-ups** — a scheduled job re-engages idle chats within buyer-local quiet hours; outside the 24 h window only approved templates are sent.
 
 Supabase and Redis are optional/fire-and-forget: if either is down, WhatsApp replies still work.
+
+## Platform map (in-app navigation)
+
+| Page | URL | Purpose |
+|---|---|---|
+| Inbox | `/inbox/chats` | One row per number; search; ⋮ → name / delete; thread opens on the right; AI \| Human switch |
+| Logs | `/inbox/logs` | Audit trail (logins, takeovers, replies, **chat deletions with transcript copy**, history imports) |
+| Architecture | `/inbox/architecture` | This diagram as a clickable node graph; each node links to the page that shows it |
+| Ops console | `/inbox/admin` | Live health, Redis, claims, schedules, template cache; **Import chat history** (Redis → Supabase) |
+| Guide | `/inbox/guide` | Platform README: pages, how-tos, data stores, auto-generated API table |
+| Health | `/health` | Dependency status JSON |
+
+Delete flow: Inbox ⋮ → Delete chat → confirm → `DELETE /api/inbox/chats/{e164}` removes Supabase rows (messages, claim, session), the Redis session and the reference name, then writes a `chat_delete` event (who, when, transcript) to `audit_events`, visible in Logs.

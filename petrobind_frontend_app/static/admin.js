@@ -301,6 +301,10 @@
       ep = API_BASE + "/flush-scheduled-sends";
       title = "Flushing pending scheduled outbound sends";
       toastDone = "Scheduled send flush complete";
+    } else if (name === "import-history") {
+      ep = API_BASE + "/import-history";
+      title = "Importing chat history from Redis into Supabase";
+      toastDone = "History import finished";
     } else {
       toast("Unknown action", name, "warn");
       return;

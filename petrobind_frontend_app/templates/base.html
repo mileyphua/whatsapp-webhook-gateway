@@ -48,6 +48,13 @@
         <div class="text-xs text-gray-400 leading-tight">Shared Inbox — WhatsApp + AI</div>
       </div>
     </div>
+    <nav aria-label="Main" class="hidden md:flex items-center gap-1 text-sm">
+            <a href="/inbox/chats" class="px-3 py-1.5 rounded-md hover:bg-gray-700">Inbox</a>
+      <a href="/inbox/logs" class="px-3 py-1.5 rounded-md hover:bg-gray-700">Logs</a>
+      <a href="/inbox/architecture" class="px-3 py-1.5 rounded-md hover:bg-gray-700">Architecture</a>
+      <a href="/inbox/admin" class="px-3 py-1.5 rounded-md hover:bg-gray-700">Ops</a>
+      <a href="/inbox/guide" class="px-3 py-1.5 rounded-md hover:bg-gray-700">Guide</a>
+    </nav>
     <div class="flex items-center gap-4">
       <button type="button" id="ho-toggle" aria-haspopup="true" aria-expanded="false"
               class="relative text-sm bg-gray-700 hover:bg-gray-600 text-white px-3 py-1.5 rounded-md transition">
@@ -197,6 +204,7 @@
     });
     $("ho-popup-dismiss").addEventListener("click", function () { $("ho-popup").hidden = true; });
     document.addEventListener("keydown", function (e) { if (e.key === "Escape") { $("ho-panel").hidden = true; $("ho-popup").hidden = true; } });
+    document.querySelectorAll('nav[aria-label="Main"] a').forEach(function (a) { if (a.getAttribute('href') === location.pathname) { a.classList.add('bg-gray-700'); a.setAttribute('aria-current', 'page'); } });
     window.addEventListener("hashchange", function () { tick(); }); load(); setInterval(function () { if (!document.hidden) load(); }, 5000); setInterval(tick, 1000);
   })();
   </script>

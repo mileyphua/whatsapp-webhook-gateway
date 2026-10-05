@@ -1,0 +1,130 @@
+{% extends "base.html" %}
+{% block title %}Logs — Petrobind Inbox{% endblock %}
+{% block content %}
+<main class="flex-1 overflow-y-auto bg-gray-50">
+  <div class="max-w-6xl mx-auto px-4 md:px-8 py-6">
+    <div class="flex flex-wrap items-end justify-between gap-3 mb-4">
+      <div>
+        <h1 class="text-xl font-semibold">Activity logs</h1>
+        <p class="text-sm text-gray-600">Every admin action: logins, human takeovers, replies sent, chat deletions (with a transcript copy) and history imports.</p>
+      </div>
+      <div class="text-xs text-gray-500" id="log-source" aria-live="polite">loading…</div>
+    </div>
+
+    <div class="flex flex-wrap items-center gap-2 mb-3">
+      <label for="log-action" class="sr-only">Filter by action</label>
+      <select id="log-action" class="border border-gray-300 rounded-md px-2 py-1.5 text-sm bg-white">
+        <option value="">All actions</option>
+      </select>
+      <label for="log-search" class="sr-only">Search logs</label>
+      <input id="log-search" type="search" placeholder="Search number, name, text…" class="border border-gray-300 rounded-md px-3 py-1.5 text-sm w-72 max-w-full">
+      <button id="log-refresh" type="button" class="px-3 py-1.5 rounded-md bg-pb-navy text-white text-sm">Refresh</button>
+      <span id="log-count" class="text-xs text-gray-500"></span>
+    </div>
+
+    <div class="bg-white border border-gray-200 rounded-lg overflow-x-auto">
+      <table class="min-w-full text-sm">
+        <thead class="bg-gray-50 text-left text-xs uppercase tracking-wide text-gray-500">
+          <tr><th class="px-3 py-2">Time (UTC)</th><th class="px-3 py-2">Who</th><th class="px-3 py-2">What</th><th class="px-3 py-2">Number</th><th class="px-3 py-2">Details</th></tr>
+        </thead>
+        <tbody id="log-body"><tr><td colspan="5" class="px-3 py-8 text-center text-gray-500">Loading…</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+</main>
+
+<script>
+(function () {
+  var LABELS = {
+    chat_delete: ["Chat deleted", "bg-red-100 text-red-800"],
+    history_import: ["History imported", "bg-blue-100 text-blue-800"],
+    human_send: ["Human reply sent", "bg-indigo-100 text-indigo-800"],
+    claim_acquire: ["Human took over", "bg-amber-100 text-amber-800"],
+    claim_release: ["Handed back to AI", "bg-green-100 text-green-800"],
+    claim_conflict: ["Takeover blocked", "bg-gray-200 text-gray-700"],
+    login: ["Login", "bg-gray-100 text-gray-700"]
+  };
+  var open = {}, names = {}, cache = [];
+  var $ = function (id) { return document.getElementById(id); };
+  function el(tag, cls, text) { var e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; }
+  function label(a) { return LABELS[a] || [a, "bg-gray-100 text-gray-700"]; }
+
+  function summary(ev) {
+    var d = ev.detail_jsonb || {};
+    if (ev.action === "chat_delete") return (d.contact_name ? d.contact_name + " · " : "") + (d.messages_in_transcript || 0) + " messages removed from the inbox";
+    if (ev.action === "history_import") return (d.chats_imported || 0) + " chats / " + (d.messages_imported || 0) + " messages imported (" + (d.skipped_already_in_supabase || 0) + " already there)";
+    if (ev.action === "human_send") return (d.chars || 0) + " characters";
+    if (ev.action.indexOf("claim") === 0) return d.ttl_seconds ? "for " + Math.round(d.ttl_seconds / 60) + " min" : "";
+    var keys = Object.keys(d); return keys.length ? keys.slice(0, 3).map(function (k) { return k + ": " + JSON.stringify(d[k]).slice(0, 40); }).join(", ") : "";
+  }
+
+  function detailRow(ev) {
+    var d = ev.detail_jsonb || {}, box = el("div", "bg-gray-50 border-t border-gray-100 px-4 py-3 text-xs");
+    if (Array.isArray(d.transcript) && d.transcript.length) {
+      box.appendChild(el("div", "font-semibold mb-2", "Transcript saved at deletion (" + d.transcript.length + " messages)"));
+      d.transcript.forEach(function (m) {
+        var row = el("div", "mb-1.5");
+        row.appendChild(el("span", "font-semibold mr-1 " + (m.direction === "buyer" ? "text-gray-700" : m.direction === "human" ? "text-blue-700" : "text-green-700"), (m.direction || "?").toUpperCase() + ":"));
+        row.appendChild(el("span", "whitespace-pre-wrap break-words", m.text || ""));
+        box.appendChild(row);
+      });
+    } else {
+      var pre = el("pre", "whitespace-pre-wrap break-words", JSON.stringify(d, null, 2)); box.appendChild(pre);
+    }
+    return box;
+  }
+
+  function render() {
+    var q = ($("log-search").value || "").trim().toLowerCase(), act = $("log-action").value, body = $("log-body");
+    var rows = cache.filter(function (ev) {
+      if (act && ev.action !== act) return false;
+      if (!q) return true;
+      var nm = names[(ev.e164 || "").replace(/\D/g, "")] || "";
+      return (JSON.stringify(ev) + " " + nm).toLowerCase().indexOf(q) !== -1;
+    });
+    $("log-count").textContent = rows.length + " event" + (rows.length === 1 ? "" : "s");
+    body.textContent = "";
+    if (!rows.length) { var tr0 = el("tr"), td0 = el("td", "px-3 py-8 text-center text-gray-500", "No log entries match."); td0.colSpan = 5; tr0.appendChild(td0); body.appendChild(tr0); return; }
+    rows.forEach(function (ev, i) {
+      var id = (ev.id != null ? ev.id : ev.ts + i), l = label(ev.action), tr = el("tr", "border-t border-gray-100 align-top hover:bg-gray-50");
+      var hasMore = ev.detail_jsonb && Object.keys(ev.detail_jsonb).length;
+      tr.appendChild(el("td", "px-3 py-2 font-mono text-xs whitespace-nowrap", String(ev.ts || "").replace("T", " ").slice(0, 19)));
+      tr.appendChild(el("td", "px-3 py-2", ev.actor || ""));
+      var tdw = el("td", "px-3 py-2"); tdw.appendChild(el("span", "inline-block px-2 py-0.5 rounded-full text-xs font-medium " + l[1], l[0])); tr.appendChild(tdw);
+      var nm = names[(ev.e164 || "").replace(/\D/g, "")];
+      var tdn = el("td", "px-3 py-2"); if (nm) tdn.appendChild(el("div", "font-medium", nm)); tdn.appendChild(el("div", "font-mono text-xs text-gray-500", ev.e164 || "—")); tr.appendChild(tdn);
+      var tdd = el("td", "px-3 py-2"); tdd.appendChild(el("span", "text-gray-700", summary(ev)));
+      if (hasMore) {
+        var b = el("button", "ml-2 text-xs text-pb-navy underline", open[id] ? "hide" : "details"); b.type = "button";
+        b.setAttribute("aria-expanded", String(!!open[id]));
+        b.addEventListener("click", function () { open[id] = !open[id]; render(); });
+        tdd.appendChild(b);
+      }
+      tr.appendChild(tdd); body.appendChild(tr);
+      if (hasMore && open[id]) { var tr2 = el("tr"), td2 = el("td", "p-0"); td2.colSpan = 5; td2.appendChild(detailRow(ev)); tr2.appendChild(td2); body.appendChild(tr2); }
+    });
+  }
+
+  function load() {
+    Promise.all([
+      fetch("/api/inbox/logs?limit=500", { credentials: "same-origin" }).then(function (r) { return r.ok ? r.json() : null; }),
+      fetch("/api/inbox/chats", { credentials: "same-origin" }).then(function (r) { return r.ok ? r.json() : { chats: [] }; }).catch(function () { return { chats: [] }; })
+    ]).then(function (res) {
+      var j = res[0]; if (!j) { $("log-source").textContent = "Could not load logs (are you logged in?)"; return; }
+      (res[1].chats || []).forEach(function (c) { if (c.display_name) names[(c.e164 || "").replace(/\D/g, "")] = c.display_name; });
+      cache = j.events || [];
+      $("log-source").textContent = "Stored in " + (j.source === "supabase" ? "Supabase (audit_events)" : "a local file (dev mode, Supabase not configured)");
+      var sel = $("log-action"), cur = sel.value, acts = {};
+      cache.forEach(function (e) { acts[e.action] = 1; });
+      sel.textContent = ""; var all = el("option", null, "All actions"); all.value = ""; sel.appendChild(all);
+      Object.keys(acts).sort().forEach(function (a) { var o = el("option", null, label(a)[0]); o.value = a; sel.appendChild(o); });
+      sel.value = cur; render();
+    }).catch(function () { $("log-source").textContent = "Could not load logs."; });
+  }
+  $("log-search").addEventListener("input", render);
+  $("log-action").addEventListener("change", render);
+  $("log-refresh").addEventListener("click", load);
+  load(); setInterval(function () { if (!document.hidden) load(); }, 10000);
+})();
+</script>
+{% endblock %}

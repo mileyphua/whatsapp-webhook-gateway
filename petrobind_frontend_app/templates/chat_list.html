@@ -252,6 +252,16 @@
     <button type="button" id="chat-menu-save" class="px-2.5 py-1 rounded bg-pb-navy text-white text-xs font-medium">Save</button>
   </div>
   <div id="chat-menu-err" class="mt-1 text-xs text-red-600" hidden></div>
+  <div class="mt-3 pt-3 border-t border-gray-200">
+    <button type="button" id="chat-del-start" class="text-xs font-medium text-red-700 hover:underline">Delete chat…</button>
+    <div id="chat-del-confirm" hidden class="mt-1 rounded-md bg-red-50 border border-red-200 p-2">
+      <div class="text-xs text-red-800">Permanently remove this conversation from the inbox, Supabase and Redis? A transcript copy is kept in <b>Logs</b>. This cannot be undone.</div>
+      <div class="mt-2 flex justify-end gap-2">
+        <button type="button" id="chat-del-cancel" class="px-2.5 py-1 rounded border border-gray-300 bg-white text-xs">Keep</button>
+        <button type="button" id="chat-del-yes" class="px-2.5 py-1 rounded bg-red-600 text-white text-xs font-medium">Yes, delete</button>
+      </div>
+    </div>
+  </div>
 </div>
 
 <script>
@@ -278,7 +288,7 @@
   search.addEventListener("input", applyFilter);
 
   // ---- 3-dot menu (event delegation: survives live list refresh)
-  function closeMenu() { menu.hidden = true; current = null; err.hidden = true; }
+  function closeMenu() { menu.hidden = true; current = null; err.hidden = true; document.getElementById("chat-del-confirm").hidden = true; }
   document.getElementById("chat-scroll").addEventListener("click", function (ev) {
     var btn = ev.target.closest(".chat-menu-btn"); if (!btn) return;
     ev.preventDefault(); ev.stopPropagation();
@@ -303,6 +313,23 @@
   document.getElementById("chat-menu-save").addEventListener("click", function () { save(input.value.trim()); });
   document.getElementById("chat-menu-clear").addEventListener("click", function () { save(""); });
   document.getElementById("chat-menu-cancel").addEventListener("click", closeMenu);
+
+  // ---- delete chat (two-step confirm, result recorded in Logs)
+  document.getElementById("chat-del-start").addEventListener("click", function () { document.getElementById("chat-del-confirm").hidden = false; });
+  document.getElementById("chat-del-cancel").addEventListener("click", function () { document.getElementById("chat-del-confirm").hidden = true; });
+  document.getElementById("chat-del-yes").addEventListener("click", function () {
+    if (!current) return;
+    var e164 = current.getAttribute("data-e164"), yes = this; yes.disabled = true; yes.textContent = "Deleting…";
+    fetch("/api/inbox/chats/" + encodeURIComponent(e164), { method: "DELETE", credentials: "same-origin" })
+      .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); })
+      .then(function (res) {
+        if (!res.ok) throw new Error(res.j.detail || "failed");
+        if (typeof openE164 !== "undefined" && openE164 === e164) { openE164 = null; pane.hidden = true; pane.removeAttribute("src"); ph.style.display = ""; history.replaceState(null, "", location.pathname); }
+        closeMenu(); refresh();
+      })
+      .catch(function (e) { err.textContent = "Could not delete: " + e.message; err.hidden = false; })
+      .finally(function () { yes.disabled = false; yes.textContent = "Yes, delete"; });
+  });
   input.addEventListener("keydown", function (ev) { if (ev.key === "Enter") save(input.value.trim()); if (ev.key === "Escape") closeMenu(); });
   document.addEventListener("click", function (ev) { if (!menu.hidden && !menu.contains(ev.target)) closeMenu(); });
   document.addEventListener("keydown", function (ev) { if (ev.key === "Escape") closeMenu(); });
