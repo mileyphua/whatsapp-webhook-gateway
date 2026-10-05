@@ -810,6 +810,7 @@ async def _single_turn_chat(
     *,
     session: ConversationSession,
     references: List[RetrievedChunk],
+    draft_only: bool = False,
 ) -> tuple[Optional[str], set[str]]:
     """Run one LLM chat-completion + tool-execution loop. Returns (final
     assistant reply text for WhatsApp, or None if we should send a
@@ -899,7 +900,7 @@ async def _single_turn_chat(
                 args = json.loads(fn.arguments or "{}")
             except Exception:
                 args = {}
-            result = await _run_tool(fn.name, args, session=session)
+            result = await _run_tool(fn.name, args, session=session, draft_only=draft_only)
             tool_msg = {
                 "role": "tool",
                 "tool_call_id": tc.id,
