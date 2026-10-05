@@ -1,238 +1,114 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>{{ page_title or "Petrobind Operations Console" }}</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="/static/app.css">
+{% extends "base.html" %}
+{% block title %}Operations — Petrobind{% endblock %}
+{% block content %}
 <link rel="stylesheet" href="/static/admin.css">
-</head>
-<body class="ops-console">
-<div class="scanlines"></div>
+<main class="flex-1 overflow-y-auto bg-gray-50">
+  <div class="max-w-6xl mx-auto px-4 md:px-8 py-6 space-y-6">
 
-<div class="ops-layout">
-  <aside class="ops-sidebar">
-    <div class="ops-brand">
-      <div class="ops-brand-mark">PB</div>
-      <div class="ops-brand-text">
-        <div class="ops-brand-title">PETROBIND</div>
-        <div class="ops-brand-sub">GLOBAL OPERATIONS · OPS-CON-v1.1</div>
+    <div class="flex flex-wrap items-end justify-between gap-3">
+      <div>
+        <h1 class="text-xl font-semibold text-gray-900">Operations</h1>
+        <p class="text-sm text-gray-600">Live status of the backend services and maintenance tools. Conversations live in the Inbox.</p>
+      </div>
+      <div class="flex items-center gap-2">
+        <span class="ops-auto" id="ops-auto"><span class="ops-auto-dot"></span><span class="ops-auto-text">Auto-refresh every 10s</span></span>
+        <button id="ops-toggle-auto" type="button" class="ops-btn ops-btn--ghost">Pause</button>
+        <button id="ops-refresh" type="button" class="ops-btn ops-btn--primary">Refresh now</button>
       </div>
     </div>
-    <nav class="ops-nav">
-      <a href="/inbox/chats" class="ops-nav-item">
-        <span class="ops-nav-ico">💬</span><span>Inbox Messages</span>
-      </a>
-      <a href="/inbox/admin" class="ops-nav-item active">
-        <span class="ops-nav-ico">🖥️</span><span>Backend Console</span>
-      </a>
-      <a href="/inbox/logs" class="ops-nav-item">
-        <span class="ops-nav-ico">📜</span><span>Logs</span>
-      </a>
-      <a href="/inbox/guide" class="ops-nav-item">
-        <span class="ops-nav-ico">📘</span><span>Guide</span>
-      </a>
-      <a href="/inbox/architecture" class="ops-nav-item">
-        <span class="ops-nav-ico">🧩</span><span>Architecture</span>
-      </a>
-      <a href="/inbox/chats#new-conversation" class="ops-nav-item">
-        <span class="ops-nav-ico">📤</span><span>New Conversation</span>
-      </a>
-      <a href="/health" target="_blank" class="ops-nav-item ops-nav-item--subtle">
-        <span class="ops-nav-ico">🩺</span><span>/health endpoint</span>
-      </a>
-      <a href="https://egbstaqagwznmyzgsfib.supabase.co" target="_blank" class="ops-nav-item ops-nav-item--subtle">
-        <span class="ops-nav-ico">🗄️</span><span>Supabase Project</span>
-      </a>
-    </nav>
-    <div class="ops-identity">
-      <div class="ops-identity-label">AUTHENTICATED OPERATOR</div>
-      <div class="ops-identity-name">{{ inbox_admin_name or "Petrobind Admin" }}</div>
-      <div class="ops-identity-time">SERVER UTC</div>
-      <div class="ops-identity-utc" id="server-utc">{{ server_time_utc or "" }}</div>
-      <button id="ops-logout" class="ops-btn ops-btn--ghost">LOGOUT</button>
-    </div>
-  </aside>
 
-  <main class="ops-main">
-    <header class="ops-topbar">
-      <div class="ops-topbar-left">
-        <h1 class="ops-page-title">
-          <span class="ops-title-accent">⌁</span> Backend Visualization Console
-        </h1>
-        <div class="ops-subtitle">Process-wide backend state · Redis sessions · Supabase claims · Scheduler TZ · Templates cache · Follow-up queues</div>
+    <section class="ops-panel" data-panel="health" aria-labelledby="h-health">
+      <header class="ops-panel-header">
+        <h2 id="h-health">Service health</h2>
+        <span class="ops-panel-refresh" id="p-health-fresh">—</span>
+      </header>
+      <div class="ops-checks-grid" id="checks-grid">
+        <div class="ops-check ops-check--skeleton"><div class="ops-check-name">Loading…</div><div class="ops-check-val">—</div></div>
       </div>
-      <div class="ops-topbar-right">
-        <div class="ops-auto" id="ops-auto">
-          <span class="ops-auto-dot"></span>
-          <span class="ops-auto-text">AUTO REFRESH 10s · ON</span>
-        </div>
-        <button id="ops-toggle-auto" class="ops-btn ops-btn--ghost">PAUSE</button>
-        <button id="ops-refresh" class="ops-btn ops-btn--primary">⟳ REFRESH NOW</button>
-      </div>
-    </header>
-
-    <section class="ops-actions-toolbar">
-      <button class="ops-act" data-action="force-redis-scan">
-        <span class="ops-act-ico">🧲</span>
-        <span class="ops-act-body">
-          <span class="ops-act-title">FORCE REDIS SCAN NOW</span>
-          <span class="ops-act-sub">Bypass 3h guard, re-hydrate _SESSIONS cache</span>
-        </span>
-      </button>
-      <button class="ops-act" data-action="evict-templates">
-        <span class="ops-act-ico">🗑️</span>
-        <span class="ops-act-body">
-          <span class="ops-act-title">EVICT TEMPLATES CACHE</span>
-          <span class="ops-act-sub">Clear local 5min Meta templates process cache</span>
-        </span>
-      </button>
-      <button class="ops-act ops-act--warn" data-action="run-followups">
-        <span class="ops-act-ico">⏰</span>
-        <span class="ops-act-body">
-          <span class="ops-act-title">TRIGGER FOLLOW-UPS SCAN</span>
-          <span class="ops-act-sub">Run the Render cron endpoint in-process via admin token</span>
-        </span>
-      </button>
-      <button class="ops-act ops-act--accent" data-action="flush-scheduled">
-        <span class="ops-act-ico">🚀</span>
-        <span class="ops-act-body">
-          <span class="ops-act-title">FLUSH SCHEDULED SENDS</span>
-          <span class="ops-act-sub">Claim pending outbound_schedules rows, send now</span>
-        </span>
-      </button>
-      <button class="ops-act" data-action="import-history">
-        <span class="ops-act-ico">📥</span>
-        <span class="ops-act-body">
-          <span class="ops-act-title">IMPORT CHAT HISTORY</span>
-          <span class="ops-act-sub">Copy Redis conversations into Supabase (safe to re-run)</span>
-        </span>
-      </button>
     </section>
 
     <div class="ops-grid">
-      <!-- Panel 1: HEALTH -->
-      <article class="ops-panel ops-panel--lg" data-panel="health">
-        <header class="ops-panel-header">
-          <h2><span class="ops-panel-accent" style="background:#e76f51;"></span> 01 · SYSTEM HEALTH CHECKS</h2>
-          <span class="ops-panel-refresh" id="p-health-fresh">—</span>
-        </header>
-        <div class="ops-checks-grid" id="checks-grid">
-          <div class="ops-check ops-check--skeleton">
-            <div class="ops-check-name">loading…</div>
-            <div class="ops-check-val">—</div>
-          </div>
-        </div>
-      </article>
-
-      <!-- Panel 2: SESSIONS -->
-      <article class="ops-panel" data-panel="sessions">
-        <header class="ops-panel-header">
-          <h2><span class="ops-panel-accent" style="background:#2a9d8f;"></span> 02 · SESSION STORES</h2>
-        </header>
+      <section class="ops-panel" data-panel="sessions" aria-labelledby="h-sessions">
+        <header class="ops-panel-header"><h2 id="h-sessions">Conversation storage</h2></header>
         <div class="ops-sessions" id="sessions-box">
-          <div class="ops-stat">
-            <div class="ops-stat-label">IN-PROCESS CACHE</div>
-            <div class="ops-stat-val tabnum" id="sessions-inproc">—</div>
-          </div>
-          <div class="ops-stat">
-            <div class="ops-stat-label">SUPABASE DB MIRROR</div>
-            <div class="ops-stat-val tabnum" id="sessions-db">—</div>
-          </div>
-          <div class="ops-stat">
-            <div class="ops-stat-label">UPSTASH REDIS PERSIST</div>
-            <div class="ops-stat-val tabnum" id="sessions-redis">—</div>
-          </div>
-          <div class="ops-stat ops-stat--wide">
-            <div class="ops-stat-label">PROCESS UPTIME (seconds)</div>
-            <div class="ops-stat-val tabnum" id="proc-uptime">—</div>
-          </div>
+          <div class="ops-stat"><div class="ops-stat-label">Server memory</div><div class="ops-stat-val tabnum" id="sessions-inproc">—</div></div>
+          <div class="ops-stat"><div class="ops-stat-label">Supabase</div><div class="ops-stat-val tabnum" id="sessions-db">—</div></div>
+          <div class="ops-stat"><div class="ops-stat-label">Redis</div><div class="ops-stat-val tabnum" id="sessions-redis">—</div></div>
+          <div class="ops-stat"><div class="ops-stat-label">Server uptime (s)</div><div class="ops-stat-val tabnum" id="proc-uptime">—</div></div>
         </div>
-      </article>
+      </section>
 
-      <!-- Panel 3: CLAIMS -->
-      <article class="ops-panel" data-panel="claims">
-        <header class="ops-panel-header">
-          <h2><span class="ops-panel-accent" style="background:#e9c46a;"></span> 03 · CLAIM-MUTEX · ACTIVE HUMAN SESSIONS</h2>
-          <span class="ops-chip" id="claims-count">0 held</span>
-        </header>
+      <section class="ops-panel" data-panel="claims" aria-labelledby="h-claims">
+        <header class="ops-panel-header"><h2 id="h-claims">Human takeovers in progress</h2><span class="ops-chip" id="claims-count">0 held</span></header>
         <div class="ops-table-wrap">
           <table class="ops-table" id="claims-table">
-            <thead><tr>
-              <th>e164</th><th>held_by</th><th>acquired_at (UTC)</th><th>expires_at</th><th>session_id</th>
-            </tr></thead>
-            <tbody>
-              <tr><td colspan="5" class="ops-empty">No claims currently held.</td></tr>
-            </tbody>
+            <thead><tr><th>Number</th><th>Held by</th><th>Since (UTC)</th><th>Expires</th><th>Session</th></tr></thead>
+            <tbody><tr><td colspan="5" class="ops-empty">No takeovers right now. The AI is answering every chat.</td></tr></tbody>
           </table>
         </div>
-      </article>
+      </section>
 
-      <!-- Panel 4: OUTBOUND SCHEDULES -->
-      <article class="ops-panel ops-panel--lg" data-panel="schedules">
-        <header class="ops-panel-header">
-          <h2><span class="ops-panel-accent" style="background:#f4a261;"></span> 04 · OUTBOUND SCHEDULES (quiet-hour deferred sends)</h2>
-        </header>
-        <div class="ops-status-counts" id="schedule-counts">
-          <div class="ops-sc"><span class="ops-sc-name">pending</span><span class="ops-sc-num tabnum" style="color:#f4a261;">—</span></div>
-          <div class="ops-sc"><span class="ops-sc-name">claimed_temp</span><span class="ops-sc-num tabnum" style="color:#e9c46a;">—</span></div>
-          <div class="ops-sc"><span class="ops-sc-name">sent</span><span class="ops-sc-num tabnum" style="color:#2a9d8f;">—</span></div>
-          <div class="ops-sc"><span class="ops-sc-name">failed</span><span class="ops-sc-num tabnum" style="color:#ef476f;">—</span></div>
-          <div class="ops-sc"><span class="ops-sc-name">cancelled</span><span class="ops-sc-num tabnum">—</span></div>
-        </div>
-        <h3 class="ops-subhead">Next-up pending rows (limit 30 soonest scheduled_for)</h3>
+      <section class="ops-panel ops-panel--wide" data-panel="schedules" aria-labelledby="h-sched">
+        <header class="ops-panel-header"><h2 id="h-sched">Scheduled follow-ups</h2></header>
+        <p class="ops-note">Messages held back until the buyer's quiet hours (22:00–07:00 local) end.</p>
+        <div class="ops-status-counts" id="schedule-counts"></div>
         <div class="ops-table-wrap">
           <table class="ops-table" id="schedule-pending-table">
-            <thead><tr><th>id</th><th>e164</th><th>direction</th><th>scheduled_for UTC</th><th>status</th><th>template_name</th><th>plain_text (truncated)</th><th>created_by</th></tr></thead>
-            <tbody><tr><td colspan="8" class="ops-empty">0 pending / quiet-window-deferred rows right now.</td></tr></tbody>
+            <thead><tr><th>ID</th><th>Number</th><th>Type</th><th>Scheduled for (UTC)</th><th>Status</th><th>Template</th><th>Message</th><th>Created by</th></tr></thead>
+            <tbody><tr><td colspan="8" class="ops-empty">Nothing scheduled.</td></tr></tbody>
           </table>
         </div>
-      </article>
+      </section>
 
-      <!-- Panel 5: TEMPLATES -->
-      <article class="ops-panel" data-panel="templates">
-        <header class="ops-panel-header">
-          <h2><span class="ops-panel-accent" style="background:#264653;"></span> 05 · META APPROVED TEMPLATES · CACHE</h2>
-          <div class="ops-tpl-meta" id="tpl-meta">age — · count —</div>
-        </header>
+      <section class="ops-panel" data-panel="templates" aria-labelledby="h-tpl">
+        <header class="ops-panel-header"><h2 id="h-tpl">WhatsApp templates</h2><div class="ops-tpl-meta" id="tpl-meta">—</div></header>
         <div class="ops-table-wrap">
           <table class="ops-table" id="templates-table">
-            <thead><tr><th>name</th><th>category</th><th>language</th><th>params (n)</th></tr></thead>
-            <tbody><tr><td colspan="4" class="ops-empty">Click "EVICT CACHE → REFRESH NOW" (above) to fetch list from Meta Graph API.</td></tr></tbody>
+            <thead><tr><th>Name</th><th>Category</th><th>Language</th><th>Parameters</th></tr></thead>
+            <tbody><tr><td colspan="4" class="ops-empty">Use “Clear template cache” below to load the approved list from Meta.</td></tr></tbody>
           </table>
         </div>
-      </article>
+      </section>
 
-      <!-- Panel 6: SCHEDULER / TIMEZONE -->
-      <article class="ops-panel" data-panel="scheduler">
-        <header class="ops-panel-header">
-          <h2><span class="ops-panel-accent" style="background:#8d6e63;"></span> 06 · SCHEDULER · BUYER-LOCAL TIMEZONE + WEEKEND MAP</h2>
-          <span class="ops-chip" id="sched-counts">— countries</span>
-        </header>
-        <div class="ops-sched-meta" id="sched-meta">
-          <span>Followups weekend sends env:</span>
-          <span class="ops-weekend-state" id="weekend-state">—</span>
-        </div>
-        <h3 class="ops-subhead">Current buyer-local clock (sample Petrobind zones)</h3>
-        <div class="ops-zone-grid" id="zone-grid">
-          <div class="ops-zone ops-zone--skeleton">—</div>
-        </div>
-      </article>
+      <section class="ops-panel" data-panel="scheduler" aria-labelledby="h-zones">
+        <header class="ops-panel-header"><h2 id="h-zones">Buyer local time</h2><span class="ops-chip" id="sched-counts">—</span></header>
+        <p class="ops-note">Weekend sends: <strong id="weekend-state">—</strong></p>
+        <div class="ops-zone-grid" id="zone-grid"><div class="ops-zone ops-zone--skeleton">—</div></div>
+      </section>
     </div>
-  </main>
-</div>
+
+    <section class="ops-panel" aria-labelledby="h-actions">
+      <header class="ops-panel-header"><h2 id="h-actions">Maintenance</h2></header>
+      <div class="ops-actions-toolbar">
+        <button type="button" class="ops-act" data-action="import-history">
+          <span class="ops-act-title">Import chat history</span>
+          <span class="ops-act-sub">Copy Redis conversations into Supabase. Safe to run again.</span>
+        </button>
+        <button type="button" class="ops-act" data-action="force-redis-scan">
+          <span class="ops-act-title">Reload sessions from Redis</span>
+          <span class="ops-act-sub">Refresh the server's memory of active conversations.</span>
+        </button>
+        <button type="button" class="ops-act" data-action="evict-templates">
+          <span class="ops-act-title">Clear template cache</span>
+          <span class="ops-act-sub">Re-fetch approved templates from Meta on next use.</span>
+        </button>
+        <button type="button" class="ops-act" data-action="run-followups">
+          <span class="ops-act-title">Run follow-ups now</span>
+          <span class="ops-act-sub">Check idle conversations and send due follow-ups.</span>
+        </button>
+        <button type="button" class="ops-act" data-action="flush-scheduled">
+          <span class="ops-act-title">Send scheduled messages now</span>
+          <span class="ops-act-sub">Send everything waiting for quiet hours to end.</span>
+        </button>
+      </div>
+    </section>
+  </div>
+</main>
 
 <div id="ops-toast" class="ops-toast" aria-live="polite"></div>
-
 <script>
-  // Pass server-rendered config to admin.js via window.__OPS__
   window.__OPS__ = window.__OPS__ || {};
-  window.__OPS__.inboxAdminName = {{ (inbox_admin_name or "Petrobind Admin") | tojson }};
-  window.__OPS__.pageTitle = {{ (page_title or "Petrobind Ops Console") | tojson }};
+  window.__OPS__.inboxAdminName = {{ (admin_name or "Petrobind Admin") | tojson }};
 </script>
 <script src="/static/admin.js" defer></script>
-</body>
-</html>
+{% endblock %}

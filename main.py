@@ -3339,35 +3339,18 @@ async def api_inbox_send_template(request: Request) -> JSONResponse:
 
 @app.get("/inbox/admin", response_class=HTMLResponse)
 async def web_inbox_admin(request: Request) -> Response:
-    if not _JINJA_ENV:
-        return HTMLResponse(
-            status_code=503,
-            content=f"<html><body><h1>503 — Inbox Admin unavailable</h1><p>Jinja2 error: {_JINJA_TEMPLATE_ERROR or 'unknown'}</p></body></html>",
-        )
-    if not INBOX_ADMIN_TOKEN:
-        return HTMLResponse(status_code=503, content="<h1>503 — Set INBOX_ADMIN_TOKEN to enable /inbox/*</h1>")
-    sess_payload = _verify_inbox_session_cookie(request)
-    if not sess_payload:
-        return RedirectResponse(url="/inbox/login?next=%2Finbox%2Fadmin", status_code=302)
-    now_iso = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime())
-    tpl = _JINJA_ENV.get_template("admin.html")
-    body = tpl.render(
-        page_title="Petrobind — Operations Console",
-        server_time_utc=now_iso,
-        inbox_admin_name=sess_payload.get("name") or INBOX_ADMIN_NAME,
-    )
-    return HTMLResponse(content=body)
+    resp, ctx = _logged_in_page_ctx(request)
+    if resp:
+        return resp
+    return _render_template("admin.html", **ctx)
 
 
 @app.get("/inbox/architecture", response_class=HTMLResponse)
 async def web_inbox_architecture(request: Request) -> Response:
-    if not _JINJA_ENV:
-        return HTMLResponse(status_code=503, content="<h1>503 — templates unavailable</h1>")
-    if not INBOX_ADMIN_TOKEN:
-        return HTMLResponse(status_code=503, content="<h1>503 — Set INBOX_ADMIN_TOKEN to enable /inbox/*</h1>")
-    if not _verify_inbox_session_cookie(request):
-        return RedirectResponse(url="/inbox/login?next=%2Finbox%2Farchitecture", status_code=302)
-    return HTMLResponse(content=_JINJA_ENV.get_template("architecture.html").render())
+    resp, ctx = _logged_in_page_ctx(request)
+    if resp:
+        return resp
+    return _render_template("architecture.html", **ctx)
 
 
 @app.get("/api/inbox/admin/dashboard")

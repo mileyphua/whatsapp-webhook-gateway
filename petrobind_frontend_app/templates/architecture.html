@@ -1,37 +1,24 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Petrobind — System Architecture</title>
+{% extends "base.html" %}
+{% block title %}Architecture — Petrobind{% endblock %}
+{% block content %}
 <style>
-  :root {
-    --bg: #14161a; --panel: #1c1f25; --line: #2f343d; --text: #e8e6e1; --muted: #9aa0a9;
-    --accent: #e8651a; --ok: #3fb26b; --bad: #e5484d; --warn: #f2c230; --human: #4da3ff;
-  }
-  * { box-sizing: border-box; }
-  body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
-  header { display: flex; flex-wrap: wrap; gap: .75rem 1.5rem; align-items: center; justify-content: space-between;
-           padding: 1rem 1.25rem; border-bottom: 1px solid var(--line); }
-  h1 { margin: 0; font-size: 1.15rem; }
-  h1 small { display: block; color: var(--muted); font-weight: 400; font-size: .8rem; }
-  nav a { color: var(--text); text-decoration: none; border: 1px solid var(--line); padding: .35rem .75rem; border-radius: 4px; margin-left: .4rem; }
-  nav a:hover, nav a:focus-visible { border-color: var(--accent); outline: none; }
-  main { padding: 1rem 1.25rem 2rem; }
+
+  #arch { --bg:#ffffff; --panel:#f9fafb; --line:#d1d5db; --text:#111827; --muted:#6b7280; --accent:#c2540f; --ok:#16a34a; --bad:#dc2626; --warn:#d97706; --human:#2563eb; }
+  
   .legend { display: flex; flex-wrap: wrap; gap: .5rem 1.25rem; color: var(--muted); font-size: .8rem; margin-bottom: .75rem; }
   .legend i { display: inline-block; width: 22px; height: 0; border-top: 3px solid; vertical-align: middle; margin-right: .35rem; }
   .canvas { overflow-x: auto; border: 1px solid var(--line); border-radius: 6px; background:
-            radial-gradient(circle, #2a2e36 1px, transparent 1px) 0 0 / 22px 22px, var(--panel); }
-  svg { display: block; min-width: 1000px; width: 100%; height: auto; }
+            var(--panel); }
+  #graph { display: block; min-width: 1000px; width: 100%; height: auto; }
   .edge { fill: none; stroke: var(--muted); stroke-width: 2; }
   .edge.ai { stroke: var(--accent); }
   .edge.human { stroke: var(--human); }
   .edge.data { stroke: #6b7280; stroke-dasharray: 5 4; }
   .edge-label { fill: var(--muted); font-size: 11px; }
-  .node rect { fill: var(--bg); stroke: var(--line); stroke-width: 2; rx: 6; }
+  .node rect { fill: #fff; stroke: var(--line); stroke-width: 2; rx: 6; }
   .node.ai rect { stroke: var(--accent); }
   .node.human rect { stroke: var(--human); }
-  .node.store rect { stroke-dasharray: 0; fill: #181b20; }
+  .node.store rect { fill: #f3f4f6; }
   .node:hover rect, .node:focus-visible rect, .node.sel rect { stroke-width: 3.5; }
   .node:focus-visible { outline: none; }
   .node text { fill: var(--text); pointer-events: none; }
@@ -42,24 +29,16 @@
   #detail { margin-top: 1rem; border: 1px solid var(--line); border-radius: 6px; padding: 1rem 1.25rem; background: var(--panel); }
   #detail h2 { margin: 0 0 .25rem; font-size: 1rem; }
   #detail p { margin: .25rem 0; }
-  #detail code { background: var(--bg); padding: .1rem .35rem; border-radius: 3px; color: var(--accent); }
+  #detail code { background: #f3f4f6; padding: .1rem .35rem; border-radius: 3px; color: var(--accent); }
   .status-line { color: var(--muted); font-size: .8rem; margin-top: .6rem; }
   @media (prefers-reduced-motion: no-preference) { .node rect { transition: stroke-width .12s; } }
 </style>
-</head>
-<body>
-<header>
-  <h1>Petrobind Global — System Architecture
-    <small>How a WhatsApp message flows: AI (RAG) answers FAQs, a human can take over any chat in real time</small></h1>
-  <nav aria-label="Console">
-    <a href="/inbox/chats">Inbox</a>
-    <a href="/inbox/logs">Logs</a>
-    <a href="/inbox/architecture" aria-current="page">Architecture</a>
-    <a href="/inbox/admin">Ops Console</a>
-    <a href="/inbox/guide">Guide</a>
-  </nav>
-</header>
-<main>
+<main id="arch" class="flex-1 overflow-y-auto bg-gray-50" style="padding:1.5rem 1rem 2rem">
+  <div class="max-w-6xl mx-auto">
+  <div style="margin-bottom:1rem">
+    <h1 class="text-xl font-semibold text-gray-900">System architecture</h1>
+    <p class="text-sm text-gray-600">How a WhatsApp message flows: the AI (RAG + LLM) answers by default, and a human can take over any chat. Click a node for details.</p>
+  </div>
   <div class="legend" aria-label="Legend">
     <span><i style="border-color:var(--accent)"></i>AI path (RAG + LLM)</span>
     <span><i style="border-color:var(--human)"></i>Human path</span>
@@ -76,8 +55,8 @@
     <p>Click (or Tab + Enter) any node to see what it does, where the code lives, and its live status.</p>
   </section>
   <div class="status-line" id="status-line">Live status: loading…</div>
+  </div>
 </main>
-
 <script>
 (function () {
   "use strict";
@@ -219,5 +198,4 @@
   }).catch(function () { document.getElementById("status-line").textContent = "Live status unavailable."; });
 })();
 </script>
-</body>
-</html>
+{% endblock %}
