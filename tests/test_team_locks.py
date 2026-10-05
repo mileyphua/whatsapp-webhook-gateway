@@ -62,6 +62,7 @@ class Locks(unittest.TestCase):
 
         self._patches = [
             mock.patch.object(main._sb, "ENABLED", True),
+            mock.patch.object(main, "_window_state", mock.AsyncMock(return_value={"last_buyer_at": 1.0, "closes_at": 9e12, "inside": True})),  # these tests are about locks/sending, so the 24h window is open
             mock.patch.object(main._sb, "claim_acquire", self.claims.claim_acquire),
             mock.patch.object(main._sb, "claim_is_human_held", self.claims.claim_is_human_held),
             mock.patch.object(main._sb, "claim_release", self.claims.claim_release),

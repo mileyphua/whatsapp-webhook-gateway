@@ -15,6 +15,7 @@ load_dotenv()
 import booking
 import contact_names
 import media_rules
+import notify
 import users_store
 import reply_guard
 import feedback_store
@@ -82,6 +83,7 @@ except Exception as _its_exc:  # pragma: no cover - itsdangerous in requirements
     if _JINJA_TEMPLATE_ERROR is None:
         _JINJA_TEMPLATE_ERROR = f"itsdangerous import failed: {type(_its_exc).__name__}: {_its_exc!s}"
 
+import rag
 from rag import load_index_if_needed
 
 app = FastAPI(title="WhatsApp Webhook Gateway", version="1.1.0")
@@ -964,9 +966,13 @@ async def receive_webhook(request: Request) -> JSONResponse:
                                     f"Buyer sent a WhatsApp {msg_type} message (msg_id={wamid}). "
                                     f"AUTO-REPLY FAILED with {exc!r} — please reach out manually."
                                 )
-                        # Also send a handoff email so a human sees the inbound media now.
+                        # Also send a handoff email so a human sees the inbound media now (at most once an hour per
+                        # buyer: someone sending ten photos must not flood the team's mailbox).
                         try:
                             media_from = message.get("from") or ""
+                            if time.time() - _MEDIA_EMAIL_LAST.get(media_from, 0.0) < 3600:
+                                raise _MediaEmailThrottled()
+                            _MEDIA_EMAIL_LAST[media_from] = time.time()
                             media_sess = await conversation_store.get_session(media_from) if media_from else None
                             await notify.send_handoff_email(
                                 phone_number=media_from,
@@ -977,6 +983,8 @@ async def receive_webhook(request: Request) -> JSONResponse:
                                 relationship_summary=media_sess.relationship_summary() if media_sess else None,
                                 recent_transcript=media_sess.recent_transcript() if media_sess else None,
                             )
+                        except _MediaEmailThrottled:
+                            print(f"[MEDIA HANDOFF EMAIL SKIP] already emailed about {message.get('from')!r} in the last hour")
                         except Exception as exc:
                             print(f"[MEDIA HANDOFF EMAIL FAIL] {exc!r}")
                     else:
@@ -1009,6 +1017,23 @@ async def webhook_catchall(request: Request) -> JSONResponse:
     )
 
 
+_MEDIA_EMAIL_LAST: Dict[str, float] = {}
+
+
+class _MediaEmailThrottled(Exception):
+    pass
+
+
+async def _note_buyer_message(phone: str, ts: float) -> None:
+    """Remember when the buyer wrote, even if the AI stays silent (human has the chat): the 24h window runs from it."""
+    try:
+        sess = await conversation_store.get_session(phone)
+        if not sess.last_buyer_ts or ts > sess.last_buyer_ts:
+            sess.last_buyer_ts = ts
+    except Exception as exc:
+        print(f"[WINDOW] could not note buyer time for {phone!r}: {type(exc).__name__}: {exc!s}")
+
+
 def _process_message(message: Dict[str, Any]) -> None:
     message_id = message.get("id")
     from_number = message.get("from")
@@ -1025,6 +1050,12 @@ def _process_message(message: Dict[str, Any]) -> None:
     )
     # --- additive Supabase persistence hook (no breaking path) ---
     asyncio.create_task(_persist_inbound_safe(message))
+    try:
+        buyer_ts = float(timestamp) if timestamp else time.time()
+    except (TypeError, ValueError):
+        buyer_ts = time.time()
+    if from_number:
+        asyncio.create_task(_note_buyer_message(str(from_number), buyer_ts))
 
 
 def _process_status(status: Dict[str, Any]) -> None:
@@ -1741,13 +1772,7 @@ async def followups_scan(request: Request) -> JSONResponse:
         # that case we still send the nurture nudge — it's better than letting
         # a 3-day-cold lead go silent forever.
         held = await _claim_is_held_by_other(act.phone_number)
-        last_buyer_ts: Optional[float] = None
-        try:
-            sess = conversation_store._SESSIONS.get(act.phone_number)
-            if sess and hasattr(sess, "last_buyer_message_at") and sess.last_buyer_message_at:
-                last_buyer_ts = float(sess.last_buyer_message_at)
-        except Exception:
-            last_buyer_ts = None
+        last_buyer_ts = _session_last_buyer_ts(act.phone_number)
         stale_cutoff = time.time() - (72 * 3600)
         claim_blocks = held and last_buyer_ts is not None and last_buyer_ts > stale_cutoff
         if claim_blocks:
@@ -1905,13 +1930,7 @@ async def scheduled_send_flush(request: Request) -> JSONResponse:
                 continue
         else:
             held_by_other = await _claim_is_held_by_other(e164)
-            last_buyer_ts: Optional[float] = None
-            try:
-                sess = conversation_store._SESSIONS.get(e164)
-                if sess and hasattr(sess, "last_buyer_message_at") and sess.last_buyer_message_at:
-                    last_buyer_ts = float(sess.last_buyer_message_at)
-            except Exception:
-                last_buyer_ts = None
+            last_buyer_ts = _session_last_buyer_ts(e164)
             stale_cutoff = now_utc - (72 * 3600)
             claim_blocks = held_by_other and last_buyer_ts is not None and last_buyer_ts > stale_cutoff
             if claim_blocks:
@@ -2776,6 +2795,8 @@ async def api_inbox_send_attachment(e164: str, request: Request) -> JSONResponse
     fail = _requires_inbox_bearer(request)
     if fail:
         return fail
+    if not (await _window_state(e164))["inside"]:
+        return _window_closed_response()
     # Refuse an oversized body BEFORE reading it (the check runs after auth so strangers can't make us parse uploads).
     max_body = media_rules.MAX_DOCUMENT_BYTES + 1024 * 1024
     try:
@@ -2830,6 +2851,9 @@ async def api_inbox_send_human_message(e164: str, request: Request) -> JSONRespo
     reply_to = body.get("reply_to_wamid")
     if reply_to is not None:
         reply_to = str(reply_to) or None
+
+    if not (await _window_state(e164))["inside"]:
+        return _window_closed_response()
 
     # --- claim check: only the holder (or unclaimed) can send ---
     # We extract the session_id from a custom header if present (the frontend
@@ -3635,36 +3659,53 @@ async def api_inbox_evict_suggestion(e164: str, request: Request) -> JSONRespons
     return JSONResponse(content={"ok": True, "evicted_entries": dropped})
 
 
+def _session_last_buyer_ts(phone: str) -> Optional[float]:
+    """When the buyer last wrote, as remembered by the AI session (None if unknown). Never uses our own activity."""
+    sess = conversation_store._SESSIONS.get(phone)
+    ts = getattr(sess, "last_buyer_ts", None) if sess else None
+    return float(ts) if ts else None
+
+
+async def _window_state(e164: str) -> Dict[str, Any]:
+    """WhatsApp's 24-hour rule: free-text replies are allowed for 24h after the BUYER's last message. Our own
+    messages (templates, AI or human replies) never open or extend it. The newest buyer time from any source wins."""
+    digits = contact_names.normalize(e164)
+    candidates: List[float] = []
+    try:
+        ts = await _sb.get_last_buyer_message_at(digits)
+        if ts is not None:
+            candidates.append(float(ts))
+    except Exception:
+        pass
+    try:
+        if not candidates:
+            await conversation_store.redis_scan_all_sessions()
+    except Exception:
+        pass
+    for cand in conversation_store.all_sessions():
+        if contact_names.normalize(cand.phone_number) == digits and getattr(cand, "last_buyer_ts", None):
+            candidates.append(float(cand.last_buyer_ts))
+    last = max(candidates) if candidates else None
+    closes = last + 86400 if last is not None else None
+    return {"last_buyer_at": last, "closes_at": closes, "inside": bool(closes is not None and time.time() < closes)}
+
+
+def _window_closed_response() -> JSONResponse:
+    return JSONResponse(content={
+        "success": False, "code": "window_closed", "inside_24h_window": False,
+        "detail": ("The 24-hour reply window is closed for this buyer, so WhatsApp only allows an approved template now. "
+                   "Use New Conversation and pick a template."),
+    }, status_code=422)
+
+
 @app.get("/api/inbox/window-check/{e164}")
 async def api_inbox_window_check(e164: str, request: Request) -> JSONResponse:
     fail = _requires_inbox_bearer(request)
     if fail:
         return fail
-    try:
-        from urllib.parse import unquote
-        e164_decoded = unquote(e164)
-    except Exception:
-        e164_decoded = e164
-    last_buyer_at_unix: Optional[float] = None
-    try:
-        last_buyer_at_unix = await _sb.get_last_buyer_message_at(e164_decoded)  # type: ignore[attr-defined]
-    except Exception:
-        last_buyer_at_unix = None
-    if last_buyer_at_unix is None:
-        try:
-            await conversation_store.redis_scan_all_sessions()
-            _s = _find_session_by_number(e164_decoded)
-            if _s is not None:
-                last_buyer_at_unix = _s.last_buyer_ts or _s.last_activity_ts
-        except Exception:
-            pass
-    inside_24h = bool(
-        last_buyer_at_unix is not None
-        and (time.time() - float(last_buyer_at_unix)) < 86400
-    )
-    window_closes_at: Optional[float] = (
-        float(last_buyer_at_unix) + 86400 if last_buyer_at_unix is not None else None
-    )
+    from urllib.parse import unquote
+    w = await _window_state(unquote(e164))
+    last_buyer_at_unix, inside_24h, window_closes_at = w["last_buyer_at"], w["inside"], w["closes_at"]
 
     def _iso_or_none(ts: Optional[float]) -> Optional[str]:
         if ts is None:
@@ -3679,6 +3720,7 @@ async def api_inbox_window_check(e164: str, request: Request) -> JSONResponse:
 
     return JSONResponse(content={
         "inside_24h_window": inside_24h,
+        "server_now_unix_ts": time.time(),
         "last_buyer_at_unix_ts": last_buyer_at_unix,
         "last_buyer_at_iso": _iso_or_none(last_buyer_at_unix),
         "window_closes_at_unix_ts": window_closes_at,

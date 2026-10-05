@@ -322,6 +322,7 @@
             appendBubble({ direction: "system",
               text: `[Not sent: ${(data && (data.detail || data.error)) || ("error " + resp.status)}]`,
               created_at: new Date().toISOString(), _optimistic: true, errored: true });
+            if (data && data.code === "window_closed") pollWindowStatus(E164);   // the 24h window ended: switch the composer to template-only now
           }
         } catch (err) {
           undoUnsent();
@@ -735,6 +736,8 @@
     // ---------- FR10: 24h window banner + send form gate ----------
     let windowPollTimer = null;
     let lastWindowState = { inside_24h_window: null, window_closes_at_unix_ts: null };
+    let clockSkew = 0;                                   // server time minus this computer's time, in seconds
+    const nowSec = () => Date.now() / 1000 + clockSkew;
 
     function formatDuration(secondsLeft) {
       if (secondsLeft == null || isNaN(secondsLeft) || secondsLeft <= 0) return "0m";
@@ -771,13 +774,13 @@
       void banner.offsetWidth;
 
       if (isInside) {
-        const secondsLeft = closesAt ? Math.max(0, closesAt - Math.floor(Date.now() / 1000)) : 0;
+        const secondsLeft = closesAt ? Math.max(0, closesAt - Math.floor(nowSec())) : 0;
         banner.className = "w-full sticky top-0 z-40 px-4 md:px-10 py-2.5 banner-slideIn";
         banner.innerHTML =
           `<div class="max-w-5xl mx-auto bg-green-50 border border-green-200 text-green-900 rounded-md px-3 py-2 flex justify-between items-center text-sm">
              <span class="flex items-center gap-2">
                <svg class="w-4 h-4 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
-               <strong>24-hour reply window OPEN</strong> — expires in ${formatDuration(secondsLeft)}. Freeform messages allowed.
+               <strong>24-hour reply window OPEN</strong> — expires in <span id="window-expires-text">${formatDuration(secondsLeft)}</span>. Freeform messages allowed.
              </span>
              <span class="text-green-700 font-mono text-xs">${closesAt ? new Date(closesAt * 1000).toLocaleTimeString() : ""}</span>
            </div>`;
@@ -824,6 +827,7 @@
     async function pollWindowStatus(e164) {
       const data = await fetchWindow(e164);
       if (data) {
+        if (data.server_now_unix_ts) clockSkew = data.server_now_unix_ts - Date.now() / 1000;   // trust the server's clock, not this computer's
         lastWindowState = {
           inside_24h_window: !!data.inside_24h_window,
           window_closes_at_unix_ts: data.window_closes_at_unix_ts || null,
@@ -838,8 +842,16 @@
       if (!el) return;
       const closes = lastWindowState.window_closes_at_unix_ts;
       if (!closes) { el.textContent = "⏱ no buyer message yet"; el.className = "text-xs font-mono font-semibold text-gray-400"; return; }
-      const sec = Math.floor(closes - Date.now() / 1000);
-      if (sec <= 0) { el.textContent = "⏱ window closed · templates only"; el.className = "text-xs font-mono font-semibold text-gray-500"; return; }
+      const sec = Math.floor(closes - nowSec());
+      if (sec <= 0) {
+        el.textContent = "⏱ window closed · templates only"; el.className = "text-xs font-mono font-semibold text-gray-500";
+        if (lastWindowState.inside_24h_window !== false) {      // the countdown just hit zero: lock the composer immediately
+          lastWindowState.inside_24h_window = false;
+          renderWindowBanner(false, closes);
+        }
+        return;
+      }
+      const ex = document.getElementById("window-expires-text"); if (ex) ex.textContent = formatDuration(sec);
       const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), x = sec % 60;
       const p2 = (n) => (n < 10 ? "0" : "") + n;
       el.textContent = "⏱ " + p2(h) + ":" + p2(m) + ":" + p2(x) + " left to reply";

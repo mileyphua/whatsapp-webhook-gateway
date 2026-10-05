@@ -584,34 +584,54 @@ async def claim_release(*, e164: str, held_by: Optional[str], session_id: str) -
 # quiet-hours scheduling / outbound_schedules table
 # ================================================================
 
-async def get_last_buyer_message_at(e164: str) -> Optional[float]:
-    """Return Unix timestamp of the last buyer inbound message for e164,
-    or None if Supabase disabled / no row / parse error."""
-    if not (ENABLED and e164):
-        return None
+def local_last_buyer_ts(e164: str) -> Optional[float]:
+    """Newest buyer message of a chat in the local (no-Supabase) store, as a unix timestamp."""
+    import calendar
+    best: Optional[float] = None
+    for m in _LOCAL_OUTBOUND.get(_digits(e164), []):
+        if m.get("direction") != "buyer":
+            continue
+        try:
+            t = float(calendar.timegm(time.strptime(str(m["created_at"])[:19], "%Y-%m-%dT%H:%M:%S")))
+        except Exception:
+            continue
+        best = t if best is None else max(best, t)
+    return best
+
+
+def _iso_to_unix(value: Any) -> Optional[float]:
+    import datetime as _dt
     try:
-        import datetime as _dt_inline
-        async with _client() as c:
-            r = await c.get(
-                f"{_REST_BASE}/sessions",
-                headers={**_HEADERS, "Prefer": "return=representation"},
-                params={"e164": f"eq.{e164}", "select": "last_buyer_message_at", "limit": "1"},
-            )
-            if r.status_code >= 300:
-                return None
-            rows = r.json() or []
-            if not rows:
-                return None
-            ts_str = rows[0].get("last_buyer_message_at")
-            if not ts_str:
-                return None
-            try:
-                dt = _dt_inline.datetime.fromisoformat(str(ts_str).replace("Z", "+00:00"))
-                return dt.timestamp()
-            except Exception:
-                return None
+        return _dt.datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp()
     except Exception:
         return None
+
+
+async def get_last_buyer_message_at(e164: str) -> Optional[float]:
+    """Unix time of the buyer's newest message for this number (WhatsApp's 24h window runs from it), or None.
+    Accepts "+60..." or "60..."; reads the session row and falls back to the messages table itself."""
+    digits = _digits(e164)
+    if not digits:
+        return None
+    if not ENABLED:
+        return local_last_buyer_ts(digits)
+    flt = f'in.("{digits}","+{digits}")'
+    try:
+        async with _client() as c:
+            r = await c.get(f"{_REST_BASE}/sessions", headers={**_HEADERS}, params={"e164": flt, "select": "last_buyer_message_at", "limit": "1"})
+            if r.status_code < 300:
+                rows = r.json() or []
+                ts = _iso_to_unix(rows[0].get("last_buyer_message_at")) if rows and rows[0].get("last_buyer_message_at") else None
+                if ts is not None:
+                    return ts
+            r = await c.get(f"{_REST_BASE}/messages", headers={**_HEADERS},
+                            params={"e164": flt, "direction": "eq.buyer", "order": "created_at.desc", "limit": "1", "select": "created_at"})
+            if r.status_code < 300:
+                rows = r.json() or []
+                return _iso_to_unix(rows[0].get("created_at")) if rows else None
+    except Exception:
+        return None
+    return None
 
 
 async def insert_outbound_schedule(row: Dict[str, Any]) -> None:

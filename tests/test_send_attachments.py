@@ -57,6 +57,7 @@ class SendAttachments(unittest.TestCase):
 
         self._patches = [
             mock.patch.object(main._sb, "ENABLED", False),
+            mock.patch.object(main, "_window_state", mock.AsyncMock(return_value={"last_buyer_at": 1.0, "closes_at": 9e12, "inside": True})),  # these tests are about locks/sending, so the 24h window is open
             mock.patch.object(main, "_sb_enabled", lambda: True),
             mock.patch.object(main._sb, "insert_outbound_message", record),
             mock.patch.object(main._sb, "audit", mock.AsyncMock()),
