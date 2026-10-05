@@ -3208,6 +3208,76 @@ async def api_inbox_lesson_delete(lesson_id: str, request: Request) -> JSONRespo
     return JSONResponse(content={"ok": True})
 
 
+class _NewMember(BaseModel):
+    username: str
+    name: str = ""
+    password: str
+
+
+class _EditMember(BaseModel):
+    name: Optional[str] = None
+    password: Optional[str] = None
+    disabled: Optional[bool] = None
+
+
+def _public_member(u: Dict[str, Any]) -> Dict[str, Any]:
+    return {"username": u["username"], "name": u["name"], "disabled": bool(u.get("disabled")), "created_ts": u.get("created_ts")}
+
+
+@app.get("/api/inbox/team")
+async def api_inbox_team_list(request: Request) -> JSONResponse:
+    """Team members who can read and reply in the inbox (admin only; never returns password data)."""
+    fail = _requires_admin(request)
+    if fail:
+        return fail
+    return JSONResponse(content={"members": await users_store.list_users()})
+
+
+@app.post("/api/inbox/team")
+async def api_inbox_team_add(body: _NewMember, request: Request) -> JSONResponse:
+    """Add a team member with a username and password (admin only)."""
+    fail = _requires_admin(request)
+    if fail:
+        return fail
+    try:
+        user = await users_store.create_user(username=body.username, name=body.name, password=body.password)
+    except ValueError as exc:
+        return JSONResponse(content={"detail": str(exc)}, status_code=422)
+    await _refresh_users_cache()
+    await _sb.audit(actor=(_auth_info(request) or {}).get("name") or INBOX_ADMIN_NAME, action="team_member_added", detail={"username": user["username"], "name": user["name"]})
+    return JSONResponse(content={"ok": True, "member": _public_member(user)})
+
+
+@app.patch("/api/inbox/team/{username}")
+async def api_inbox_team_update(username: str, body: _EditMember, request: Request) -> JSONResponse:
+    """Rename, reset the password of, disable or re-enable a team member (admin only)."""
+    fail = _requires_admin(request)
+    if fail:
+        return fail
+    try:
+        user = await users_store.update_user(username, name=body.name, password=body.password, disabled=body.disabled)
+    except ValueError as exc:
+        return JSONResponse(content={"detail": str(exc)}, status_code=422)
+    if user is None:
+        return JSONResponse(content={"detail": "member not found"}, status_code=404)
+    await _refresh_users_cache()
+    changed = [k for k, v in (("name", body.name), ("password_changed", body.password), ("disabled", body.disabled)) if v is not None]
+    await _sb.audit(actor=(_auth_info(request) or {}).get("name") or INBOX_ADMIN_NAME, action="team_member_updated", detail={"username": user["username"], "changed": changed})
+    return JSONResponse(content={"ok": True, "member": _public_member(user)})
+
+
+@app.delete("/api/inbox/team/{username}")
+async def api_inbox_team_remove(username: str, request: Request) -> JSONResponse:
+    """Remove a team member (admin only). Their open sessions stop working immediately."""
+    fail = _requires_admin(request)
+    if fail:
+        return fail
+    await users_store.delete_user(username)
+    await _refresh_users_cache()
+    await _sb.audit(actor=(_auth_info(request) or {}).get("name") or INBOX_ADMIN_NAME, action="team_member_removed", detail={"username": users_store.normalize_username(username)})
+    return JSONResponse(content={"ok": True})
+
+
 @app.get("/inbox/team")
 async def web_inbox_team(request: Request) -> Response:
     resp, ctx = _logged_in_page_ctx(request)

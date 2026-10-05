@@ -1,5 +1,118 @@
 {% extends "base.html" %}
 {% block title %}Team — Petrobind Inbox{% endblock %}
 {% block content %}
-<main class="flex-1 overflow-y-auto bg-gray-50"><div class="max-w-4xl mx-auto px-4 py-6"><h1 class="text-xl font-semibold">Team</h1></div></main>
+<main class="flex-1 overflow-y-auto bg-gray-50">
+  <div class="max-w-4xl mx-auto px-4 md:px-8 py-6 space-y-6">
+    <header>
+      <h1 class="text-xl font-semibold">Team</h1>
+      <p class="text-sm text-gray-600 max-w-2xl">Add people who can read and reply to buyers. Team members log in with their own username and password and can only see the Inbox. They can't open Learning, Logs, Ops or this page, and they can't delete chats or change the AI. When a member switches a chat to Human, it is held under their name so nobody else replies at the same time.</p>
+    </header>
+
+    <section class="bg-white border border-gray-200 rounded-lg p-4" aria-labelledby="h-add">
+      <h2 id="h-add" class="text-sm font-semibold mb-3">Add team member</h2>
+      <form id="member-form" class="grid gap-3 md:grid-cols-3" autocomplete="off">
+        <label class="block"><span class="block text-xs font-medium text-gray-700 mb-0.5">Name shown in the inbox</span>
+          <input id="m-name" type="text" maxlength="60" required class="w-full border border-gray-300 rounded-md px-3 py-2 text-sm" placeholder="e.g. Mei Ling"></label>
+        <label class="block"><span class="block text-xs font-medium text-gray-700 mb-0.5">Username</span>
+          <input id="m-user" type="text" maxlength="32" required class="w-full border border-gray-300 rounded-md px-3 py-2 text-sm font-mono" placeholder="mei.ling" autocapitalize="none"></label>
+        <label class="block"><span class="block text-xs font-medium text-gray-700 mb-0.5">Password (min 8 characters)</span>
+          <div class="flex gap-2"><input id="m-pass" type="text" minlength="8" required class="w-full border border-gray-300 rounded-md px-3 py-2 text-sm font-mono" autocomplete="new-password">
+          <button type="button" id="m-gen" class="shrink-0 px-3 py-2 rounded-md border border-gray-300 text-sm hover:bg-gray-50">Generate</button></div></label>
+        <div class="md:col-span-3 flex items-center justify-between gap-3">
+          <p id="m-msg" class="text-sm" aria-live="polite"></p>
+          <button type="submit" class="px-4 py-2 rounded-md bg-pb-navy text-white text-sm font-medium">Add team member</button>
+        </div>
+      </form>
+      <p class="mt-2 text-xs text-gray-500">Share the username and password with them directly. For safety the password is not shown again; use “Reset password” if it is lost.</p>
+    </section>
+
+    <section aria-labelledby="h-members">
+      <h2 id="h-members" class="text-sm font-semibold mb-2">Members</h2>
+      <div id="members" class="space-y-2"></div>
+    </section>
+  </div>
+</main>
+
+<dialog id="rm-dialog" aria-labelledby="rm-title" class="rounded-2xl p-0 w-[92vw] max-w-sm border-0 shadow-2xl">
+  <div class="p-6">
+    <h2 id="rm-title" class="text-lg font-semibold text-gray-900">Remove this member?</h2>
+    <p id="rm-body" class="mt-2 text-sm text-gray-600"></p>
+    <div class="mt-6 flex justify-end gap-2">
+      <button type="button" id="rm-cancel" class="px-4 py-2 rounded-full border border-gray-300 text-sm font-medium text-gray-700 hover:bg-gray-50">Cancel</button>
+      <button type="button" id="rm-confirm" class="px-4 py-2 rounded-full bg-red-600 hover:bg-red-700 text-white text-sm font-medium">Remove</button>
+    </div>
+  </div>
+</dialog>
+
+<script>
+(function () {
+  var $ = function (id) { return document.getElementById(id); };
+  function el(tag, cls, text) { var e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; }
+  function btn(label, cls, fn) { var b = el("button", "px-3 py-1 rounded-md text-xs font-medium " + cls, label); b.type = "button"; b.addEventListener("click", fn); return b; }
+  function api(path, method, body) {
+    return fetch("/api/inbox/team" + path, { method: method, credentials: "same-origin", headers: { "Content-Type": "application/json" }, body: body ? JSON.stringify(body) : undefined })
+      .then(function (r) { return r.json().then(function (j) { if (!r.ok) throw new Error(j.detail || "failed"); return j; }); });
+  }
+  var resetting = {};
+
+  function row(m) {
+    var card = el("div", "bg-white border border-gray-200 rounded-lg p-3");
+    var top = el("div", "flex flex-wrap items-center justify-between gap-3");
+    var who = el("div", "min-w-0");
+    who.appendChild(el("div", "font-semibold text-sm text-gray-900", m.name));
+    who.appendChild(el("div", "text-xs font-mono text-gray-500", m.username));
+    top.appendChild(who);
+    var right = el("div", "flex flex-wrap items-center gap-2");
+    right.appendChild(el("span", "px-2 py-0.5 rounded-full text-[11px] font-semibold " + (m.disabled ? "bg-gray-200 text-gray-700" : "bg-green-100 text-green-800"), m.disabled ? "Disabled" : "Active"));
+    right.appendChild(btn("Reset password", "border border-gray-300 hover:bg-gray-50", function () { resetting[m.username] = true; load(); }));
+    right.appendChild(btn(m.disabled ? "Enable" : "Disable", "border border-gray-300 hover:bg-gray-50", function () { api("/" + encodeURIComponent(m.username), "PATCH", { disabled: !m.disabled }).then(load).catch(function (e) { $("m-msg").textContent = e.message; }); }));
+    right.appendChild(btn("Remove", "text-red-700 hover:bg-red-50", function () { askRemove(m); }));
+    top.appendChild(right); card.appendChild(top);
+    if (resetting[m.username]) {
+      var f = el("div", "mt-3 pt-3 border-t border-gray-200 flex flex-wrap items-center gap-2");
+      var inp = el("input", "border border-gray-300 rounded-md px-3 py-1.5 text-sm font-mono"); inp.type = "text"; inp.minLength = 8; inp.placeholder = "New password (min 8)"; inp.setAttribute("aria-label", "New password for " + m.name);
+      var msg = el("span", "text-xs text-red-600");
+      f.appendChild(inp);
+      f.appendChild(btn("Generate", "border border-gray-300 hover:bg-gray-50", function () { inp.value = genPass(); }));
+      f.appendChild(btn("Save password", "bg-pb-navy text-white", function () {
+        api("/" + encodeURIComponent(m.username), "PATCH", { password: inp.value }).then(function () { delete resetting[m.username]; $("m-msg").className = "text-sm text-green-700"; $("m-msg").textContent = "Password changed for " + m.name + ". Share it with them: " + inp.value; load(); }).catch(function (e) { msg.textContent = e.message; });
+      }));
+      f.appendChild(btn("Cancel", "border border-gray-300 hover:bg-gray-50", function () { delete resetting[m.username]; load(); }));
+      f.appendChild(msg); card.appendChild(f);
+    }
+    return card;
+  }
+
+  function load() {
+    return fetch("/api/inbox/team", { credentials: "same-origin" }).then(function (r) { return r.ok ? r.json() : null; }).then(function (j) {
+      var box = $("members"); box.textContent = "";
+      if (!j) { box.appendChild(el("div", "text-sm text-gray-500", "Could not load the team. Are you logged in as admin?")); return; }
+      if (!j.members.length) { box.appendChild(el("div", "bg-white border border-dashed border-gray-300 rounded-lg p-5 text-sm text-gray-500 text-center", "No team members yet. Add the first one above.")); return; }
+      j.members.forEach(function (m) { box.appendChild(row(m)); });
+    });
+  }
+
+  function genPass() {
+    var chars = "abcdefghjkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789", out = "", a = new Uint32Array(14);
+    crypto.getRandomValues(a); a.forEach(function (n) { out += chars[n % chars.length]; }); return out;
+  }
+  $("m-gen").addEventListener("click", function () { $("m-pass").value = genPass(); });
+
+  $("member-form").addEventListener("submit", function (ev) {
+    ev.preventDefault();
+    var msg = $("m-msg"), pass = $("m-pass").value;
+    api("", "POST", { name: $("m-name").value, username: $("m-user").value, password: pass }).then(function (j) {
+      msg.className = "text-sm text-green-700"; msg.textContent = "Added " + j.member.name + ". Share with them: username " + j.member.username + " and password " + pass;
+      $("member-form").reset(); return load();
+    }).catch(function (e) { msg.className = "text-sm text-red-600"; msg.textContent = e.message; });
+  });
+
+  var rmTarget = null, dlg = $("rm-dialog");
+  function askRemove(m) { rmTarget = m; $("rm-body").textContent = m.name + " (" + m.username + ") will be logged out straight away and can't log in again. Messages they sent stay in the chats."; dlg.showModal(); }
+  $("rm-cancel").addEventListener("click", function () { dlg.close(); });
+  $("rm-confirm").addEventListener("click", function () { if (!rmTarget) return; api("/" + encodeURIComponent(rmTarget.username), "DELETE").then(function () { dlg.close(); load(); }); });
+
+  load();
+})();
+</script>
 {% endblock %}
