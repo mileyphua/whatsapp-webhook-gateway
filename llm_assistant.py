@@ -1184,7 +1184,12 @@ async def handle_incoming_message(
     # Never repeat a sentence already sent earlier in this chat (reads like a template).
     try:
         last_user_idx = max((k for k, m in enumerate(session.history) if m.get("role") == "user"), default=0)
-        cleaned = reply_guard.strip_repeats(cleaned, reply_guard.previous_assistant_replies(session.history[:last_user_idx]))
+        earlier = session.history[:last_user_idx]
+        cleaned = reply_guard.strip_repeats(
+            cleaned, reply_guard.previous_assistant_replies(earlier),
+            buyer_text=safe_text,
+            previous_buyer_texts=[str(m.get("content")) for m in earlier if m.get("role") == "user" and m.get("content")],
+        )
     except Exception as exc:
         print(f"[llm] repetition guard skipped: {type(exc).__name__}: {exc!s}")
 

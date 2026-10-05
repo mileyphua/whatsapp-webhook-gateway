@@ -2,7 +2,7 @@
 itself and detect when a buyer explicitly asks for a human."""
 import re
 from difflib import SequenceMatcher
-from typing import List
+from typing import List, Optional
 
 _SENT_SPLIT = re.compile(r"(?<=[.!?])\s+|\n+")
 _URL = re.compile(r"https?://|www\.", re.I)
@@ -59,9 +59,30 @@ def repeated_sentences(new_text: str, previous_replies: List[str], *, min_words:
     return out
 
 
-def strip_repeats(new_text: str, previous_replies: List[str], **kw) -> str:
-    """Drop sentences already said earlier (keeps anything with a link). Never returns an empty reply."""
+_QUESTION_START = re.compile(
+    r"^\s*(?:hi\W+|hello\W+|hey\W+)?(?:can|could|would|will|do|does|did|is|are|am|what|who|whom|whose|where|when|why|how|which|tell\s+me|"
+    r"please\s+(?:tell|explain)|explain)\b", re.I)
+
+
+def is_question(text: str) -> bool:
+    """True if the buyer is asking something (so the first thing in the reply is their answer)."""
+    t = (text or "").strip()
+    return bool(t) and ("?" in t or bool(_QUESTION_START.match(t)))
+
+
+def strip_repeats(new_text: str, previous_replies: List[str], *, buyer_text: str = "",
+                  previous_buyer_texts: Optional[List[str]] = None, **kw) -> str:
+    """Drop sentences already said earlier (keeps anything with a link). Never returns an empty reply.
+
+    A repeat filter must never delete the ANSWER to the buyer's question, so:
+      - if the buyer re-asks something they asked before, nothing is stripped (the answer is allowed to repeat);
+      - if the buyer asks a question, the first sentence of the reply (the answer) is always kept."""
+    if previous_buyer_texts and buyer_text and any(_similar(buyer_text, b, 0.8) for b in previous_buyer_texts):
+        return new_text
     dup = repeated_sentences(new_text, previous_replies, **kw)
+    if dup and is_question(buyer_text):
+        first = split_sentences(new_text)[:1]
+        dup = [d for d in dup if d not in first]
     if not dup:
         return new_text
     keep_lines = []
@@ -70,7 +91,7 @@ def strip_repeats(new_text: str, previous_replies: List[str], **kw) -> str:
         if not sents:
             keep_lines.append(line)
             continue
-        kept = [s for s in sents if s not in dup or _URL.search(s)]
+        kept = [x for x in sents if x not in dup or _URL.search(x)]
         if kept:
             keep_lines.append(" ".join(kept))
     result = re.sub(r"\n{3,}", "\n\n", "\n".join(keep_lines)).strip()
@@ -97,6 +118,8 @@ _ORDER_REMINDER = re.compile(
     r"|\bthe\s+(?:order|inquiry|enquiry|quote|quotation)\s+(?:you|we)\s+(?:mentioned|discussed|placed|made|talked)"
     r"|\byou\s+(?:mentioned|asked\s+about|inquired\s+about|enquired\s+about)\s+(?:earlier|before|previously|last\s+time)"
     r"|\bregarding\s+your\s+(?:\w+\s+){0,3}?(?:order|inquiry|enquiry|quote|quotation)"
+    r"|\b(?:help|assist)\w*\s+(?:you\s+)?with\s+your\s+(?:\w+[\s/]+){0,3}?(?:order|inquiry|enquiry|quote|quotation)"
+    r"|\b(?:help|assist)\w*\s+(?:you\s+)?(?:with\s+)?(?:today\s+)?regarding\s+(?:bitumen|base\s+oil|the\s+\w+)"
     r")", re.I)
 
 
