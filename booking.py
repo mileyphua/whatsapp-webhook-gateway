@@ -50,6 +50,50 @@ def _find_session_for_phone(phone: Any):
     return None
 
 
+def _flatten(payload: Mapping[str, Any]) -> dict:
+    """Cal.com wraps the booking in payload["payload"]; accept both that and a flat dict."""
+    d = dict(payload)
+    inner = payload.get("payload")
+    if isinstance(inner, dict):
+        d.update(inner)
+    return d
+
+
+def _val(x: Any) -> Any:
+    """Cal.com `responses` entries look like {"label":..., "value":...}."""
+    return x.get("value") if isinstance(x, dict) else x
+
+
+def find_session_for_booking(payload: Mapping[str, Any]):
+    """Match a Cal.com booking to a WhatsApp chat: by WhatsApp metadata, then by the attendee's phone number
+    (last 9 digits, so +/spaces/country code don't matter), then by the e-mail the buyer gave in the chat."""
+    d = _flatten(payload)
+    meta = d.get("metadata") or (d.get("booking") or {}).get("metadata") or {}
+    responses = d.get("responses") or {}
+    attendees = d.get("attendees") or []
+    phones: list = [meta.get("whatsapp"), meta.get("phone_number"), meta.get("buyer_whatsapp"),
+                    _val(responses.get("attendeePhoneNumber")), _val(responses.get("phone")), d.get("attendeePhoneNumber")]
+    emails: list = [_val(responses.get("email"))]
+    for a in attendees:
+        if isinstance(a, dict):
+            phones += [a.get("phoneNumber"), a.get("phone")]
+            emails.append(a.get("email"))
+    for ph in phones:
+        sess = _find_session_for_phone(ph) if ph else None
+        if sess:
+            return sess
+    try:
+        import conversation_store
+    except Exception:
+        return None
+    wanted = {str(e).strip().lower() for e in emails if e}
+    for sess in conversation_store._SESSIONS.values():
+        mail = (sess.inquiry.contact_email or "").strip().lower()
+        if mail and mail in wanted:
+            return sess
+    return None
+
+
 async def _stamp_session_booking(phone: Any, payload: Mapping[str, Any]) -> None:
     """After Cal.com BOOKING_CREATED, stamp matching ConversationSession so
     booking-follow-up nudges don't fire to someone who already booked."""
@@ -82,8 +126,13 @@ def is_configured() -> bool:
     return bool(CAL_COM_BOOKING_LINK)
 
 
-def get_booking_link(*, message: str | None = None) -> str:
+def get_booking_link(*, message: str | None = None, phone: str | None = None,
+                     name: str | None = None, email: str | None = None) -> str:
     """Return the shareable booking link, plus a prompt sentence if requested.
+
+    With `phone` the link carries the buyer's WhatsApp number (as booking metadata and as the prefilled phone
+    field) and, when known, their name/email. That is what lets the /cal-webhook tell WHICH chat a booking
+    belongs to, so nobody who already booked gets a reminder.
 
     If the env var isn't set yet (user hasn't supplied Cal.com details),
     returns an empty string so the model falls back to handoff instead of
@@ -91,9 +140,21 @@ def get_booking_link(*, message: str | None = None) -> str:
     """
     if not CAL_COM_BOOKING_LINK:
         return ""
+    url = CAL_COM_BOOKING_LINK
+    params: list = []
+    digits = "".join(ch for ch in (phone or "") if ch.isdigit())
+    if digits:
+        params += [("metadata[whatsapp]", digits), ("attendeePhoneNumber", "+" + digits)]
+    if name:
+        params.append(("name", name.strip()))
+    if email:
+        params.append(("email", email.strip()))
+    if params:
+        from urllib.parse import quote, urlencode
+        url += ("&" if "?" in url else "?") + urlencode(params, quote_via=quote)
     if message:
-        return f"{message} {CAL_COM_BOOKING_LINK}"
-    return CAL_COM_BOOKING_LINK
+        return f"{message} {url}"
+    return url
 
 
 async def handle_cal_webhook(payload: Mapping[str, Any]) -> tuple[str, int]:
@@ -125,17 +186,21 @@ async def handle_cal_webhook(payload: Mapping[str, Any]) -> tuple[str, int]:
     )
 
     if created:
-        # Try to extract the buyer's phone number if we passed it in booking metadata.
-        booking_block = payload.get("booking") or {}
-        metadata = booking_block.get("metadata") or payload.get("metadata") or {}
-        phone = (
-            metadata.get("whatsapp")
-            or metadata.get("phone_number")
-            or metadata.get("buyer_whatsapp")
-            or None
-        )
-        # Stamp the matching session so follow-up cron skips this buyer.
-        await _stamp_session_booking(phone, payload)
+        d = _flatten(payload)
+        sess = find_session_for_booking(payload)
+        phone = sess.phone_number if sess else None
+        attendee = next((a for a in (d.get("attendees") or []) if isinstance(a, dict)), {})
+        detail = {"attendee_name": attendee.get("name"), "attendee_email": attendee.get("email"),
+                  "title": d.get("title"), "start": d.get("startTime") or d.get("start")}
+        if sess:
+            # Stamp the matching session so booking reminders never go to someone who already booked.
+            await _stamp_session_booking(sess.phone_number, d)
+        try:
+            import supabase_client as _sb
+            await _sb.audit(actor="cal.com", action="booking_confirmed" if sess else "booking_unmatched",
+                            e164=sess.phone_number if sess else None, detail=detail)
+        except Exception as exc:
+            print(f"[CAL WEBHOOK] audit skipped: {type(exc).__name__}: {exc!s}")
         await notify.send_booking_email(phone_number=phone, cal_payload=payload)
         return "booking recorded", 200
 

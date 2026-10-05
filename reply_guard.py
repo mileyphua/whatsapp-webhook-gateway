@@ -120,3 +120,49 @@ def strip_order_reminders(reply: str, buyer_text: str) -> str:
             kept_lines.append(" ".join(kept))
     result = re.sub(r"\n{3,}", "\n\n", "\n".join(kept_lines)).strip()
     return result or reply
+
+
+# ------------------------------------------------------------------ humanised sending
+def humanize_parts(text: str, *, min_total: int = 100, max_parts: int = 3) -> List[str]:
+    """Split a long, multi-paragraph reply into at most `max_parts` WhatsApp messages (like a person typing
+    a few short messages). Short replies stay one message. Nothing is dropped or reordered; a paragraph that
+    ends with ':' stays with the line it introduces, and very short paragraphs join the previous one."""
+    t = (text or "").strip()
+    paras = [p.strip() for p in re.split(r"\n\s*\n", t) if p.strip()]
+    if len(paras) <= 1 or len(t) < min_total:
+        return [t]
+    merged: List[str] = []
+    i = 0
+    while i < len(paras):
+        p = paras[i]
+        while p.rstrip().endswith(":") and i + 1 < len(paras):
+            i += 1
+            p = p + "\n" + paras[i]
+        if merged and len(p) < 30:
+            merged[-1] = merged[-1] + "\n\n" + p
+        else:
+            merged.append(p)
+        i += 1
+    if len(merged) > max_parts:
+        merged = merged[: max_parts - 1] + ["\n\n".join(merged[max_parts - 1:])]
+    return merged
+
+
+# ------------------------------------------------------------------ booking intent
+_DECLINED = re.compile(r"\b(?:not\s+interested|no\s+thanks?|no\s+thank\s+you|(?:don'?t|do\s+not)\s+need|no\s+need|not\s+looking|"
+                       r"already\s+(?:have|got)\s+(?:a\s+|an\s+)?(?:supplier|vendor)|please\s+stop|stop\s+(?:messaging|texting|contacting|sending)|"
+                       r"unsubscribe|remove\s+me|leave\s+me\s+alone)\b", re.I)
+_INTERESTED = re.compile(r"\b(?:yes|yeah|yep|sure|ok|okay|interested|send|link|available|slots?|what\s+times?|when\s+can|sounds\s+good|will\s+do|book(?:ing|ed)?)\b", re.I)
+_LATER = re.compile(r"\b(?:later|next\s+(?:week|month)|tomorrow|tonight|busy|will\s+(?:check|call)|let\s+me\s+check|check\s+with|get\s+back\s+to\s+you|not\s+now|another\s+time|reschedule|not\s+free)\b", re.I)
+
+
+def classify_booking_intent(text: str) -> str:
+    """Cheap keyword read of a reply to the booking link: declined | interested | later | unclear."""
+    t = text or ""
+    if _DECLINED.search(t):
+        return "declined"
+    if _INTERESTED.search(t):
+        return "interested"
+    if _LATER.search(t):
+        return "later"
+    return "unclear"

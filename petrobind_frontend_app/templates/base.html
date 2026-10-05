@@ -34,7 +34,7 @@
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 {% endif %}
 <link rel="stylesheet" href="/inbox/static/app.css?v={{ asset_v() }}">
-<style>[hidden]{display:none!important} .embed .embed-hide{display:none} .embed #claim-banner{top:0}</style>
+<style>[hidden]{display:none!important} .embed .embed-hide{display:none} .embed #claim-banner{top:0} .message-bubble .reply-btn{opacity:0} .message-bubble:hover .reply-btn,.message-bubble .reply-btn:focus-visible{opacity:1}</style>
 <meta name="inbox-admin-name" content="{{ admin_name }}">
 <meta name="inbox-session-id" content="{{ session_id }}">
 </head>

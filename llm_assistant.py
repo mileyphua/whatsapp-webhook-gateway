@@ -792,7 +792,7 @@ async def _run_tool(name: str, args: dict, *, session: ConversationSession, draf
                 "Petrobind's own official spec, availability, or price."
             )
         if name == "share_booking_link":
-            link = booking.get_booking_link(message=args.get("message"))
+            link = _booking_link_for(session, args.get("message"))
             # Remember WHEN we shared the link so conversation_store's follow-up
             # cron can nudge the buyer if a booking is never confirmed (>20h later).
             session.booking_link_shared_at = time.time()
@@ -956,6 +956,14 @@ async def _single_turn_chat(
 # If any future code breaks these promises — fail the build immediately.
 # -----------------------------------------------------------------------------
 
+def _booking_link_for(session, message: Optional[str] = None) -> str:
+    """Cal.com link that carries this buyer's WhatsApp number (and name/email if known), so the
+    booking webhook can tell which chat booked."""
+    i = session.inquiry
+    return booking.get_booking_link(message=message, phone=session.phone_number,
+                                    name=i.contact_name or None, email=i.contact_email or None)
+
+
 def _flag_needs_human(session, reason: str) -> None:
     """Put this chat in the human-reply queue (shared inbox popup + countdown).
     Only marks state; the AI's own reply to the buyer is unchanged."""
@@ -1059,7 +1067,7 @@ async def handle_incoming_message(
                 "latest price to confirm."
             )
             if booking.is_configured() and not session.booking_link_shared_at:
-                reply += " Want to grab a quick call in the meantime? " + booking.get_booking_link()
+                reply += " Want to grab a quick call in the meantime? " + _booking_link_for(session)
                 session.booking_link_shared_at = time.time()
                 if not draft_only:
                     await _notify_booking_interest(session)
@@ -1067,7 +1075,7 @@ async def handle_incoming_message(
             reply = (
                 "Good question, let me check on that and get back to you. "
                 "Want to grab a quick call so we can go through it properly? "
-                + booking.get_booking_link()
+                + _booking_link_for(session)
             )
             session.booking_link_shared_at = time.time()
             if not draft_only:
@@ -1087,6 +1095,7 @@ async def handle_incoming_message(
     # 4. Think first, then answer: team-approved guidance + a short private plan
     #    (what the buyer wants, is a human needed, what not to repeat).
     extra_system: Optional[str] = None
+    plan = None
     try:
         skills = await learning.active_skills()
         plan = await learning.plan_reply(
@@ -1111,6 +1120,14 @@ async def handle_incoming_message(
     except Exception as exc:
         print(f"[llm] planning/skills skipped: {type(exc).__name__}: {exc!s}")
 
+    # Booking follow-up needs to know whether the buyer is interested, undecided or said no (drives the reminders).
+    if not draft_only and session.booking_link_shared_at and not session.booking_confirmed_at:
+        intent = (plan or {}).get("booking_intent")
+        if intent not in ("interested", "later", "declined", "unclear"):
+            intent = reply_guard.classify_booking_intent(safe_text)
+        session.booking_intent = intent
+        session.booking_intent_at = time.time()
+
     # 4b. Run the LLM turn with tool-calling loop.
     text = None
     called_tools: set[str] = set()
@@ -1132,7 +1149,7 @@ async def handle_incoming_message(
             fallback = (
                 "Let me get back to you on this shortly. Feel free to grab a "
                 "quick call with our team in the meantime: "
-                + booking.get_booking_link()
+                + _booking_link_for(session)
             )
             session.booking_link_shared_at = time.time()
             if not draft_only:
@@ -1162,7 +1179,7 @@ async def handle_incoming_message(
 
     # 5. Post-processing: WhatsApp formatting adjustments + Q&A cap nudge.
     cleaned = _clean_for_whatsapp(text)
-    cleaned = _fix_placeholder_link(cleaned)
+    cleaned = _fix_placeholder_link(cleaned, session)
 
     # Never repeat a sentence already sent earlier in this chat (reads like a template).
     try:
@@ -1290,14 +1307,14 @@ _ESCALATION_ACTION_RE = re.compile(
 )
 
 
-def _fix_placeholder_link(text: str) -> str:
+def _fix_placeholder_link(text: str, session=None) -> str:
     """Safety net: the model is instructed never to write a literal '<link>'
     placeholder, but if it slips through anyway, swap it for the real
     Cal.com URL (or drop the dangling placeholder if booking isn't
     configured) rather than showing the buyer a broken '<link>' token."""
     if not _PLACEHOLDER_LINK_RE.search(text):
         return text
-    real_link = booking.get_booking_link() if booking.is_configured() else ""
+    real_link = (_booking_link_for(session) if session is not None else booking.get_booking_link()) if booking.is_configured() else ""
     if real_link:
         return _PLACEHOLDER_LINK_RE.sub(real_link, text)
     print(f"[llm] WARN: model emitted a placeholder link with booking unconfigured: {text[:200]!r}")

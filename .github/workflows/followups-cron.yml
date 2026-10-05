@@ -29,7 +29,7 @@ name: WhatsApp follow-up nudge scan (Petrobind legacy)
 
 on:
   schedule:
-    - cron: "0 * * * *" # every hour, on the hour (UTC)
+    - cron: "*/30 * * * *" # every 30 minutes (UTC): booking reminders go out 2h after the link, so hourly is too coarse
   workflow_dispatch: {} # manual "Run workflow" button for on-demand testing
 
 jobs:

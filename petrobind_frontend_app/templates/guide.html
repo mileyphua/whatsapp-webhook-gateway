@@ -49,6 +49,10 @@
           <dd class="mt-1 text-gray-700">For each buyer message it first looks up the knowledge base, then makes a short private plan (what the buyer wants, which skills apply, whether a human is needed, which earlier sentences not to reuse), then writes the reply using only the skills that fit. Sentences it already sent earlier in the chat are removed from new replies. If the buyer asks for a person, the chat goes to the <b>Needs human</b> queue.</dd></div>
         <div class="bg-white border border-gray-200 rounded-lg p-4"><dt class="font-semibold">…name a number?</dt>
           <dd class="mt-1 text-gray-700">In the Inbox click the <b>⋮</b> next to the number → type a reference name → Save. Search then matches the name or the number.</dd></div>
+        <div class="bg-white border border-gray-200 rounded-lg p-4"><dt class="font-semibold">…reply to one specific message, like WhatsApp?</dt>
+          <dd class="mt-1 text-gray-700">Hover a message and press <b>↩ Reply</b>. A preview of that message appears above the reply box (press × to cancel) and your reply is sent quoting it. Nothing is quoted unless you choose it, and the AI never quotes: it waits a few seconds for the buyer to finish typing, reads everything they sent as one turn, and answers in one message or, for a longer answer, a few short ones with a typing pause.</dd></div>
+        <div class="bg-white border border-gray-200 rounded-lg p-4"><dt class="font-semibold">…know how booking reminders work?</dt>
+          <dd class="mt-1 text-gray-700">When the AI shares the Cal.com link it tags the link with the buyer's WhatsApp number, so a booking is matched to the right chat (see <b>booking_confirmed</b> / <b>booking_unmatched</b> in <a class="underline" href="/inbox/logs">Logs</a>). If nobody has booked <b>2 hours</b> after the link, the AI sends <b>one</b> short reminder. If the buyer replies with interest but still doesn't book, it sends <b>one more</b> 2 hours after their reply. It never reminds someone who booked or said no, never sends more than 2, and never after 24 hours. Afterwards the buyer appears in <b>Needs human</b> so a person follows up. Set <span class="font-mono">BOOKING_MAX_REMINDERS=1</span> for strictly one reminder.</dd></div>
         <div class="bg-white border border-gray-200 rounded-lg p-4"><dt class="font-semibold">…make the AI forget a buyer?</dt>
           <dd class="mt-1 text-gray-700">Inbox → <b>⋮</b> → <b>Forget AI memory</b> → confirm. The AI then treats that buyer's next message as a brand-new conversation and won't recall earlier orders or details. The messages stay visible in the inbox (use <b>Delete chat</b> to remove those too). Separately, the AI never raises an earlier order, quote or inquiry by itself: it chats casually and only talks about the order when the buyer brings it up.</dd></div>
         <div class="bg-white border border-gray-200 rounded-lg p-4"><dt class="font-semibold">…delete a chat?</dt>
@@ -100,6 +104,8 @@
         <li><span class="font-mono">SUPABASE_URL</span>, <span class="font-mono">SUPABASE_SERVICE_ROLE_KEY</span> – server-side database access (never put the service key in the browser).</li>
         <li><span class="font-mono">SUPABASE_ANON_KEY</span> – optional; enables instant Realtime push. The inbox also polls every 3 seconds without it.</li>
         <li><span class="font-mono">UPSTASH_REDIS_REST_URL</span> / <span class="font-mono">…_TOKEN</span> – conversation memory.</li>
+        <li><span class="font-mono">BOOKING_MAX_REMINDERS</span> – optional, default 2 (1 = strictly one reminder per buyer).</li>
+        <li><span class="font-mono">CAL_COM_WEBHOOK_SECRET</span> – optional; in Cal.com add a webhook for <b>Booking created</b> pointing to <span class="font-mono">/cal-webhook</span> so bookings are detected.</li>
         <li><span class="font-mono">FOLLOWUPS_CRON_TOKEN</span> – lets the scheduled follow-up job call the server.</li>
       </ul>
     </section>

@@ -119,6 +119,13 @@ class ConversationSession:
     needs_human_since: Optional[float] = None
     needs_human_reason: str = ""
 
+    # --- Booking reminders: link sent -> 1 reminder after 2h -> (interested? 1 more) -> human; never after 24h ---
+    booking_reminders_sent: int = 0
+    booking_last_reminder_at: Optional[float] = None
+    booking_intent: str = ""                 # interested | later | declined | unclear ("" = not asked/answered yet)
+    booking_intent_at: Optional[float] = None
+    booking_human_flagged_at: Optional[float] = None
+
     # --- Inquiry follow-up state (Part 3.3 idle-session nudge) ---
     inquiry_followup_sent_at: Optional[float] = None  # dedup: 1 quote-request nudge max
 
@@ -460,6 +467,52 @@ def prune_old_sessions() -> int:
     return len(drop)
 
 
+BOOKING_REMIND_AFTER_SEC = 2 * 3600       # first reminder this long after the link; also the wait before each next step
+BOOKING_WINDOW_SEC = 24 * 3600             # no automatic reminder after this; a human takes over instead
+BOOKING_MAX_REMINDERS = max(1, int(os.getenv("BOOKING_MAX_REMINDERS", "2") or 2))   # set 1 for strictly one reminder
+
+
+def _booking_reminder_text(sess: ConversationSession, number: int) -> str:
+    import booking  # local import: booking imports this module lazily
+    name = (sess.inquiry.contact_name or "").strip().split(" ")[0] if sess.inquiry.contact_name else ""
+    greet = f"Hi {name}" if name else "Hi"
+    link = booking.get_booking_link(phone=sess.phone_number, name=sess.inquiry.contact_name or None, email=sess.inquiry.contact_email or None)
+    if number <= 1:
+        body = (f"{greet}, in case it got buried: here's the link to pick a time for a quick call whenever suits you. "
+                f"No rush, and if another time works better just tell me.")
+    else:
+        body = (f"{greet}, one last nudge from me about the call. If picking a slot is a hassle, just tell me a day and time that "
+                f"works and I'll ask a colleague to ring you instead.")
+    return f"{body} {link}".strip() if link else body
+
+
+def booking_followup_action(sess: ConversationSession, now: float) -> Optional["FollowupAction"]:
+    """What (if anything) to do about a buyer who was sent the Cal.com link but has not booked.
+
+    Never contact someone who booked or said no. One reminder `BOOKING_REMIND_AFTER_SEC` after the link; a second only
+    if the buyer answered with interest, again after that wait; never more than BOOKING_MAX_REMINDERS and never after
+    BOOKING_WINDOW_SEC. When the reminders are used up (or unanswered) the buyer goes to the human follow-up queue."""
+    shared = sess.booking_link_shared_at
+    if not shared or sess.booking_confirmed_at or sess.booking_human_flagged_at or sess.booking_intent == "declined":
+        return None
+    flag = FollowupAction(phone_number=sess.phone_number, kind="booking_human_flag", message_text="")
+    if now - shared >= BOOKING_WINDOW_SEC:
+        return flag
+    n = sess.booking_reminders_sent
+    if n == 0:
+        if now - shared >= BOOKING_REMIND_AFTER_SEC:
+            return FollowupAction(phone_number=sess.phone_number, kind="booking_reminder", message_text=_booking_reminder_text(sess, 1))
+        return None
+    last = sess.booking_last_reminder_at or 0.0
+    answered = sess.booking_intent in ("interested", "later", "unclear") and (sess.booking_intent_at or 0.0) > last
+    ref = max(last, sess.booking_intent_at or 0.0) if answered else last
+    if now < ref + BOOKING_REMIND_AFTER_SEC:
+        return None
+    if answered and n < BOOKING_MAX_REMINDERS:
+        return FollowupAction(phone_number=sess.phone_number, kind="booking_reminder", message_text=_booking_reminder_text(sess, n + 1))
+    return flag
+
+
 def scan_for_followups() -> List[FollowupAction]:
     """Idle-session scan — call via the /followups-scan HTTP endpoint from an
     external cron (e.g. cron-job.org, Render cron, or a local `while sleep 3600`).
@@ -473,20 +526,13 @@ def scan_for_followups() -> List[FollowupAction]:
     out: List[FollowupAction] = []
 
     for sess in _SESSIONS.values():
-        # Booking nudge: we shared the Cal.com link, but nothing booked AND it
-        # has been >= BOOKING_NUDGE_DELAY_SEC, AND we haven't nudged the booking yet
-        if (
-            sess.booking_link_shared_at
-            and not sess.booking_confirmed_at
-            and not sess.booking_followup_sent_at
-            and (now - sess.booking_link_shared_at) >= BOOKING_NUDGE_DELAY_SEC
-        ):
-            out.append(FollowupAction(
-                phone_number=sess.phone_number,
-                kind="booking_nudge",
-                message_text=_booking_nudge_text(sess),
-            ))
+        # Booking reminders / human hand-over (see booking_followup_action)
+        booking_act = booking_followup_action(sess, now)
+        if booking_act is not None:
+            out.append(booking_act)
             continue
+        if sess.booking_link_shared_at and not sess.booking_confirmed_at:
+            continue   # booking flow owns this buyer (declined / waiting): no generic nudges on top
 
         # Inquiry nudge: inquiry has at least 1 field filled, not yet lead_notified,
         # idle >= INQUIRY_NUDGE_IDLE_SEC, AND no prior inquiry nudge.
@@ -515,7 +561,17 @@ async def mark_followup_sent(phone_number: str, kind: str) -> None:
         return
     ts = _now()
     s.followed_up_at = ts
-    if kind == "booking_nudge":
+    if kind == "booking_reminder":
+        s.booking_reminders_sent += 1
+        s.booking_last_reminder_at = ts
+        s.booking_followup_sent_at = ts
+    elif kind == "booking_human_flag":
+        s.booking_human_flagged_at = ts
+        if not s.needs_human_since:
+            s.needs_human_since = ts
+            s.needs_human_reason = ("Booking follow-up: no call booked after reminders"
+                                    + (f" (buyer's last answer: {s.booking_intent})" if s.booking_intent else " (buyer did not answer)"))
+    elif kind == "booking_nudge":
         s.booking_followup_sent_at = ts
     elif kind == "inquiry_nudge":
         s.inquiry_followup_sent_at = ts

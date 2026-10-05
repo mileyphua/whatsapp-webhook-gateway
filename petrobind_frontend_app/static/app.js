@@ -263,8 +263,11 @@
             { duration: 250, easing: "ease-out" }); }
           return;
         }
+        // Quote a message only if the admin chose "Reply" on it (like WhatsApp), never automatically.
+        const quoted = pendingQuote;
+        clearQuote();
         // Append optimistic bubble
-        appendBubble({ direction: "human", text, held_by: ctx.admin_name, created_at: new Date().toISOString(), _optimistic: true });
+        appendBubble({ direction: "human", text, held_by: ctx.admin_name, created_at: new Date().toISOString(), _optimistic: true, quote: quoted ? quoted.text : null });
         textarea.value = "";
         textarea.focus();
         // If the send fails, drop the unsent bubble and put the text back so it can be retried.
@@ -272,11 +275,12 @@
           const mine = Array.from(stack.querySelectorAll('[data-optimistic][data-direction="human"]')).reverse().find(function (n) { return n.getAttribute("data-text") === text; });
           if (mine) mine.remove();
           if (!textarea.value) { textarea.value = text; autoGrowComposer(); }
+          if (quoted) setQuote(quoted);
         }
         try {
           const resp = await inboxFetch(`/api/inbox/chats/${encodeURIComponent(E164)}/messages`, {
             method: "POST",
-            body: { text, reply_to_wamid: (ctx.last_buyer_wamid || null) },
+            body: { text, reply_to_wamid: quoted ? quoted.wamid : null },
           });
           const data = await resp.json().catch(() => ({}));
           if (resp.ok && data && data.success) {
@@ -347,7 +351,7 @@
     }
 
     // ---------- Append bubble helper (for optimistic human sends) ----------
-    function appendBubble({ direction, text, held_by = null, created_at = null, _optimistic = false, errored = false, id = null, wamid = "" }) {
+    function appendBubble({ direction, text, held_by = null, created_at = null, _optimistic = false, errored = false, id = null, wamid = "", reply_to_wamid = "", quote = null }) {
       if (!stack) return;
       const wrap = document.createElement("div");
       if (id != null) wrap.setAttribute("data-msg-id", String(id));
@@ -377,8 +381,18 @@
       const erroredHtml = errored
         ? `<div class="mt-1.5 text-[11px] text-red-700 bg-red-50 rounded px-2 py-1 border border-red-100">⚠ Send failed</div>`
         : "";
+      let quoteText = quote;
+      if (!quoteText && reply_to_wamid) {
+        const q = Array.from(stack.querySelectorAll("[data-wamid]")).find(function (n) { return n.getAttribute("data-wamid") === reply_to_wamid; });
+        const qt = q && q.querySelector(".whitespace-pre-wrap");
+        quoteText = qt ? qt.textContent : null;
+      }
+      const quoteHtml = quoteText
+        ? `<div class="mb-1 pl-2 border-l-4 border-black/20 text-xs text-gray-600 line-clamp-2 break-words">${escapeHtml(String(quoteText).slice(0, 200))}</div>`
+        : "";
       bubble.innerHTML =
         label +
+        quoteHtml +
         `<div class="whitespace-pre-wrap break-words">${escapeHtml(text || "")}</div>` +
         erroredHtml +
         `<div class="mt-1 flex items-center justify-end gap-2">
@@ -388,6 +402,7 @@
       stack.appendChild(wrap);
       stack.scrollTop = stack.scrollHeight;
       if (direction === "ai") decorateFeedback(wrap);
+      decorateReply(wrap);
     }
 
     function escapeHtml(s) {
@@ -434,7 +449,7 @@
         const opt = Array.from(stack.querySelectorAll("[data-optimistic]")).find(function (n) { return n.getAttribute("data-text") === (m.text || ""); });
         if (opt) opt.remove();
       }
-      appendBubble({ direction: m.direction, text: m.text, held_by: m.held_by, created_at: m.created_at, id: m.id, wamid: m.wamid || "" });
+      appendBubble({ direction: m.direction, text: m.text, held_by: m.held_by, created_at: m.created_at, id: m.id, wamid: m.wamid || "", reply_to_wamid: m.reply_to_wamid || "" });
       if (m.direction === "buyer") pollWindowStatus(E164);
     }
     async function pollThread() {
@@ -463,6 +478,42 @@
       });
       autoGrowComposer();
     })();
+
+
+    // ---------- Quote-reply (like WhatsApp): the admin picks a message to reply to; nothing is quoted otherwise ----------
+    let pendingQuote = null;   // { wamid, text, who }
+    function setQuote(q) {
+      pendingQuote = q;
+      const box = document.getElementById("quote-preview"); if (!box) return;
+      document.getElementById("quote-who").textContent = "Replying to " + q.who;
+      document.getElementById("quote-text").textContent = q.text;
+      box.hidden = false;
+    }
+    function clearQuote() {
+      pendingQuote = null;
+      const box = document.getElementById("quote-preview"); if (box) box.hidden = true;
+    }
+    const quoteClearBtn = document.getElementById("quote-clear");
+    if (quoteClearBtn) quoteClearBtn.addEventListener("click", clearQuote);
+    function decorateReply(wrap) {
+      if (!wrap || wrap.querySelector(".reply-btn")) return;
+      const wamid = wrap.getAttribute("data-wamid");
+      const dir = wrap.getAttribute("data-direction");
+      if (!wamid || (dir !== "buyer" && dir !== "ai" && dir !== "human")) return;
+      const bubble = wrap.querySelector(".message-bubble"), textEl = wrap.querySelector(".whitespace-pre-wrap");
+      if (!bubble || !textEl || !textEl.textContent.trim()) return;
+      const b = document.createElement("button");
+      b.type = "button"; b.className = "reply-btn mt-1 text-[11px] text-gray-500 hover:text-gray-900 underline";
+      b.textContent = "↩ Reply"; b.setAttribute("aria-label", "Reply to this message");
+      b.addEventListener("click", function () {
+        setQuote({ wamid: wamid, text: textEl.textContent.slice(0, 200), who: dir === "buyer" ? "the buyer" : dir === "ai" ? "the AI" : "your message" });
+        if (!humanMode && !lockedBy) goHuman();     // replying is a human action: take over from the AI
+        const ta = document.getElementById("human-text-input"); if (ta && !ta.disabled) ta.focus();
+      });
+      bubble.appendChild(b);
+    }
+    function decorateAllReplies() { stack.querySelectorAll("[data-direction]").forEach(decorateReply); }
+    decorateAllReplies();
 
     // ---------- Feedback on AI replies (ChatGPT-style): good / bad under every AI message ----------
     // Bad opens a dialog where the admin says why; the server turns that into a suggested skill.

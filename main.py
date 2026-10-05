@@ -14,6 +14,7 @@ load_dotenv()
 
 import booking
 import contact_names
+import reply_guard
 import feedback_store
 import learning
 import conversation_store
@@ -835,7 +836,7 @@ async def receive_webhook(request: Request) -> JSONResponse:
                             await _instant_handoff_reply(
                                 from_number=message.get("from"),
                                 phone_number_id=pnid,
-                                reply_to_message_id=wamid,
+                                reply_to_message_id=None,
                                 reason=f"Instant escalation keyword: {text_body!r}",
                             )
                             _process_message(message)
@@ -887,7 +888,6 @@ async def receive_webhook(request: Request) -> JSONResponse:
                                     to=media_from,
                                     text=canned,
                                     phone_number_id=pnid,
-                                    reply_to_message_id=wamid,
                                     preview_url=False,
                                     sender_direction="ai",
                                 )
@@ -1195,7 +1195,6 @@ async def _echo_reply(
             to=from_number,
             text=static_reply,
             phone_number_id=phone_number_id,
-            reply_to_message_id=reply_to_message_id,
             preview_url=False,
             sender_direction="ai",
         )
@@ -1326,14 +1325,26 @@ async def _llm_reply(
         return
 
     try:
-        result = await send_whatsapp_text(
-            to=from_number,
-            text=reply_text,
-            phone_number_id=phone_number_id or PHONE_NUMBER_ID,
-            reply_to_message_id=reply_to_message_id,
-            preview_url=True,
-            sender_direction="ai",
-        )
+        # A person doesn't quote every message they answer, so the AI sends without a reply context
+        # (admins can still quote-reply to a specific message from the inbox). A longer reply goes out as a
+        # few short messages with a typing pause, and stops if a human takes the chat over in between.
+        parts = reply_guard.humanize_parts(reply_text)
+        result: Dict[str, Any] = {}
+        sent_ok = 0
+        for idx, part in enumerate(parts):
+            if idx:
+                await asyncio.sleep(min(2.5, 0.8 + len(parts[idx - 1]) / 120.0))
+                if await _claim_is_held_by_other(from_number):
+                    print(f"[AI PARTS STOP — human took over] to={from_number!r} sent={sent_ok}/{len(parts)}")
+                    break
+            result = await send_whatsapp_text(
+                to=from_number,
+                text=part,
+                phone_number_id=phone_number_id or PHONE_NUMBER_ID,
+                preview_url=("http" in part),
+                sender_direction="ai",
+            )
+            sent_ok += 1
         messages = result.get("messages") or []
         sent_id = messages[0].get("id") if messages else None
         sess = conversation_store._SESSIONS.get(from_number)
@@ -1369,7 +1380,7 @@ async def _instant_handoff_reply(
         reply = (
             "Of course, let me get back to you on that shortly. If you're "
             "free, it's often quickest to grab a short call with our sales "
-            "director: " + booking.get_booking_link()
+            "director: " + booking.get_booking_link(phone=from_number)
         )
         sess.booking_link_shared_at = time.time()
         if not sess.booking_intent_notified:
@@ -1417,7 +1428,6 @@ async def _instant_handoff_reply(
                 to=from_number,
                 text=reply,
                 phone_number_id=phone_number_id or PHONE_NUMBER_ID,
-                reply_to_message_id=reply_to_message_id,
                 preview_url=False,
                 sender_direction="ai",
             )
@@ -1547,6 +1557,14 @@ async def followups_scan(request: Request) -> JSONResponse:
 
     pruned = conversation_store.prune_old_sessions()
     actions = conversation_store.scan_for_followups()
+    # Booking hand-overs put the buyer in the human follow-up queue; nothing is sent, so quiet hours don't apply.
+    flagged = 0
+    for act in [a for a in actions if a.kind == "booking_human_flag"]:
+        await conversation_store.mark_followup_sent(act.phone_number, "booking_human_flag")
+        asyncio.create_task(_sb.audit(actor="followups-cron", action="booking_human_flag", e164=act.phone_number,
+                                      detail={"reason": "no call booked after reminders"}))
+        flagged += 1
+    actions = [a for a in actions if a.kind != "booking_human_flag"]
     actions = actions[:MAX_NUDGES_PER_RUN]
 
     ready_actions: list[Any] = []
@@ -1667,6 +1685,7 @@ async def followups_scan(request: Request) -> JSONResponse:
     return JSONResponse(
         content={
             "pruned": pruned,
+            "booking_handed_to_human": flagged,
             "scanned_sessions": scanned_sessions,
             "actions_returned": len(ready_actions),
             "actions_total": len(actions),

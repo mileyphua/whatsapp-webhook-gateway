@@ -168,13 +168,14 @@ async def _llm_json(system: str, user: str, *, max_tokens: int, timeout: float) 
 
 _PLANNER_SYSTEM = """\
 You plan a WhatsApp reply for Petrobind's sales assistant BEFORE it is written. Think about the buyer; do not write the reply.
-Return ONLY JSON: {"intent": str, "needs_human": bool, "human_reason": str, "skills": [str], "points": [str], "avoid": [str], "tone": str}
+Return ONLY JSON: {"intent": str, "needs_human": bool, "human_reason": str, "skills": [str], "points": [str], "avoid": [str], "tone": str, "booking_intent": str}
 - intent: what the buyer actually wants right now, in one short phrase.
 - needs_human: true if the buyer asks for a person/call/manager, wants to negotiate or confirm price/contract/terms, is upset, or it cannot be answered safely from the reference titles.
 - skills: ids from the skill catalog whose "Use when" matches this message (0-3). Only ids from the catalog.
 - points: 1-3 things the reply should cover, in order.
 - avoid: exact sentences/openers already used in the recent assistant replies that must not be repeated.
-- tone: e.g. "brief and warm"."""
+- tone: e.g. "brief and warm".
+- booking_intent: only if the assistant earlier shared a booking link and this message responds to it or to a reminder about it: "interested" (wants to book / asks for times), "later" (busy, will do it later), "declined" (not interested, no thanks, stop), or "unclear". Otherwise "n/a"."""
 
 
 async def plan_reply(*, buyer_text: str, recent: List[Dict[str, Any]], ref_titles: List[str],
@@ -194,6 +195,7 @@ async def plan_reply(*, buyer_text: str, recent: List[Dict[str, Any]], ref_title
         return None
     valid = {s["id"] for s in (skills or [])}
     plan["skills"] = [str(i) for i in (plan.get("skills") or []) if str(i) in valid][:MAX_SELECTED]
+    plan["booking_intent"] = plan.get("booking_intent") if plan.get("booking_intent") in ("interested", "later", "declined", "unclear") else "n/a"
     plan["points"] = [str(p)[:160] for p in (plan.get("points") or [])][:3]
     plan["avoid"] = [str(p)[:160] for p in (plan.get("avoid") or [])][:6]
     return plan
