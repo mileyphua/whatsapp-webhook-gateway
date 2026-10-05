@@ -2302,7 +2302,7 @@ async def _history_chats() -> List[Dict[str, Any]]:
             "last_direction": "buyer" if last["role"] == "user" else "ai",
             "last_message_text": str(last["content"])[:200],
             "last_message_created_at": _iso_ts(sess.last_activity_ts),
-            "claim_held_by": None,
+            "claim_held_by": ((await _sb.claim_is_human_held(sess.phone_number)) or {}).get("held_by"),
             "claim_expires_at": None,
         })
     rows.sort(key=lambda r: r["last_message_at"], reverse=True)

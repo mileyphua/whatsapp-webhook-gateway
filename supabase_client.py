@@ -292,9 +292,26 @@ async def thread_messages(e164: str, limit: int = 200) -> List[Dict[str, Any]]:
 # claim mutex
 # ================================================================
 
+# Without Supabase (local development) chat locks live in this process, so two people using the same server see
+# each other's lock. In production the inbox_claims table is the single source of truth and this is never used.
+_LOCAL_CLAIMS: Dict[str, Dict[str, Any]] = {}
+
+
+def _local_claim(e164: str) -> Optional[Dict[str, Any]]:
+    row = _LOCAL_CLAIMS.get(e164)
+    if row and row["expires_at"] <= time.time():
+        _LOCAL_CLAIMS.pop(e164, None)
+        return None
+    return row
+
+
 async def claim_is_human_held(e164: str) -> Optional[Dict[str, Any]]:
     """If held, return dict {held_by, session_id, expires_in_secs}; else None."""
-    if not (ENABLED and e164):
+    if not ENABLED:
+        row = _local_claim(e164) if e164 else None
+        return ({"held_by": row["held_by"], "session_id": row["session_id"], "expires_in_secs": max(0, int(row["expires_at"] - time.time()))}
+                if row else None)
+    if not e164:
         return None
     try:
         async with _client() as c:
@@ -338,7 +355,15 @@ async def claim_acquire(
     - Different holder with live claim → return (False, {held_by, ..., expires_in}).
     - Expired / no claim → overwrite → True.
     """
-    if not (ENABLED and e164 and held_by and session_id):
+    if not ENABLED:
+        if not (e164 and held_by and session_id):
+            return True, None
+        cur = _local_claim(e164)
+        if cur and cur["session_id"] != session_id:
+            return False, {"held_by": cur["held_by"], "session_id": cur["session_id"], "expires_in_secs": max(0, int(cur["expires_at"] - time.time()))}
+        _LOCAL_CLAIMS[e164] = {"held_by": held_by, "session_id": session_id, "expires_at": time.time() + ttl_seconds}
+        return True, None
+    if not (e164 and held_by and session_id):
         return True, None
     expires = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + ttl_seconds))
     heartbeat = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time()))
@@ -374,7 +399,12 @@ async def claim_acquire(
 
 
 async def claim_release(*, e164: str, held_by: Optional[str], session_id: str) -> bool:
-    if not (ENABLED and e164):
+    if not ENABLED:
+        cur = _local_claim(e164) if e164 else None
+        if cur and cur["session_id"] == session_id:
+            _LOCAL_CLAIMS.pop(e164, None)
+        return True
+    if not e164:
         return True
     try:
         async with _client() as c:
@@ -822,7 +852,10 @@ async def reset_session_mirror(e164_variants: List[str]) -> bool:
 
 async def claim_force_release(e164: str) -> bool:
     """Admin override: clear whoever holds this chat."""
-    if not (ENABLED and e164):
+    if not ENABLED:
+        _LOCAL_CLAIMS.pop(e164, None)
+        return True
+    if not e164:
         return True
     try:
         async with _client() as c:

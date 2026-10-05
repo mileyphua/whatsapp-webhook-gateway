@@ -165,7 +165,13 @@
     // Initial state comes from the server (default = AI); then renew / re-check every 30s.
     applyMode();
     loadMode();
-    setInterval(function () { if (humanMode) goHuman(); else loadMode(); }, 30 * 1000);
+    // Check who holds the chat every 5 s (so a colleague's lock, or its release, shows up quickly). The lock is only
+    // renewed (every ~30 s) while the server still says it is ours, so an admin's release is never silently undone.
+    let lockTick = 0;
+    setInterval(async function () {
+      await loadMode();
+      if (humanMode && ++lockTick % 6 === 0) goHuman();
+    }, 5000);
 
     // sendEnabled: the Send button works (Human mode). typeEnabled: the box accepts text; in AI mode typing
     // is allowed and simply takes over from the AI, so the box is never a dead end.
