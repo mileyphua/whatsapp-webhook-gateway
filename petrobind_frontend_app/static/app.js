@@ -93,10 +93,10 @@
     // Fn 1. Reply-mode switch: AI (default) <-> Human.
     //   AI    = no claim; RAG+LLM answers the buyer.
     //   Human = this admin holds the claim; AI is paused. The claim is kept
-    //           alive (30 min TTL, renewed every 30s while this chat is open and
-    //           surviving chat switching); if nobody renews it, AI resumes by itself.
+    //           alive (5 min TTL, renewed every 30s while this chat is open);
+    //           once nobody renews it the AI resumes by itself within minutes.
     // ------------------------------------------------------------------
-    const HUMAN_TTL = 1800;
+    const HUMAN_TTL = 300;
     let humanMode = false;
     let lockedBy = null;
     const claimUrl = `/api/inbox/chats/${encodeURIComponent(E164)}/claim`;

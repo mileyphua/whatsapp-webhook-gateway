@@ -2482,6 +2482,11 @@ def _requires_admin(request: Request) -> Optional[JSONResponse]:
     return None
 
 
+# A Human lock silences the AI for that chat, so it must not outlive the person by much: the open page renews it
+# every ~30 s, and the server never grants more than this even if an old page asks for longer.
+HUMAN_LOCK_MAX_SECONDS = max(60, int(os.getenv("HUMAN_LOCK_MAX_SECONDS", "300") or 300))
+
+
 def _identity(request: Request) -> tuple:
     """(lock id, display name) of whoever is calling. A chat is held by a PERSON, not a browser tab, so the same
     person in two tabs is never locked out of their own chat, while two different people can't both reply."""
@@ -2633,7 +2638,7 @@ async def api_inbox_acquire_claim(e164: str, request: Request) -> JSONResponse:
     try:
         body = await request.json()
         if isinstance(body, dict) and body.get("ttl_seconds"):
-            ttl = max(10, min(3600, int(body["ttl_seconds"])))
+            ttl = max(10, min(HUMAN_LOCK_MAX_SECONDS, int(body["ttl_seconds"])))
     except Exception:
         pass
     try:
