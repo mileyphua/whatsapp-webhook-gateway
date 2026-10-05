@@ -361,7 +361,7 @@
     var btn = this, e164 = delTarget; if (!e164) return;
     btn.disabled = true; btn.textContent = "Deleting\u2026";
     fetch("/api/inbox/chats/" + encodeURIComponent(e164), { method: "DELETE", credentials: "same-origin" })
-      .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); })
+      .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, status: r.status, j: j }; }); })
       .then(function (res) {
         if (!res.ok) throw new Error(res.j.detail || "failed");
         if (openE164 === e164) { openE164 = null; pane.hidden = true; pane.removeAttribute("src"); ph.style.display = ""; history.replaceState(null, "", location.pathname); }
@@ -386,7 +386,7 @@
     btn.disabled = true; btn.textContent = "Forgetting\u2026";
     fetch("/api/inbox/chats/" + encodeURIComponent(e164) + "/forget-memory", { method: "POST", credentials: "same-origin" })
       .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); })
-      .then(function (res) { if (!res.ok) throw new Error(res.j.detail || "failed"); forgetDlg.close(); listToast("Done. The AI no longer remembers this chat."); refresh(); })
+      .then(function (res) { if (res.status === 401) { location.href = "/inbox/login"; return; } if (!res.ok) throw new Error(res.j.detail || "failed"); forgetDlg.close(); listToast("Done. The AI no longer remembers this chat."); refresh(); })
       .catch(function (e) { var d = document.getElementById("forget-err"); d.textContent = "Could not reset: " + e.message; d.hidden = false; })
       .finally(function () { btn.disabled = false; btn.textContent = "Forget"; });
   });

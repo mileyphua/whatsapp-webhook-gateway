@@ -2210,6 +2210,27 @@ def _request_is_https(request: Request) -> bool:
     return False
 
 
+@app.middleware("http")
+async def _renew_inbox_session(request: Request, call_next):
+    """Sliding login: a session that is still valid but more than a third used up is re-signed with a fresh clock,
+    so someone actively working is never logged out mid-task (actions used to fail with 'Unauthorized')."""
+    response = await call_next(request)
+    try:
+        path = request.url.path
+        raw = request.cookies.get("inbox_session")
+        if raw and (path.startswith("/inbox") or path.startswith("/api/inbox")) and path != "/inbox/logout" \
+                and _ITS_DANGEROUS_OK and _URL_SAFE_SERIALIZER is not None \
+                and "inbox_session=" not in response.headers.get("set-cookie", ""):
+            max_age = INBOX_SESSION_EXPIRE_MINUTES * 60
+            payload, issued = _URL_SAFE_SERIALIZER.loads(raw, max_age=max_age, return_timestamp=True)
+            if isinstance(payload, dict) and time.time() - issued.timestamp() > max_age / 3:
+                response.set_cookie(key="inbox_session", value=_URL_SAFE_SERIALIZER.dumps(payload), path="/", httponly=True,
+                                    samesite="lax", secure=_request_is_https(request), max_age=max_age)
+    except Exception:
+        pass  # a bad or expired cookie is handled by the normal checks, never here
+    return response
+
+
 @app.get("/inbox/login")
 async def inbox_login_page(request: Request) -> Response:
     gate = _inbox_page_gating_checks(request)
