@@ -1154,6 +1154,7 @@ async def send_whatsapp_template(
     created_by: Optional[str] = None,
     category: Optional[str] = None,
     display_text: Optional[str] = None,
+    header_media: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     if not ACCESS_TOKEN:
         raise RuntimeError("WHATSAPP_ACCESS_TOKEN must be set")
@@ -1184,6 +1185,12 @@ async def send_whatsapp_template(
                     ],
                 }
             ]
+    if header_media:  # a PDF/image header: WhatsApp wants it as the first component, referenced by uploaded media id
+        kind = header_media["kind"]
+        obj: Dict[str, Any] = {"id": header_media["id"]}
+        if kind == "document" and header_media.get("filename"):
+            obj["filename"] = header_media["filename"]
+        template["components"] = [{"type": "header", "parameters": [{"type": kind, kind: obj}]}] + list(template.get("components") or [])
 
     payload: Dict[str, Any] = {
         "messaging_product": "whatsapp",
@@ -1216,6 +1223,8 @@ async def send_whatsapp_template(
                 text=display_text or f"[template {template_name} {language_code}]",
                 sent_id_from_graph=sent_id,
                 sent_by=created_by,
+                media_type=(header_media or {}).get("kind"),
+                media_meta=({"filename": header_media.get("filename") or "", "media_id": header_media["id"]} if header_media else None),
             )
             return {
                 "ok": True,
@@ -3597,6 +3606,7 @@ def _simplify_template(tpl: Dict[str, Any]) -> Dict[str, Any]:
     import re as _re
     comps_out: List[Dict[str, Any]] = []
     reason = ""
+    header_format = ""
     for comp in tpl.get("components") or []:
         ctype = str(comp.get("type") or "").upper()
         ctext = comp.get("text") or ""
@@ -3605,9 +3615,10 @@ def _simplify_template(tpl: Dict[str, Any]) -> Dict[str, Any]:
             reason = reason or "uses named variables, which this screen can't fill in"
         if ctype == "HEADER":
             fmt = str(comp.get("format") or "TEXT").upper()
-            if fmt != "TEXT":
-                reason = reason or f"has a {fmt.lower()} header (needs a file, which this screen can't attach to a template)"
-            elif "{{" in str(ctext):
+            header_format = fmt
+            if fmt not in ("TEXT", "DOCUMENT", "IMAGE"):
+                reason = reason or f"has a {fmt.lower()} header, which this screen can't send (only text, image and PDF headers)"
+            elif fmt == "TEXT" and "{{" in str(ctext):
                 reason = reason or "has a variable in its header"
         if ctype == "BUTTONS":
             for btn in comp.get("buttons") or []:
@@ -3622,6 +3633,7 @@ def _simplify_template(tpl: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "name": tpl.get("name"), "category": tpl.get("category"), "language": lang, "status": tpl.get("status"),
         "components": comps_out, "supported": not reason, "unsupported_reason": reason,
+        "header_format": header_format if header_format in ("DOCUMENT", "IMAGE") else ("TEXT" if header_format == "TEXT" else ""),
     }
 
 
@@ -3686,7 +3698,7 @@ async def api_inbox_evict_templates_cache(request: Request) -> JSONResponse:
 
 
 async def _send_validated_template(request: Request, e164_raw: str, template_name: str, language: str, params: Any,
-                                   category: Optional[str], sender_dir: str = "human") -> JSONResponse:
+                                   category: Optional[str], sender_dir: str = "human", header: Any = None) -> JSONResponse:
     """The one way a template leaves the inbox: number cleaned, template checked against Meta's approved list,
     variables counted, text saved so the chat shows up in the list."""
     import re as _re
@@ -3727,16 +3739,70 @@ async def _send_validated_template(request: Request, e164_raw: str, template_nam
     shown = body.get("text") or ""
     for n, v in zip(needed, values):
         shown = shown.replace("{{%s}}" % n, v)
+    header_media: Optional[Dict[str, Any]] = None
+    want = {"DOCUMENT": "document", "IMAGE": "image"}.get(tpl.get("header_format") or "")
+    if want:
+        label = "a PDF" if want == "document" else "an image"
+        if not (isinstance(header, dict) and header.get("id")):
+            return JSONResponse(content={"detail": f"This template has a {want} header: attach {label} to send it."}, status_code=422)
+        if header.get("kind") != want:
+            return JSONResponse(content={"detail": f"This template's header must be {label}."}, status_code=422)
+        header_media = {"kind": want, "id": str(header["id"]), "filename": media_rules.clean_filename(str(header.get("filename") or "")) if want == "document" else ""}
     try:
         result = await send_whatsapp_template(
             e164, template_name, language_code=language, params=values, sender_direction=sender_dir,
             category=category or tpl.get("category"), display_text=shown, created_by=_identity(request)[1],
+            header_media=header_media,
         )
     except RuntimeError as exc:
         return JSONResponse(content={"success": False, "send_type": "template", "error": str(exc), "detail": str(exc)}, status_code=502)
     await _clear_needs_human(e164)
     return JSONResponse(content={"success": True, "send_type": "template", "e164": e164, "text": shown,
                                  "sent_id": ((result.get("messages") or [{}])[0].get("id")), **result})
+
+
+@app.post("/api/inbox/template-header-media")
+async def api_inbox_template_header_media(request: Request) -> JSONResponse:
+    """Upload the file a template's header needs (a PDF or an image) to WhatsApp and return its media id."""
+    fail = _requires_inbox_bearer(request)
+    if fail:
+        return fail
+    max_body = media_rules.MAX_DOCUMENT_BYTES + 1024 * 1024
+    try:
+        if int(request.headers.get("content-length") or 0) > max_body:
+            return JSONResponse(content={"detail": f"The file is too large (limit {media_rules.MAX_DOCUMENT_BYTES // (1024 * 1024)} MB)."}, status_code=413)
+        form = await request.form()
+    except Exception:
+        return JSONResponse(content={"detail": "Could not read the upload."}, status_code=422)
+    upload = form.get("file")
+    if upload is None or not hasattr(upload, "read"):
+        return JSONResponse(content={"detail": "Choose a file."}, status_code=422)
+    data = await upload.read(max_body + 1)
+    try:
+        info = media_rules.validate_upload(getattr(upload, "filename", "") or "", getattr(upload, "content_type", "") or "", data)
+    except media_rules.UploadRejected as exc:
+        return JSONResponse(content={"detail": str(exc)}, status_code=422)
+    fmt = str(form.get("format") or "DOCUMENT").upper()
+    if fmt == "DOCUMENT" and info["mime"] != "application/pdf":
+        return JSONResponse(content={"detail": "This template's header needs a PDF."}, status_code=422)
+    if fmt == "IMAGE" and info["kind"] != "image":
+        return JSONResponse(content={"detail": "This template's header needs an image (JPG or PNG)."}, status_code=422)
+    if fmt not in ("DOCUMENT", "IMAGE"):
+        return JSONResponse(content={"detail": "Unsupported header type."}, status_code=422)
+    if not (ACCESS_TOKEN and PHONE_NUMBER_ID):
+        return JSONResponse(content={"detail": "WhatsApp is not configured on the server."}, status_code=503)
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            up = await client.post(_media_url_for(PHONE_NUMBER_ID), headers={"Authorization": f"Bearer {ACCESS_TOKEN}"},
+                                   data={"messaging_product": "whatsapp", "type": info["mime"]},
+                                   files={"file": (info["filename"], data, info["mime"])})
+        upj = up.json() if up.content else {}
+    except Exception as exc:
+        return JSONResponse(content={"detail": f"Could not reach WhatsApp to upload the file: {type(exc).__name__}"}, status_code=502)
+    if not (200 <= up.status_code < 300 and isinstance(upj, dict) and upj.get("id")):
+        why = (upj.get("error") or {}).get("message") if isinstance(upj, dict) else None
+        return JSONResponse(content={"detail": f"WhatsApp refused the file ({up.status_code}): {why or up.text[:200]}"}, status_code=502)
+    return JSONResponse(content={"id": upj["id"], "filename": info["filename"], "kind": info["kind"]})
 
 
 @app.post("/api/inbox/new-conversation")
@@ -3756,7 +3822,7 @@ async def api_inbox_new_conversation(request: Request) -> JSONResponse:
     return await _send_validated_template(
         request, str(body.get("e164") or ""), template_name, (body.get("language") or "en_US").strip() or "en_US",
         body.get("template_params") if body.get("template_params") is not None else body.get("params"),
-        (body.get("category") or "").strip() or None)
+        (body.get("category") or "").strip() or None, header=body.get("header"))
 
 
 @app.post("/api/inbox/send-template")
@@ -3775,7 +3841,8 @@ async def api_inbox_send_template(request: Request) -> JSONResponse:
     return await _send_validated_template(
         request, e164_raw, template_name, (body.get("language") or "en_US").strip() or "en_US",
         body.get("params") if body.get("params") is not None else body.get("template_params"),
-        (body.get("category") or "").strip() or None, (body.get("sender_direction") or "human").strip() or "human")
+        (body.get("category") or "").strip() or None, (body.get("sender_direction") or "human").strip() or "human",
+        header=body.get("header"))
 
 
 # =========================================================================

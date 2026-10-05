@@ -18,8 +18,12 @@ PAGE1 = {"data": [APPROVED, {**APPROVED, "name": "draft_one", "status": "PENDING
          "paging": {"next": "https://graph.facebook.com/v22.0/WABA1/message_templates?after=XYZ"}}
 PAGE2 = {"data": [{"name": "welcome_note", "category": "MARKETING", "language": "en", "status": "APPROVED",
                    "components": [{"type": "BODY", "text": "Welcome to Petrobind."}]},
-                  {"name": "needs_image", "category": "MARKETING", "language": "en_US", "status": "APPROVED",
-                   "components": [{"type": "HEADER", "format": "IMAGE"}, {"type": "BODY", "text": "Look"}]},
+                  {"name": "needs_video", "category": "MARKETING", "language": "en_US", "status": "APPROVED",
+                   "components": [{"type": "HEADER", "format": "VIDEO"}, {"type": "BODY", "text": "Look"}]},
+                  {"name": "specs_followup", "category": "UTILITY", "language": "en", "status": "APPROVED",
+                   "components": [{"type": "HEADER", "format": "DOCUMENT"}, {"type": "BODY", "text": "Hi {{1}}, specs attached for {{2}}."}]},
+                  {"name": "photo_note", "category": "UTILITY", "language": "en", "status": "APPROVED",
+                   "components": [{"type": "HEADER", "format": "IMAGE"}, {"type": "BODY", "text": "Photo for you"}]},
                   {"name": "has_button_var", "category": "UTILITY", "language": "en_US", "status": "APPROVED",
                    "components": [{"type": "BODY", "text": "Hi"}, {"type": "BUTTONS", "buttons": [{"type": "URL", "url": "https://x.com/{{1}}"}]}]}]}
 
@@ -46,7 +50,10 @@ class FakeGraph:
             return self._r(200, PAGE1)
         return self._r(400, {"error": {"message": "Unsupported get request (wrong id)"}})
 
-    async def post(self, url, json=None, headers=None, **k):
+    async def post(self, url, json=None, headers=None, data=None, files=None, **k):
+        if url.endswith("/media"):
+            FakeGraph.calls.append(("MEDIA", url, {"data": data, "file": (files["file"][0], files["file"][2])}))
+            return self._r(200, {"id": "MEDIA777"})
         FakeGraph.calls.append(("POST", url, json))
         return self._r(200, {"messages": [{"id": "wamid.T1"}]})
 
@@ -88,7 +95,7 @@ class Sync(Base):
     def test_templates_are_read_from_the_business_account_all_pages_approved_only(self):
         r = self.c.get("/api/inbox/templates"); self.assertEqual(r.status_code, 200, r.text)
         names = sorted(t["name"] for t in r.json()["templates"])
-        self.assertEqual(names, ["enquiry_followup", "has_button_var", "needs_image", "welcome_note"])  # both pages, no PENDING
+        self.assertEqual(names, ["enquiry_followup", "has_button_var", "needs_video", "photo_note", "specs_followup", "welcome_note"])  # both pages, no PENDING
         gets = [c for c in FakeGraph.calls if c[0] == "GET"]
         self.assertIn("/WABA1/message_templates", gets[0][1])
         self.assertNotIn("PNID1", gets[0][1])
@@ -97,7 +104,10 @@ class Sync(Base):
     def test_unsupported_templates_are_flagged_with_a_reason(self):
         t = {x["name"]: x for x in self.c.get("/api/inbox/templates").json()["templates"]}
         self.assertTrue(t["enquiry_followup"]["supported"]); self.assertTrue(t["welcome_note"]["supported"])
-        self.assertFalse(t["needs_image"]["supported"]); self.assertIn("image", t["needs_image"]["unsupported_reason"].lower())
+        self.assertFalse(t["needs_video"]["supported"]); self.assertIn("video", t["needs_video"]["unsupported_reason"].lower())
+        self.assertTrue(t["specs_followup"]["supported"]); self.assertEqual(t["specs_followup"]["header_format"], "DOCUMENT")
+        self.assertTrue(t["photo_note"]["supported"]); self.assertEqual(t["photo_note"]["header_format"], "IMAGE")
+        self.assertEqual(t["enquiry_followup"]["header_format"], "")
         self.assertFalse(t["has_button_var"]["supported"])
 
     def test_a_missing_business_account_id_gives_a_clear_error(self):
@@ -143,7 +153,7 @@ class NewConversationIsTemplateOnly(Base):
         self.assertEqual(self.sent(), [])
 
     def test_unsupported_template_and_wrong_param_count_are_refused(self):
-        r = self.c.post("/api/inbox/send-template", json={"template_name": "needs_image", "language": "en", "e164": "60123456789", "params": {}})
+        r = self.c.post("/api/inbox/send-template", json={"template_name": "needs_video", "language": "en_US", "e164": "60123456789", "params": {}})
         self.assertEqual(r.status_code, 422)
         r = self.c.post("/api/inbox/send-template", json={"template_name": "enquiry_followup", "language": "en_US", "e164": "60123456789", "params": {"1": "Ahmed"}})
         self.assertEqual(r.status_code, 422); self.assertIn("2", r.json()["detail"])
@@ -159,6 +169,62 @@ class NewConversationIsTemplateOnly(Base):
     def test_new_conversation_endpoint_sends_templates_too(self):
         r = self.c.post("/api/inbox/new-conversation", json={"mode": "template_force", "template_name": "welcome_note", "language": "en", "e164": "60123456789"})
         self.assertEqual(r.status_code, 200, r.text); self.assertEqual(len(self.sent()), 1)
+
+
+PDF = b"%PDF-1.7\n" + b"x" * 300
+PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 200
+
+
+class MediaHeaderTemplates(Base):
+    """Templates like introductory_follow_up carry a PDF header: the file is uploaded to WhatsApp, then referenced by id."""
+
+    def upload(self, name="specs.pdf", data=PDF, ctype="application/pdf", fmt="DOCUMENT"):
+        return self.c.post("/api/inbox/template-header-media", data={"format": fmt}, files={"file": (name, data, ctype)})
+
+    def test_pdf_is_uploaded_to_whatsapp_and_the_media_id_returned(self):
+        r = self.upload(); self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(r.json()["id"], "MEDIA777"); self.assertEqual(r.json()["filename"], "specs.pdf")
+        m = [c for c in FakeGraph.calls if c[0] == "MEDIA"][0]
+        self.assertIn("/PNID1/media", m[1]); self.assertEqual(m[2]["file"], ("specs.pdf", "application/pdf"))
+
+    def test_document_header_only_accepts_a_pdf_and_image_header_only_an_image(self):
+        self.assertEqual(self.upload("notes.txt", b"hello", "text/plain").status_code, 422)
+        self.assertEqual(self.upload("pic.png", PNG, "image/png", "DOCUMENT").status_code, 422)
+        self.assertEqual(self.upload("specs.pdf", PDF, "application/pdf", "IMAGE").status_code, 422)
+        self.assertEqual(self.upload("pic.png", PNG, "image/png", "IMAGE").status_code, 200)
+        self.assertEqual(self.upload("run.exe", b"MZ" + b"0" * 50, "application/octet-stream").status_code, 422)
+
+    def test_upload_needs_login(self):
+        r = TestClient(self.main.app).post("/api/inbox/template-header-media", data={"format": "DOCUMENT"}, files={"file": ("a.pdf", PDF, "application/pdf")})
+        self.assertEqual(r.status_code, 401)
+
+    def test_template_is_sent_with_the_document_header_before_the_body(self):
+        r = self.c.post("/api/inbox/send-template", json={"template_name": "specs_followup", "language": "en", "e164": "60123456789",
+            "params": {"1": "Ahmed", "2": "bitumen"}, "header": {"kind": "document", "id": "MEDIA777", "filename": "specs.pdf"}})
+        self.assertEqual(r.status_code, 200, r.text)
+        comps = self.sent()[0][2]["template"]["components"]
+        self.assertEqual(comps[0], {"type": "header", "parameters": [{"type": "document", "document": {"id": "MEDIA777", "filename": "specs.pdf"}}]})
+        self.assertEqual([p["text"] for p in comps[1]["parameters"]], ["Ahmed", "bitumen"])
+        self.assertEqual((self.saved[0]["media_type"], self.saved[0]["media_meta"]["filename"]), ("document", "specs.pdf"))
+
+    def test_image_header_template_without_variables_sends_just_the_header(self):
+        r = self.c.post("/api/inbox/send-template", json={"template_name": "photo_note", "language": "en", "e164": "60123456789",
+            "params": {}, "header": {"kind": "image", "id": "IMG1"}})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(self.sent()[0][2]["template"]["components"], [{"type": "header", "parameters": [{"type": "image", "image": {"id": "IMG1"}}]}])
+
+    def test_missing_or_wrong_header_file_is_refused_before_sending(self):
+        base = {"template_name": "specs_followup", "language": "en", "e164": "60123456789", "params": {"1": "A", "2": "B"}}
+        r = self.c.post("/api/inbox/send-template", json=base)
+        self.assertEqual(r.status_code, 422); self.assertIn("pdf", r.json()["detail"].lower())
+        r = self.c.post("/api/inbox/send-template", json={**base, "header": {"kind": "image", "id": "X"}})
+        self.assertEqual(r.status_code, 422)
+        self.assertEqual(self.sent(), [])
+
+    def test_a_header_sent_to_a_text_only_template_is_ignored_not_forwarded(self):
+        self.c.post("/api/inbox/send-template", json={"template_name": "welcome_note", "language": "en", "e164": "60123456789",
+                    "params": {}, "header": {"kind": "document", "id": "MEDIA777", "filename": "x.pdf"}})
+        self.assertEqual(self.sent()[0][2]["template"].get("components"), None)
 
 
 class Modal(Base):

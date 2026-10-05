@@ -965,6 +965,11 @@
     set("tpl-category", t.category || "—");
     set("tpl-language", tplLang(t));
     if (infoBox) infoBox.classList.remove("hidden");
+    const hdr = document.getElementById("template-header"), hf = document.getElementById("template-header-file");
+    const needsFile = t.header_format === "DOCUMENT" || t.header_format === "IMAGE";
+    if (hdr) hdr.classList.toggle("hidden", !needsFile);
+    if (hf) { hf.value = ""; hf.accept = t.header_format === "IMAGE" ? ".jpg,.jpeg,.png" : ".pdf"; }
+    set("template-header-label", t.header_format === "IMAGE" ? "Header image (JPG or PNG)" : "Header document (PDF)");
     buildTemplateParamInputs(t);
     renderTemplatePreview();
   }
@@ -1030,13 +1035,31 @@
           paramMap[inp.getAttribute("data-param-name")] = v;
         });
         if (missing) { showConvInfoBanner("Fill in every template variable.", "warn"); return; }
+        const needsFile = t.header_format === "DOCUMENT" || t.header_format === "IMAGE";
+        const hfile = needsFile ? ((document.getElementById("template-header-file") || {}).files || [])[0] : null;
+        if (needsFile && !hfile) { showConvInfoBanner(t.header_format === "IMAGE" ? "Attach the header image (JPG or PNG) this template needs." : "Attach the PDF this template needs.", "warn"); return; }
         hideConvInfoBanner();
         sendTpl.disabled = true;
-        if (ts) ts.textContent = "Sending template…";
         try {
+          let header = null;
+          if (needsFile) {
+            if (ts) ts.textContent = "Uploading file…";
+            const fd = new FormData();
+            fd.append("file", hfile);
+            fd.append("format", t.header_format);
+            const up = await inboxFetch("/api/inbox/template-header-media", { method: "POST", body: fd, json: false });
+            const upj = await up.json().catch(() => ({}));
+            if (!up.ok || !upj.id) {
+              if (ts) ts.textContent = "";
+              showConvInfoBanner(`File not accepted: ${(upj && (upj.detail || upj.error)) || ("error " + up.status)}`, "error");
+              return;
+            }
+            header = { kind: t.header_format === "IMAGE" ? "image" : "document", id: upj.id, filename: upj.filename };
+          }
+          if (ts) ts.textContent = "Sending template…";
           const resp = await inboxFetch("/api/inbox/send-template", {
             method: "POST",
-            body: { template_name: t.name, language: tplLang(t), e164, params: paramMap },
+            body: { template_name: t.name, language: tplLang(t), e164, params: paramMap, header },
           });
           const data = await resp.json().catch(() => ({}));
           if (resp.ok && data && data.success) {
