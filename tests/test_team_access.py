@@ -29,7 +29,6 @@ ADMIN_ONLY_API = [
     ("POST", "/api/inbox/admin/evict-templates-cache", {}),
     ("POST", "/api/inbox/admin/run-followups-scan", {}),
     ("POST", "/api/inbox/admin/flush-scheduled-sends", {}),
-    ("DELETE", "/api/inbox/chats/60123456789", None),
     ("POST", "/api/inbox/chats/60123456789/forget-memory", None),
     ("DELETE", "/api/inbox/templates/cache", None),
 ]
@@ -120,9 +119,9 @@ class Access(unittest.TestCase):
         for label in ("/inbox/logs", "/inbox/learning", "/inbox/architecture", "/inbox/admin", "/inbox/guide", "/inbox/team"):
             self.assertIn('href="%s"' % label, html, label)
 
-    def test_member_menu_has_no_delete_or_forget_for_the_chat_list(self):
+    def test_member_menu_can_delete_but_not_forget_ai_memory(self):
         html = self.agent.get("/inbox/chats").text
-        self.assertRegex(html, r'id="act-delete"[^>]*\bhidden\b')
+        self.assertNotRegex(html, r'id="act-delete"[^>]*\bhidden\b')
         self.assertRegex(html, r'id="act-forget"[^>]*\bhidden\b')
 
     def test_api_still_lets_a_member_set_a_name_but_attribution_uses_their_name(self):

@@ -827,11 +827,18 @@ async def import_messages(e164: str, rows: List[Dict[str, Any]]) -> int:
 async def delete_chat(e164_variants: List[str]) -> Dict[str, int]:
     """Delete a chat everywhere in Supabase: messages, claim, session row."""
     out = {"messages": 0, "claims": 0, "sessions": 0}
+    for v in e164_variants:
+        _LOCAL_CLAIMS.pop(v, None)
     if not (ENABLED and e164_variants):
         return out
     flt = "in.(" + ",".join('"%s"' % v.replace('"', "") for v in e164_variants) + ")"
     hdr = {**_HEADERS, "Prefer": "return=minimal,count=exact"}
     async with httpx.AsyncClient(timeout=_LONG_TIMEOUT) as c:
+        try:  # nothing queued for this buyer may be sent after the chat is gone
+            await c.patch(f"{_REST_BASE}/outbound_schedules", headers={**_HEADERS, "Prefer": "return=minimal"},
+                          params={"e164": flt, "status": "in.(pending,claimed_temp)"}, json={"status": "cancelled"})
+        except Exception as exc:
+            print(f"[supabase_client] delete_chat cancel schedules failed: {type(exc).__name__}: {exc!s}")
         for table, key in (("messages", "messages"), ("inbox_claims", "claims"), ("sessions", "sessions")):
             try:
                 r = await c.delete(f"{_REST_BASE}/{table}", headers=hdr, params={"e164": flt})

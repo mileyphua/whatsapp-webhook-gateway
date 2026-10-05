@@ -242,7 +242,7 @@
 <div id="chat-actions" role="menu" hidden class="fixed z-50 w-48 rounded-lg border border-gray-200 bg-white shadow-xl py-1 text-sm">
   <button type="button" role="menuitem" id="act-rename" class="w-full text-left px-3 py-2 hover:bg-gray-50">Set name</button>
   <button type="button" role="menuitem" id="act-forget" class="w-full text-left px-3 py-2 hover:bg-gray-50"{% if not is_admin %} hidden{% endif %}>Forget AI memory</button>
-  <button type="button" role="menuitem" id="act-delete" class="w-full text-left px-3 py-2 text-red-700 hover:bg-red-50"{% if not is_admin %} hidden{% endif %}>Delete chat</button>
+  <button type="button" role="menuitem" id="act-delete" class="w-full text-left px-3 py-2 text-red-700 hover:bg-red-50">Delete chat</button>
 </div>
 
 <!-- rename popover -->
@@ -365,6 +365,7 @@
       .then(function (res) {
         if (!res.ok) throw new Error(res.j.detail || "failed");
         if (openE164 === e164) { openE164 = null; pane.hidden = true; pane.removeAttribute("src"); ph.style.display = ""; history.replaceState(null, "", location.pathname); }
+        var row = document.querySelector('#chat-scroll li[data-e164="' + e164 + '"]'); if (row) row.remove();
         dlg.close(); refresh();
       })
       .catch(function (e) { var d = document.getElementById("del-err"); d.textContent = "Could not delete: " + e.message; d.hidden = false; })

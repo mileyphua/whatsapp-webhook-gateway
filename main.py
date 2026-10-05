@@ -2991,7 +2991,7 @@ async def api_inbox_forget_memory(e164: str, request: Request) -> JSONResponse:
 @app.delete("/api/inbox/chats/{e164}")
 async def api_inbox_delete_chat(e164: str, request: Request) -> JSONResponse:
     """Permanently delete a conversation (Supabase + Redis + name). A transcript copy is written to the logs."""
-    fail = _requires_admin(request)
+    fail = _requires_inbox_bearer(request)
     if fail:
         return fail
     key = contact_names.normalize(e164)
@@ -3026,7 +3026,7 @@ async def api_inbox_delete_chat(e164: str, request: Request) -> JSONResponse:
     except Exception:
         pass
     await _sb.audit(
-        actor=INBOX_ADMIN_NAME,
+        actor=_identity(request)[1],
         action="chat_delete",
         e164=e164,
         detail={
