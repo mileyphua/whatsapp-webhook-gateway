@@ -138,98 +138,39 @@
         <svg class="w-5 h-5 text-pb-navy" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"/></svg>
         New Conversation
       </h3>
-      <button type="button" id="modal-close-btn" class="p-1.5 rounded-md hover:bg-gray-200 text-gray-500 transition">&times;</button>
-    </div>
-
-    <div class="px-5 pt-4 border-b border-gray-100">
-      <div class="flex gap-1 -mb-px">
-        <button type="button" id="tab-freeform" class="tab-btn px-4 py-2 text-sm font-medium border-b-2 border-pb-navy text-pb-navy">
-          Freeform (24h only)
-        </button>
-        <button type="button" id="tab-template" class="tab-btn px-4 py-2 text-sm font-medium border-b-2 border-transparent text-gray-500 hover:text-gray-700">
-          Approved Meta Template
-        </button>
-      </div>
+      <button type="button" id="modal-close-btn" class="p-1.5 rounded-md hover:bg-gray-200 text-gray-500 transition" aria-label="Close">&times;</button>
     </div>
 
     <div id="new-conv-info" class="hidden mx-5 mt-3 p-2.5 rounded bg-blue-50 border border-blue-200 text-blue-800 text-xs"></div>
 
-    <div id="tab-pane-freeform" class="flex-1 overflow-y-auto px-5 py-4 space-y-4">
+    <div id="tab-pane-template" class="flex-1 overflow-y-auto px-5 py-4 space-y-4">
+      <p class="text-xs text-gray-600">WhatsApp only lets us message a buyer first with a <strong>Meta-approved template</strong>. Once the buyer replies, you can chat freely for 24 hours.</p>
       <div>
-        <label class="block text-sm font-medium text-gray-700 mb-1">WhatsApp number (E.164)</label>
-        <input
-          type="tel"
-          id="freeform-e164"
-          placeholder="+65 9123 4567"
-          class="w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-pb-green/30 focus:border-pb-green"
-        >
+        <label class="block text-sm font-medium text-gray-700 mb-1">WhatsApp number (with country code)</label>
+        <input type="tel" id="template-e164" placeholder="+65 9123 4567"
+          class="w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-pb-green/30 focus:border-pb-green">
       </div>
       <div>
-        <label class="block text-sm font-medium text-gray-700 mb-1">Message</label>
-        <textarea
-          id="freeform-text"
-          rows="5"
-          placeholder="Type the first message to start the conversation. Note: only works if buyer has been active in the last 24 hours."
-          class="w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-pb-green/30 focus:border-pb-green resize-y"
-        ></textarea>
-      </div>
-      <div class="flex items-center justify-between gap-2 pt-1">
-        <button
-          type="button"
-          id="btn-check-window"
-          class="inline-flex items-center gap-1.5 px-3 py-2 rounded-md text-sm font-medium bg-white border border-gray-300 text-gray-700 hover:bg-gray-50 transition"
-        >
-          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
-          Check Window
-        </button>
-        <div class="flex items-center gap-2">
-          <button type="button" id="btn-freeform-cancel" class="px-4 py-2 rounded-md text-sm font-medium text-gray-600 hover:bg-gray-100 transition">Cancel</button>
-          <button
-            type="button"
-            id="btn-freeform-send"
-            class="inline-flex items-center gap-1.5 px-4 py-2 rounded-md text-sm font-medium bg-pb-navy hover:bg-slate-900 text-white transition disabled:opacity-50"
-          >
-            Send & open
-            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8"/></svg>
-          </button>
+        <div class="flex items-center justify-between mb-1">
+          <label class="block text-sm font-medium text-gray-700" for="template-select">Approved template</label>
+          <button type="button" id="btn-template-refresh" class="text-xs text-pb-navy underline hover:no-underline">Sync from Meta</button>
         </div>
-      </div>
-      <div id="freeform-status" class="text-xs text-gray-500 min-h-[1.25rem]"></div>
-    </div>
-
-    <div id="tab-pane-template" class="flex-1 overflow-y-auto px-5 py-4 space-y-4 hidden">
-      <div>
-        <label class="block text-sm font-medium text-gray-700 mb-1">Choose template</label>
-        <select
-          id="template-select"
-          class="w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-pb-green/30 focus:border-pb-green bg-white"
-        >
+        <select id="template-select"
+          class="w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-pb-green/30 focus:border-pb-green bg-white">
           <option value="">— Loading templates… —</option>
         </select>
       </div>
       <div id="template-info" class="p-3 rounded-lg border border-gray-200 bg-gray-50 text-xs space-y-1 hidden">
-        <div><span class="font-medium text-gray-600">Category:</span> <span id="tpl-category" class="text-gray-800"></span></div>
-        <div><span class="font-medium text-gray-600">Language:</span> <span id="tpl-language" class="text-gray-800"></span></div>
-        <div><span class="font-medium text-gray-600">Summary:</span> <span id="tpl-summary" class="text-gray-800"></span></div>
-      </div>
-      <div>
-        <label class="block text-sm font-medium text-gray-700 mb-1">WhatsApp number (E.164)</label>
-        <input
-          type="tel"
-          id="template-e164"
-          placeholder="+65 9123 4567"
-          class="w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-pb-green/30 focus:border-pb-green"
-        >
+        <div><span class="font-medium text-gray-600">Category:</span> <span id="tpl-category" class="text-gray-800"></span> · <span class="font-medium text-gray-600">Language:</span> <span id="tpl-language" class="text-gray-800"></span></div>
+        <div class="font-medium text-gray-600">Message preview</div>
+        <div id="tpl-summary" class="text-gray-800 whitespace-pre-wrap"></div>
       </div>
       <div id="template-params" class="space-y-2"></div>
       <div class="flex items-center justify-end gap-2 pt-1">
         <button type="button" id="btn-template-cancel" class="px-4 py-2 rounded-md text-sm font-medium text-gray-600 hover:bg-gray-100 transition">Cancel</button>
-        <button
-          type="button"
-          id="btn-template-send"
-          class="inline-flex items-center gap-1.5 px-4 py-2 rounded-md text-sm font-medium bg-pb-navy hover:bg-slate-900 text-white transition disabled:opacity-50"
-        >
-          Send template & open
+        <button type="button" id="btn-template-send"
+          class="inline-flex items-center gap-1.5 px-4 py-2 rounded-md text-sm font-medium bg-pb-navy hover:bg-slate-900 text-white transition disabled:opacity-50">
+          Send template &amp; open
           <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8"/></svg>
         </button>
       </div>

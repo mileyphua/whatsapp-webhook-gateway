@@ -291,6 +291,8 @@ async def _startup_warm_index() -> None:
 VERIFY_TOKEN = os.getenv("WHATSAPP_VERIFY_TOKEN", "")
 ACCESS_TOKEN = os.getenv("WHATSAPP_ACCESS_TOKEN", "")
 PHONE_NUMBER_ID = os.getenv("WHATSAPP_PHONE_NUMBER_ID", "")
+# Message templates belong to the WhatsApp Business Account (not to the phone number), so they are listed under this id.
+WABA_ID = os.getenv("WHATSAPP_BUSINESS_ACCOUNT_ID", "")
 # Meta App Dashboard -> Settings -> Basic -> App Secret. Used to verify
 # X-Hub-Signature-256 on inbound /webhook POSTs (see receive_webhook).
 WHATSAPP_APP_SECRET = os.getenv("WHATSAPP_APP_SECRET", "")
@@ -1151,6 +1153,7 @@ async def send_whatsapp_template(
     sender_direction: str = "ai",
     created_by: Optional[str] = None,
     category: Optional[str] = None,
+    display_text: Optional[str] = None,
 ) -> Dict[str, Any]:
     if not ACCESS_TOKEN:
         raise RuntimeError("WHATSAPP_ACCESS_TOKEN must be set")
@@ -1169,7 +1172,7 @@ async def send_whatsapp_template(
         if isinstance(params, list):
             param_list = list(params)
         elif isinstance(params, dict):
-            param_list = [params[k] for k in sorted(params.keys())]
+            param_list = [params[k] for k in sorted(params.keys(), key=lambda k: (0, int(k)) if str(k).isdigit() else (1, str(k)))]
         else:
             param_list = []
         if param_list:
@@ -1207,25 +1210,27 @@ async def send_whatsapp_template(
                 f"[TEMPLATE-SEND] name={template_name} category={cat_log} "
                 f"e164={recipient_e164} sent_id={sent_id or 'NONE'}"
             )
-            asyncio.create_task(_persist_outbound_safe(
+            await _persist_outbound_safe(
                 e164=recipient_e164,
                 direction=sender_direction,
-                text=f"[template {template_name} {language_code}]",
+                text=display_text or f"[template {template_name} {language_code}]",
                 sent_id_from_graph=sent_id,
-            ))
+                sent_by=created_by,
+            )
             return {
                 "ok": True,
                 "messages": messages,
                 "meta_http_status": r.status_code,
                 "raw": body,
             }
-        asyncio.create_task(_persist_outbound_safe(
+        await _persist_outbound_safe(
             e164=recipient_e164,
             direction=sender_direction,
-            text=f"[template {template_name} {language_code}]",
+            text=display_text or f"[template {template_name} {language_code}]",
             errored=True,
             error_detail=str(body.get("error", {}).get("message", r.text))[:500],
-        ))
+            sent_by=created_by,
+        )
         raise RuntimeError(
             f"WhatsApp Template API {r.status_code} (pnid={resolved_pnid}): "
             f"{body.get('error', {}).get('message', r.text)}"
@@ -3580,88 +3585,94 @@ async def api_inbox_window_check(e164: str, request: Request) -> JSONResponse:
     })
 
 
+class TemplateSyncError(Exception):
+    def __init__(self, status: int, detail: str):
+        super().__init__(detail)
+        self.status, self.detail = status, detail
+
+
+def _simplify_template(tpl: Dict[str, Any]) -> Dict[str, Any]:
+    """One Meta template -> what the inbox needs: body text, its {{n}} variables, and whether we can send it
+    (we send text-only templates; media headers and button variables need data this screen does not collect)."""
+    import re as _re
+    comps_out: List[Dict[str, Any]] = []
+    reason = ""
+    for comp in tpl.get("components") or []:
+        ctype = str(comp.get("type") or "").upper()
+        ctext = comp.get("text") or ""
+        nums = sorted({int(x) for x in _re.findall(r"\{\{(\d+)\}\}", str(ctext))})
+        if ctype == "BODY" and _re.search(r"\{\{[^0-9}][^}]*\}\}", str(ctext)):
+            reason = reason or "uses named variables, which this screen can't fill in"
+        if ctype == "HEADER":
+            fmt = str(comp.get("format") or "TEXT").upper()
+            if fmt != "TEXT":
+                reason = reason or f"has a {fmt.lower()} header (needs a file, which this screen can't attach to a template)"
+            elif "{{" in str(ctext):
+                reason = reason or "has a variable in its header"
+        if ctype == "BUTTONS":
+            for btn in comp.get("buttons") or []:
+                if "{{" in str(btn.get("url") or ""):
+                    reason = reason or "has a button link with a variable"
+        if ctype not in ("HEADER", "BODY", "FOOTER", "BUTTONS"):
+            reason = reason or f"uses a {ctype.lower()} component"
+        comps_out.append({"type": ctype, "text": ctext, "parameters": [str(n) for n in nums]})
+    lang = tpl.get("language")
+    if isinstance(lang, dict):
+        lang = lang.get("code")
+    return {
+        "name": tpl.get("name"), "category": tpl.get("category"), "language": lang, "status": tpl.get("status"),
+        "components": comps_out, "supported": not reason, "unsupported_reason": reason,
+    }
+
+
+async def _approved_templates(force: bool = False) -> List[Dict[str, Any]]:
+    """Every APPROVED template of the WhatsApp Business Account (all pages), cached for a few minutes."""
+    global TEMPLATES_CACHE
+    if not force and TEMPLATES_CACHE is not None and (time.time() - TEMPLATES_CACHE[0]) < TEMPLATES_CACHE_TTL:
+        return list(TEMPLATES_CACHE[1])
+    if not WABA_ID or not ACCESS_TOKEN:
+        raise TemplateSyncError(503, "WHATSAPP_BUSINESS_ACCOUNT_ID or WHATSAPP_ACCESS_TOKEN is missing on the server, "
+                                     "so Meta templates can't be loaded. Add them in the Render environment.")
+    url: Optional[str] = f"https://graph.facebook.com/{API_VERSION}/{WABA_ID}/message_templates"
+    params: Optional[Dict[str, Any]] = {"fields": "name,category,language,status,components", "status": "APPROVED", "limit": 100}
+    out: List[Dict[str, Any]] = []
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            for _ in range(20):  # page limit, never loop forever
+                r = await client.get(url, params=params, headers={"Authorization": f"Bearer {ACCESS_TOKEN}"})
+                if not (200 <= r.status_code < 300):
+                    try:
+                        why = (r.json().get("error") or {}).get("message") or r.text[:200]
+                    except Exception:
+                        why = r.text[:200]
+                    raise TemplateSyncError(502, f"Meta refused the template list ({r.status_code}): {why}")
+                data = r.json()
+                out.extend(_simplify_template(t) for t in (data.get("data") or []) if t.get("status") == "APPROVED")
+                url = (data.get("paging") or {}).get("next")
+                params = None  # the "next" link already carries the query
+                if not url:
+                    break
+    except TemplateSyncError:
+        raise
+    except Exception as exc:
+        raise TemplateSyncError(502, f"Could not reach Meta to load templates: {type(exc).__name__}: {exc!s}")
+    TEMPLATES_CACHE = (time.time(), out)
+    return list(out)
+
+
 @app.get("/api/inbox/templates")
 async def api_inbox_list_templates(request: Request) -> JSONResponse:
     fail = _requires_inbox_bearer(request)
     if fail:
         return fail
-    if not PHONE_NUMBER_ID or not ACCESS_TOKEN:
-        return JSONResponse(
-            content={
-                "detail": (
-                    "WHATSAPP_PHONE_NUMBER_ID or WHATSAPP_ACCESS_TOKEN missing — "
-                    "cannot fetch templates from Meta Graph"
-                )
-            },
-            status_code=503,
-        )
-    global TEMPLATES_CACHE
-    now = time.time()
-    if (
-        TEMPLATES_CACHE is not None
-        and (now - TEMPLATES_CACHE[0]) < TEMPLATES_CACHE_TTL
-    ):
-        return JSONResponse(content={
-            "templates": TEMPLATES_CACHE[1],
-            "cached": True,
-            "cached_at_unix": TEMPLATES_CACHE[0],
-        })
+    refresh = request.query_params.get("refresh") in ("1", "true")
+    was_cached = (not refresh) and TEMPLATES_CACHE is not None and (time.time() - TEMPLATES_CACHE[0]) < TEMPLATES_CACHE_TTL
     try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            r = await client.get(
-                f"https://graph.facebook.com/v18.0/{PHONE_NUMBER_ID}/message_templates",
-                params={
-                    "fields": "name,category,language,status,components",
-                    "status": "APPROVED",
-                },
-                headers={"Authorization": f"Bearer {ACCESS_TOKEN}"},
-            )
-            if not (200 <= r.status_code < 300):
-                return JSONResponse(
-                    content={
-                        "detail": "Meta Graph templates call failed",
-                        "http_status": r.status_code,
-                        "body_preview": r.text[:300],
-                    },
-                    status_code=502,
-                )
-            data = r.json().get("data", []) or []
-            approved = [t for t in data if t.get("status") == "APPROVED"] if data else []
-            templates = approved or data
-            simplified: List[Dict[str, Any]] = []
-            import re as _re
-            for tpl in templates:
-                t: Dict[str, Any] = {
-                    "name": tpl.get("name"),
-                    "category": tpl.get("category"),
-                    "language": tpl.get("language"),
-                    "status": tpl.get("status"),
-                    "components": [],
-                }
-                comps = tpl.get("components") or []
-                for comp in comps:
-                    ctype = comp.get("type")
-                    ctext = comp.get("text") or ""
-                    placeholders: List[str] = _re.findall(r"\{\{(\d+)\}\}", str(ctext))
-                    t["components"].append({
-                        "type": ctype,
-                        "text": ctext,
-                        "parameters": placeholders,
-                    })
-                simplified.append(t)
-            TEMPLATES_CACHE = (now, simplified)
-            return JSONResponse(content={
-                "templates": simplified,
-                "cached": False,
-                "cached_at_unix": now,
-            })
-    except Exception as exc:
-        return JSONResponse(
-            content={
-                "detail": f"Meta Graph templates call exception: {type(exc).__name__}: {exc!s}",
-            },
-            status_code=502,
-        )
+        templates = await _approved_templates(force=refresh)
+    except TemplateSyncError as exc:
+        return JSONResponse(content={"detail": exc.detail}, status_code=exc.status)
+    return JSONResponse(content={"templates": templates, "cached": bool(was_cached),
+                                 "cached_at_unix": TEMPLATES_CACHE[0] if TEMPLATES_CACHE else time.time()})
 
 
 @app.delete("/api/inbox/templates/cache")
@@ -3674,8 +3685,64 @@ async def api_inbox_evict_templates_cache(request: Request) -> JSONResponse:
     return JSONResponse(content={"evicted": True})
 
 
+async def _send_validated_template(request: Request, e164_raw: str, template_name: str, language: str, params: Any,
+                                   category: Optional[str], sender_dir: str = "human") -> JSONResponse:
+    """The one way a template leaves the inbox: number cleaned, template checked against Meta's approved list,
+    variables counted, text saved so the chat shows up in the list."""
+    import re as _re
+    from urllib.parse import unquote
+    e164 = contact_names.normalize(unquote(e164_raw))
+    if len(e164) < 8:
+        return JSONResponse(content={"detail": "Enter a valid WhatsApp number with the country code, e.g. +65 9123 4567."}, status_code=422)
+    ok, retry = _global_proactive_rate_limiter("global")
+    if not ok:
+        return JSONResponse(content={"detail": f"Global rate limit exceeded — retry after {retry:.1f}s"}, status_code=429)
+    ok, retry = _per_e164_rate_limiter(e164)
+    if not ok:
+        return JSONResponse(content={"detail": f"Per-e164 rate limit exceeded — retry after {retry:.1f}s"}, status_code=429)
+    try:
+        approved = await _approved_templates()
+    except TemplateSyncError as exc:
+        return JSONResponse(content={"detail": exc.detail}, status_code=exc.status)
+    same_name = [t for t in approved if t.get("name") == template_name]
+    tpl = next((t for t in same_name if t.get("language") == language), None)
+    if tpl is None:
+        langs = ", ".join(sorted(str(t.get("language")) for t in same_name))
+        why = (f"Template '{template_name}' is not approved in language {language} (approved: {langs})." if same_name
+               else f"Template '{template_name}' is not an approved Meta template. Only approved templates can start a conversation.")
+        return JSONResponse(content={"detail": why}, status_code=422)
+    if not tpl.get("supported"):
+        return JSONResponse(content={"detail": f"This template can't be sent from here: it {tpl.get('unsupported_reason')}."}, status_code=422)
+    body = next((c for c in tpl["components"] if c["type"] == "BODY"), {"text": "", "parameters": []})
+    needed = body.get("parameters") or []
+    if isinstance(params, dict):
+        values = [params[k] for k in sorted(params.keys(), key=lambda k: (0, int(k)) if str(k).isdigit() else (1, str(k)))]
+    else:
+        values = list(params or [])
+    values = [str(v).strip() for v in values]
+    if len(values) != len(needed):
+        return JSONResponse(content={"detail": f"This template needs {len(needed)} value(s) ({', '.join('{{%s}}' % n for n in needed) or 'none'}) but {len(values)} were given."}, status_code=422)
+    if any(not v for v in values):
+        return JSONResponse(content={"detail": "Fill in every template variable (WhatsApp rejects empty ones)."}, status_code=422)
+    shown = body.get("text") or ""
+    for n, v in zip(needed, values):
+        shown = shown.replace("{{%s}}" % n, v)
+    try:
+        result = await send_whatsapp_template(
+            e164, template_name, language_code=language, params=values, sender_direction=sender_dir,
+            category=category or tpl.get("category"), display_text=shown, created_by=_identity(request)[1],
+        )
+    except RuntimeError as exc:
+        return JSONResponse(content={"success": False, "send_type": "template", "error": str(exc), "detail": str(exc)}, status_code=502)
+    await _clear_needs_human(e164)
+    return JSONResponse(content={"success": True, "send_type": "template", "e164": e164, "text": shown,
+                                 "sent_id": ((result.get("messages") or [{}])[0].get("id")), **result})
+
+
 @app.post("/api/inbox/new-conversation")
 async def api_inbox_new_conversation(request: Request) -> JSONResponse:
+    """Start a conversation. Template-only: WhatsApp only allows a business to message first with an approved
+    template, so free-form text is refused here (inside an existing chat, free-form replies work within 24h)."""
     fail = _requires_inbox_bearer(request)
     if fail:
         return fail
@@ -3683,179 +3750,13 @@ async def api_inbox_new_conversation(request: Request) -> JSONResponse:
         body: Dict[str, Any] = await request.json()
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid JSON body")
-    e164_raw = (body.get("e164") or "").strip()
-    if not e164_raw:
-        raise HTTPException(status_code=422, detail="'e164' is required")
-    try:
-        from urllib.parse import unquote
-        e164 = unquote(e164_raw)
-    except Exception:
-        e164 = e164_raw
-
-    ok, retry = _global_proactive_rate_limiter("global")
-    if not ok:
-        return JSONResponse(
-            content={"detail": f"Global rate limit exceeded — retry after {retry:.1f}s"},
-            status_code=429,
-        )
-    ok, retry = _per_e164_rate_limiter(e164)
-    if not ok:
-        return JSONResponse(
-            content={"detail": f"Per-e164 rate limit exceeded — retry after {retry:.1f}s"},
-            status_code=429,
-        )
-
-    text = (body.get("text") or "").strip() or None
-    mode = (body.get("mode") or "auto").strip().lower()
-    if mode not in {"auto", "freeform_force", "template_force"}:
-        mode = "auto"
-    template_name = (body.get("template_name") or "").strip() or None
-    template_params = body.get("template_params")
-    if template_params is None:
-        template_params = []
-    language = (body.get("language") or "en_US").strip() or "en_US"
-    category = (body.get("category") or "").strip() or None
-
-    last_buyer_at: Optional[float] = None
-    try:
-        last_buyer_at = await _sb.get_last_buyer_message_at(e164)  # type: ignore[attr-defined]
-    except Exception:
-        last_buyer_at = None
-    inside_24h = bool(last_buyer_at is not None and (time.time() - float(last_buyer_at)) < 86400)
-
-    my_session_id = (
-        request.headers.get("X-Inbox-Session-Id")
-        or request.headers.get("x-inbox-session-id")
-        or f"newconv-{secrets.token_hex(6)}"
-    )
-
-    if mode == "freeform_force" or (mode == "auto" and inside_24h):
-        if not text:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    "'text' is required for freeform send (mode=freeform_force or "
-                    "mode=auto inside 24h window)"
-                ),
-            )
-        held = await _claim_is_held_by_other(e164, my_session_id=my_session_id)
-        if not held:
-            try:
-                await _sb.claim_acquire(  # type: ignore[attr-defined]
-                    e164=e164,
-                    held_by=INBOX_ADMIN_NAME,
-                    session_id=my_session_id,
-                    ttl_seconds=120,
-                )
-            except Exception:
-                pass
-        elif held and held.get("session_id") != my_session_id:
-            return JSONResponse(
-                content={
-                    "success": False,
-                    "inside_24h_window": inside_24h,
-                    "detail": (
-                        f"Chat claimed by {held.get('held_by') or 'a colleague'}"
-                    ),
-                    "held_by": held.get("held_by"),
-                },
-                status_code=409,
-            )
-        try:
-            result = await send_whatsapp_text(
-                to=e164,
-                text=text,
-                sender_direction="human",
-            )
-        except RuntimeError as exc:
-            return JSONResponse(
-                content={
-                    "success": False,
-                    "inside_24h_window": inside_24h,
-                    "send_type": "freeform",
-                    "error": str(exc),
-                },
-                status_code=502,
-            )
-        sent_id = ((result.get("messages") or [{}])[0].get("id")) if result else None
-        return JSONResponse(content={
-            "success": True,
-            "send_type": "freeform",
-            "inside_24h_window": inside_24h,
-            "sent_id": sent_id,
-            "result": result,
-        })
-
-    if mode == "template_force" or (mode == "auto" and not inside_24h):
-        if mode == "auto" and not template_name:
-            templates_ref: List[Dict[str, Any]] = []
-            if TEMPLATES_CACHE is not None and (time.time() - TEMPLATES_CACHE[0]) < TEMPLATES_CACHE_TTL:
-                templates_ref = list(TEMPLATES_CACHE[1])
-            else:
-                try:
-                    async with httpx.AsyncClient(timeout=10.0) as client:
-                        r = await client.get(
-                            f"https://graph.facebook.com/v18.0/{PHONE_NUMBER_ID}/message_templates",
-                            params={
-                                "fields": "name,category,language,status,components",
-                                "status": "APPROVED",
-                            },
-                            headers={"Authorization": f"Bearer {ACCESS_TOKEN}"},
-                        )
-                        if 200 <= r.status_code < 300:
-                            d = r.json().get("data", []) or []
-                            TEMPLATES_CACHE = (time.time(), d)
-                            templates_ref = d
-                except Exception:
-                    templates_ref = []
-            return JSONResponse(
-                content={
-                    "inside_24h_window": False,
-                    "detail": (
-                        "Outside 24h window — send with Meta-approved template via "
-                        "template_force mode"
-                    ),
-                    "templates": templates_ref,
-                },
-                status_code=422,
-            )
-        if mode == "template_force" and not template_name:
-            raise HTTPException(
-                status_code=400,
-                detail="'template_name' is required for mode=template_force",
-            )
-        try:
-            result = await send_whatsapp_template(
-                e164,
-                str(template_name),
-                language_code=language,
-                params=template_params,
-                sender_direction="human",
-                category=category,
-            )
-        except RuntimeError as exc:
-            return JSONResponse(
-                content={
-                    "success": False,
-                    "inside_24h_window": inside_24h,
-                    "send_type": "template",
-                    "error": str(exc),
-                },
-                status_code=502,
-            )
-        sent_id = (result.get("messages") or [{}])[0].get("id") if result.get("messages") else None
-        return JSONResponse(content={
-            "success": True,
-            "send_type": "template",
-            "inside_24h_window": inside_24h,
-            "sent_id": sent_id,
-            "result": result,
-        })
-
-    return JSONResponse(
-        content={"detail": "unhandled mode", "mode": mode},
-        status_code=500,
-    )
+    template_name = (body.get("template_name") or "").strip()
+    if not template_name:
+        raise HTTPException(status_code=400, detail="New conversations can only be started with an approved Meta template: 'template_name' is required.")
+    return await _send_validated_template(
+        request, str(body.get("e164") or ""), template_name, (body.get("language") or "en_US").strip() or "en_US",
+        body.get("template_params") if body.get("template_params") is not None else body.get("params"),
+        (body.get("category") or "").strip() or None)
 
 
 @app.post("/api/inbox/send-template")
@@ -3870,49 +3771,11 @@ async def api_inbox_send_template(request: Request) -> JSONResponse:
     e164_raw = (body.get("e164") or "").strip()
     template_name = (body.get("template_name") or "").strip()
     if not e164_raw or not template_name:
-        raise HTTPException(
-            status_code=422,
-            detail="'e164' and 'template_name' are required",
-        )
-    try:
-        from urllib.parse import unquote
-        e164 = unquote(e164_raw)
-    except Exception:
-        e164 = e164_raw
-
-    ok, retry = _global_proactive_rate_limiter("global")
-    if not ok:
-        return JSONResponse(
-            content={"detail": f"Global rate limit exceeded — retry after {retry:.1f}s"},
-            status_code=429,
-        )
-    ok, retry = _per_e164_rate_limiter(e164)
-    if not ok:
-        return JSONResponse(
-            content={"detail": f"Per-e164 rate limit exceeded — retry after {retry:.1f}s"},
-            status_code=429,
-        )
-
-    language = (body.get("language") or "en_US").strip() or "en_US"
-    params = body.get("params") or body.get("template_params") or []
-    category = (body.get("category") or "").strip() or None
-    sender_dir = (body.get("sender_direction") or "human").strip() or "human"
-    try:
-        result = await send_whatsapp_template(
-            e164,
-            template_name,
-            language_code=language,
-            params=params,
-            sender_direction=sender_dir,
-            category=category,
-        )
-    except RuntimeError as exc:
-        return JSONResponse(
-            content={"success": False, "error": str(exc)},
-            status_code=502,
-        )
-    await _clear_needs_human(e164)
-    return JSONResponse(content={"success": True, **result})
+        raise HTTPException(status_code=422, detail="'e164' and 'template_name' are required")
+    return await _send_validated_template(
+        request, e164_raw, template_name, (body.get("language") or "en_US").strip() or "en_US",
+        body.get("params") if body.get("params") is not None else body.get("template_params"),
+        (body.get("category") or "").strip() or None, (body.get("sender_direction") or "human").strip() or "human")
 
 
 # =========================================================================

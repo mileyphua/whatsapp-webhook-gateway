@@ -888,19 +888,6 @@
   }
   window.getInboxBearer = getInboxBearer;
 
-  function switchModalTab(tab) {
-    const tf = document.getElementById("tab-freeform");
-    const tt = document.getElementById("tab-template");
-    const pf = document.getElementById("tab-pane-freeform");
-    const pt = document.getElementById("tab-pane-template");
-    if (!tf || !tt) return;
-    const isFree = tab === "freeform";
-    tf.className = "tab-btn px-4 py-2 text-sm font-medium border-b-2 " + (isFree ? "border-pb-navy text-pb-navy" : "border-transparent text-gray-500 hover:text-gray-700");
-    tt.className = "tab-btn px-4 py-2 text-sm font-medium border-b-2 " + (isFree ? "border-transparent text-gray-500 hover:text-gray-700" : "border-pb-navy text-pb-navy");
-    if (pf) pf.classList.toggle("hidden", !isFree);
-    if (pt) pt.classList.toggle("hidden", isFree);
-  }
-
   function showConvInfoBanner(msg, kind) {
     const info = document.getElementById("new-conv-info");
     if (!info) return;
@@ -916,231 +903,159 @@
     if (info) info.classList.add("hidden");
   }
 
-  function extractTemplateParams(template) {
-    const params = [];
-    try {
-      const components = (template && template.components) || [];
-      const bodyComp = components.find(c => c && c.type === "BODY");
-      if (bodyComp && bodyComp.parameters && Array.isArray(bodyComp.parameters)) {
-        bodyComp.parameters.forEach((p, i) => {
-          params.push({
-            index: i,
-            name: p && p.key ? p.key : `${i + 1}`,
-            type: (p && p.type) || "text",
-            label: p && p.key ? p.key : `Param ${i + 1}`,
-          });
-        });
-      }
-      const bodyText = bodyComp && bodyComp.text ? bodyComp.text : "";
-      const placeholders = bodyText.match(/\{\{(\d+)\}\}/g);
-      if (placeholders && placeholders.length > params.length) {
-        for (let i = params.length; i < placeholders.length; i++) {
-          params.push({ index: i, name: `${i + 1}`, type: "text", label: `Param ${i + 1}` });
-        }
-      }
-    } catch (_) {}
-    return params;
+  // New conversations are template-only: WhatsApp lets a business message first only with an approved template.
+  let _tplList = [];
+  let _tplError = "";
+  const tplEsc = (v) => String(v == null ? "" : v).replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch]));
+  const digitsOnly = (v) => String(v || "").replace(/\D+/g, "");
+  const tplLang = (t) => (t && t.language && (typeof t.language === "string" ? t.language : t.language.code)) || "en_US";
+  const tplBody = (t) => { const b = ((t && t.components) || []).find(c => c && c.type === "BODY"); return b || { text: "", parameters: [] }; };
+  const tplVars = (t) => (tplBody(t).parameters || []).map(String);
+  const currentTemplate = () => { const sel = document.getElementById("template-select"); return sel && sel.value !== "" ? _tplList[Number(sel.value)] : null; };
+
+  function renderTemplatePreview() {
+    const t = currentTemplate();
+    const box = document.getElementById("tpl-summary");
+    if (!t || !box) return;
+    let text = tplBody(t).text || "";
+    document.querySelectorAll("#template-params .tpl-param").forEach(inp => {
+      const v = (inp.value || "").trim();
+      text = text.split("{{" + inp.getAttribute("data-param-name") + "}}").join(v || "{{" + inp.getAttribute("data-param-name") + "}}");
+    });
+    box.textContent = text || "—";
   }
 
-  function buildTemplateParamInputs(template) {
+  function buildTemplateParamInputs(t) {
     const container = document.getElementById("template-params");
     if (!container) return;
-    const params = extractTemplateParams(template);
-    if (params.length === 0) {
-      container.innerHTML = `<div class="text-xs text-gray-500 italic p-2 rounded bg-gray-50 border border-gray-100">This template has no parameters — just fill in the recipient number above.</div>`;
+    const vars = t ? tplVars(t) : [];
+    if (!t || vars.length === 0) {
+      container.innerHTML = t ? `<div class="text-xs text-gray-500 italic p-2 rounded bg-gray-50 border border-gray-100">This template has no variables — just enter the number above.</div>` : "";
       return;
     }
-    let html = `<div class="space-y-2">
-                  <div class="text-xs font-medium text-gray-700">Template parameters</div>`;
-    params.forEach(p => {
-      html += `<div>
-                 <label class="block text-xs font-medium text-gray-600 mb-1">${escapeHtml(p.label)} <span class="text-gray-400 font-normal">({{${p.name}}})</span></label>
-                 <input type="text" name="param_${escapeHtml(p.name)}" data-param-index="${p.index}" data-param-name="${escapeHtml(p.name)}"
-                        class="tpl-param w-full rounded border border-gray-300 px-2 py-1 text-sm focus:outline-none focus:ring-2 focus:ring-pb-green/30 focus:border-pb-green">
-               </div>`;
-    });
-    html += "</div>";
-    container.innerHTML = html;
+    container.innerHTML = `<div class="text-xs font-medium text-gray-700">Fill in the template variables</div>` + vars.map(n =>
+      `<div><label class="block text-xs font-medium text-gray-600 mb-1">Variable {{${tplEsc(n)}}}</label>
+         <input type="text" data-param-name="${tplEsc(n)}" class="tpl-param w-full rounded border border-gray-300 px-2 py-1 text-sm focus:outline-none focus:ring-2 focus:ring-pb-green/30 focus:border-pb-green"></div>`).join("");
+    container.querySelectorAll(".tpl-param").forEach(inp => inp.addEventListener("input", renderTemplatePreview));
   }
 
-  function populateTemplateDropdown(templates) {
+  function populateTemplateDropdown() {
     const sel = document.getElementById("template-select");
     if (!sel) return;
     sel.innerHTML = "";
-    if (!templates || templates.length === 0) {
-      sel.innerHTML = `<option value="">— No templates available —</option>`;
-      return;
-    }
     const opt0 = document.createElement("option");
-    opt0.value = ""; opt0.textContent = "— Pick a template —";
+    opt0.value = "";
+    opt0.textContent = _tplError ? "— Could not load templates —" : (_tplList.length ? "— Pick a template —" : "— No approved templates found —");
     sel.appendChild(opt0);
-    templates.forEach(t => {
-      const name = t.name || "(unnamed)";
-      const cat = t.category || "UTILITY";
-      const lang = (t.language && (typeof t.language === "string" ? t.language : t.language.code)) || "en";
+    _tplList.forEach((t, i) => {
       const opt = document.createElement("option");
-      opt.value = name;
-      opt.textContent = `${name} (${cat}, ${lang})`;
+      opt.value = String(i);
+      opt.textContent = `${t.name} (${t.category || "—"}, ${tplLang(t)})` + (t.supported === false ? " — can't be sent here" : "");
+      if (t.supported === false) opt.disabled = true;
       sel.appendChild(opt);
     });
-    sel.addEventListener("change", function () {
-      const val = sel.value;
-      const infoBox = document.getElementById("template-info");
-      if (!val) { if (infoBox) infoBox.classList.add("hidden"); buildTemplateParamInputs(null); return; }
-      const t = templates.find(x => x.name === val);
-      if (!t) return;
-      const cat = t.category || "UTILITY";
-      const lang = (t.language && (typeof t.language === "string" ? t.language : t.language.code)) || "en";
-      const comps = (t.components || []).map(c => c.type || "?").join(", ");
-      const tc = document.getElementById("tpl-category");
-      const tl = document.getElementById("tpl-language");
-      const ts = document.getElementById("tpl-summary");
-      if (tc) tc.textContent = cat;
-      if (tl) tl.textContent = lang;
-      if (ts) ts.textContent = comps || "—";
-      if (infoBox) infoBox.classList.remove("hidden");
-      buildTemplateParamInputs(t);
-    });
+    onTemplateChosen();
+  }
+
+  function onTemplateChosen() {
+    const t = currentTemplate();
+    const infoBox = document.getElementById("template-info");
+    if (!t) { if (infoBox) infoBox.classList.add("hidden"); buildTemplateParamInputs(null); return; }
+    const set = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v; };
+    set("tpl-category", t.category || "—");
+    set("tpl-language", tplLang(t));
+    if (infoBox) infoBox.classList.remove("hidden");
+    buildTemplateParamInputs(t);
+    renderTemplatePreview();
   }
 
   async function ensureTemplates(force) {
-    if (_cachedTemplates && !force) return _cachedTemplates;
+    if (_tplList.length && !force) return;
+    _tplError = "";
     try {
-      const resp = await inboxFetch("/api/inbox/templates");
-      if (!resp.ok) return null;
+      const resp = await inboxFetch("/api/inbox/templates" + (force ? "?refresh=1" : ""));
       const data = await resp.json().catch(() => null);
-      const list = (data && data.templates) || (data && Array.isArray(data) ? data : []);
-      _cachedTemplates = list;
-      return list;
-    } catch (_) {
-      return null;
+      if (!resp.ok) { _tplError = (data && data.detail) || ("Could not load templates (error " + resp.status + ")"); _tplList = []; return; }
+      _tplList = (data && data.templates) || [];
+    } catch (err) {
+      _tplError = "Could not load templates: " + (err && err.message ? err.message : err);
+      _tplList = [];
     }
   }
 
-  window.openNewConversationModal = async function (initialTab, prefille164) {
+  window.openNewConversationModal = async function (_initialTab, prefille164) {
     const modal = document.getElementById("new-conversation-modal");
     if (!modal) {
+      // inside the split-view thread frame the modal lives in the parent page
+      try { if (window.parent && window.parent !== window && typeof window.parent.openNewConversationModal === "function") { return window.parent.openNewConversationModal(_initialTab, prefille164); } } catch (_) {}
       alert("New Conversation modal not present on this page. Please go to the Chats list.");
       return;
     }
-    switchModalTab(initialTab || "freeform");
     hideConvInfoBanner();
-    const fs = document.getElementById("freeform-status");
     const ts = document.getElementById("template-status");
-    if (fs) fs.textContent = "";
     if (ts) ts.textContent = "";
-
-    if (prefille164) {
-      const fe = document.getElementById("freeform-e164");
-      const te = document.getElementById("template-e164");
-      if (fe) fe.value = prefille164;
-      if (te) te.value = prefille164;
-    }
+    if (prefille164) { const te = document.getElementById("template-e164"); if (te) te.value = prefille164; }
 
     if (!modal._listenersAttached) {
       modal._listenersAttached = true;
       const closeBtn = document.getElementById("modal-close-btn");
       if (closeBtn) closeBtn.addEventListener("click", () => modal.close());
-      const fc = document.getElementById("btn-freeform-cancel");
-      if (fc) fc.addEventListener("click", () => modal.close());
       const tc = document.getElementById("btn-template-cancel");
       if (tc) tc.addEventListener("click", () => modal.close());
-      const tabFree = document.getElementById("tab-freeform");
-      const tabTpl = document.getElementById("tab-template");
-      if (tabFree) tabFree.addEventListener("click", () => { switchModalTab("freeform"); hideConvInfoBanner(); });
-      if (tabTpl) tabTpl.addEventListener("click", () => { switchModalTab("template"); hideConvInfoBanner(); });
+      const sel = document.getElementById("template-select");
+      if (sel) sel.addEventListener("change", () => { hideConvInfoBanner(); onTemplateChosen(); });
 
-      const cw = document.getElementById("btn-check-window");
-      if (cw) cw.addEventListener("click", async () => {
-        const inp = document.getElementById("freeform-e164");
-        const e164 = inp ? (inp.value || "").trim() : "";
-        if (!e164) { showConvInfoBanner("Enter a WhatsApp number first.", "warn"); return; }
-        const d = await fetchWindow(e164);
-        if (!d) { showConvInfoBanner("Could not check window for this number.", "error"); return; }
-        if (d.inside_24h_window) {
-          const s = d.window_closes_at_unix_ts ? Math.max(0, d.window_closes_at_unix_ts - Math.floor(Date.now()/1000)) : 0;
-          showConvInfoBanner(`✅ Inside 24h window — closes in ${s ? formatDuration(s) : "~24h"}. Freeform send is permitted.`, "ok");
-        } else {
-          showConvInfoBanner("⚠ Outside 24h window — freeform will be rejected. Switch to Approved Meta Template tab.", "warn");
-          setTimeout(() => switchModalTab("template"), 700);
-        }
-      });
-
-      const sendFree = document.getElementById("btn-freeform-send");
-      if (sendFree) sendFree.addEventListener("click", async () => {
-        const einp = document.getElementById("freeform-e164");
-        const tinp = document.getElementById("freeform-text");
-        const e164 = einp ? (einp.value || "").trim() : "";
-        const text = tinp ? (tinp.value || "").trim() : "";
-        if (!e164) { showConvInfoBanner("WhatsApp number required.", "warn"); return; }
-        if (!text) { showConvInfoBanner("Message text required.", "warn"); return; }
-        sendFree.disabled = true;
-        if (fs) fs.textContent = "Sending…";
-        try {
-          const resp = await inboxFetch("/api/inbox/new-conversation", {
-            method: "POST",
-            body: { mode: "auto", e164, text },
-          });
-          const data = await resp.json().catch(() => ({}));
-          if (resp.status === 422 && data && data.inside_24h_window === false) {
-            showConvInfoBanner("Outside 24h window — please pick a template instead.", "warn");
-            const te164 = document.getElementById("template-e164");
-            if (te164) te164.value = e164;
-            switchModalTab("template");
-          } else if (resp.ok && data && data.success) {
-            if (fs) fs.textContent = "✓ Sent";
-            const tplE164 = data.e164 || e164;
-            modal.close();
-            window.location.href = `/inbox/chats#${encodeURIComponent(tplE164)}`; if (window.location.pathname === "/inbox/chats") window.location.reload();
-          } else {
-            showConvInfoBanner(`Failed: ${data && data.detail ? data.detail : resp.status}`, "error");
-          }
-        } catch (err) {
-          showConvInfoBanner(`Network error: ${err && err.message ? err.message : err}`, "error");
-        } finally {
-          sendFree.disabled = false;
-        }
+      const refreshBtn = document.getElementById("btn-template-refresh");
+      if (refreshBtn) refreshBtn.addEventListener("click", async () => {
+        refreshBtn.disabled = true; if (ts) ts.textContent = "Syncing templates from Meta…";
+        await ensureTemplates(true);
+        populateTemplateDropdown();
+        refreshBtn.disabled = false;
+        if (_tplError) { showConvInfoBanner(_tplError, "error"); if (ts) ts.textContent = ""; }
+        else { hideConvInfoBanner(); if (ts) ts.textContent = `✓ ${_tplList.length} approved template${_tplList.length === 1 ? "" : "s"} synced`; }
       });
 
       const sendTpl = document.getElementById("btn-template-send");
       if (sendTpl) sendTpl.addEventListener("click", async () => {
-        const sel = document.getElementById("template-select");
         const einp = document.getElementById("template-e164");
-        const templateName = sel ? sel.value : "";
-        const e164 = einp ? (einp.value || "").trim() : "";
-        if (!templateName) { showConvInfoBanner("Pick a template first.", "warn"); return; }
-        if (!e164) { showConvInfoBanner("WhatsApp number required.", "warn"); return; }
-        const tpl = (_cachedTemplates || []).find(t => t.name === templateName);
-        const lang = (tpl && tpl.language && (typeof tpl.language === "string" ? tpl.language : tpl.language.code)) || "en";
+        const t = currentTemplate();
+        const e164 = digitsOnly(einp ? einp.value : "");
+        if (!t) { showConvInfoBanner("Pick a template first.", "warn"); return; }
+        if (e164.length < 8) { showConvInfoBanner("Enter the WhatsApp number with its country code, e.g. +65 9123 4567.", "warn"); return; }
         const paramMap = {};
-        const inputs = document.querySelectorAll("#template-params .tpl-param");
-        inputs.forEach(inp => {
-          const name = inp.getAttribute("data-param-name") || inp.name || "";
-          const key = name.replace(/^param_/, "");
-          paramMap[key] = (inp.value || "").trim();
+        let missing = false;
+        document.querySelectorAll("#template-params .tpl-param").forEach(inp => {
+          const v = (inp.value || "").trim();
+          if (!v) missing = true;
+          paramMap[inp.getAttribute("data-param-name")] = v;
         });
+        if (missing) { showConvInfoBanner("Fill in every template variable.", "warn"); return; }
+        hideConvInfoBanner();
         sendTpl.disabled = true;
         if (ts) ts.textContent = "Sending template…";
         try {
           const resp = await inboxFetch("/api/inbox/send-template", {
             method: "POST",
-            body: { template_name: templateName, language: lang, e164, params: paramMap },
+            body: { template_name: t.name, language: tplLang(t), e164, params: paramMap },
           });
           const data = await resp.json().catch(() => ({}));
           if (resp.ok && data && data.success) {
             if (ts) ts.textContent = "✓ Template sent";
             if (typeof window.appendTemplateBubble === "function") {
-              window.appendTemplateBubble(e164, templateName, lang, paramMap, "human");
+              window.appendTemplateBubble(e164, t.name, tplLang(t), paramMap, "human");
             }
             modal.close();
-            if (document.getElementById("message-stack")) {
-            } else {
-              window.location.href = `/inbox/chats#${encodeURIComponent(e164)}`; if (window.location.pathname === "/inbox/chats") window.location.reload();
+            if (!document.getElementById("message-stack")) {
+              // the chat was saved before this answer came back, so it is in the list now: open it
+              window.location.hash = encodeURIComponent(e164);
+              window.location.reload();
             }
           } else {
-            showConvInfoBanner(`Failed: ${data && data.detail ? data.detail : resp.status}`, "error");
+            if (ts) ts.textContent = "";
+            showConvInfoBanner(`Not sent: ${(data && (data.detail || data.error)) || ("error " + resp.status)}`, "error");
           }
         } catch (err) {
+          if (ts) ts.textContent = "";
           showConvInfoBanner(`Network error: ${err && err.message ? err.message : err}`, "error");
         } finally {
           sendTpl.disabled = false;
@@ -1155,15 +1070,15 @@
       });
     }
 
-    const tpl = await ensureTemplates(false);
-    populateTemplateDropdown(tpl || []);
-
     if (typeof modal.showModal === "function") {
-      modal.showModal();
+      if (!modal.open) modal.showModal();
     } else {
       modal.setAttribute("open", "");
       modal.style.display = "block";
     }
+    await ensureTemplates(false);
+    populateTemplateDropdown();
+    if (_tplError) showConvInfoBanner(_tplError, "error");
   };
 
   // Make fetchWindow available globally for any page that needs it

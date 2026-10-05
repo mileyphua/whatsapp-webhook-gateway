@@ -76,3 +76,20 @@ class ScriptSendsAttachments(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class NewConversationScript(unittest.TestCase):
+    """The New Conversation modal once called an undefined helper, so picking a template threw and no variable fields appeared."""
+    def setUp(self):
+        import os
+        js = open(os.path.join(os.path.dirname(__file__), "..", "petrobind_frontend_app", "static", "app.js")).read()
+        self.modal = js[js.index("let _tplList"):js.index("// Make fetchWindow available globally")]
+
+    def test_modal_script_only_uses_helpers_it_defines(self):
+        self.assertIn("const tplEsc", self.modal)
+        self.assertNotIn("escapeHtml(", self.modal)
+
+    def test_modal_script_has_no_freeform_path(self):
+        for gone in ("/api/inbox/new-conversation", "freeform", "mode: \"auto\""):
+            self.assertNotIn(gone, self.modal)
+        self.assertIn("/api/inbox/send-template", self.modal)
