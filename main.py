@@ -318,9 +318,33 @@ def _sb_enabled() -> bool:
     return bool(_sb is not None and _sb.ENABLED)  # type: ignore[attr-defined]
 
 
+def _ensure_local_snapshot(e164: str, skip_last_user_text: str = "", skip_last_assistant_text: str = "") -> None:
+    """Local development only (no Supabase): the first time a chat is stored locally, copy what the AI already
+    remembers of it, so the thread shows the older conversation and then every new message once (not twice)."""
+    if not e164 or _sb.local_outbound_messages(e164):
+        return
+    sess = _find_session_by_number(e164)
+    if sess is None:
+        return
+    turns = [m for m in sess.history if m.get("role") in ("user", "assistant") and m.get("content")]
+    if turns and skip_last_user_text and turns[-1]["role"] == "user" and str(turns[-1]["content"]) == skip_last_user_text:
+        turns = turns[:-1]    # the AI layer already recorded the message that is being stored right now
+    if turns and skip_last_assistant_text and turns[-1]["role"] == "assistant" and str(turns[-1]["content"]) == skip_last_assistant_text:
+        turns = turns[:-1]
+    when = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(sess.last_activity_ts or time.time()))
+    for m in turns:
+        _sb._store_local(e164=e164, direction="buyer" if m["role"] == "user" else "ai", text=str(m["content"]), created_at=when)
+
+
 async def _persist_inbound_safe(msg: Dict[str, Any]) -> None:
     """Fire-and-forget persistence hook; 2 s timeout, 1 WARN line, never raises."""
     if not _sb_enabled():
+        # local development: keep the buyer's message so the inbox shows it (see _ensure_local_snapshot)
+        try:
+            _ensure_local_snapshot(str(msg.get("from") or ""), skip_last_user_text=_sb.describe_inbound(msg)["text"])
+            await _sb.insert_inbound_message(msg)
+        except Exception as exc:
+            print(f"[PERSIST-WARN] local inbound store failed: {type(exc).__name__}: {exc!s}")
         return
     try:
         await asyncio.wait_for(_sb.insert_inbound_message(msg), timeout=2.0)  # wait_for works on every Python version
@@ -351,6 +375,7 @@ async def _persist_outbound_safe(
     if not _sb_enabled():
         # local development: keep it in the in-process store so the inbox shows it (a no-op in tests that stub _sb)
         try:
+            _ensure_local_snapshot(e164, skip_last_assistant_text=text)
             await _sb.insert_outbound_message(e164=e164, direction=direction, text=text, reply_to_wamid=reply_to_wamid,
                                               sent_id_from_graph=sent_id_from_graph, errored=errored, error_detail=error_detail,
                                               sent_by=sent_by, media_type=media_type, media_meta=media_meta)
@@ -2420,15 +2445,17 @@ async def _history_chats() -> List[Dict[str, Any]]:
             row = {"e164": digits, "inquiry_jsonb": {}, "lead_notified": False, "handoff_notified": False,
                    "claim_held_by": ((await _sb.claim_is_human_held(digits)) or {}).get("held_by"), "claim_expires_at": None}
             rows.append(row); by_digits[digits] = row
-        elif str(last["created_at"]) <= str(row.get("last_message_at") or ""):
-            continue
-        row.update({"last_message_at": last["created_at"], "last_message_is_buyer": False, "last_direction": last["direction"],
-                    "last_message_text": str(last["text"])[:200], "last_message_created_at": last["created_at"]})
+        row.update({"last_message_at": last["created_at"], "last_message_is_buyer": last["direction"] == "buyer", "last_direction": last["direction"],
+                    "last_message_text": str(last["text"] or (_sb.media_placeholder(last.get("media_type"), last.get("filename")) if last.get("media_type") else ""))[:200],
+                    "last_message_created_at": last["created_at"]})
     rows.sort(key=lambda r: r["last_message_at"], reverse=True)
     return _unique_by_number(rows)
 
 
 async def _history_thread(e164: str) -> List[Dict[str, Any]]:
+    local = _sb.local_outbound_messages(e164)
+    if local:
+        return local          # already includes the older AI-remembered turns (see _ensure_local_snapshot)
     sess = None
     for cand in conversation_store.all_sessions():
         if cand.phone_number == e164:
@@ -2457,9 +2484,6 @@ async def _history_thread(e164: str) -> List[Dict[str, Any]]:
             "created_at": created,
             "errored": False,
         })
-    local = _sb.local_outbound_messages(e164)
-    if local:
-        out = sorted(out + local, key=lambda r: str(r.get("created_at") or ""))  # stable: same-time AI turns keep their order
     return out
 
 
@@ -2695,6 +2719,55 @@ async def _claim_gate_for_send(e164: str, my_session_id: str, my_name: str) -> O
         except Exception as exc:
             print(f"[INBOX] pre-send claim acquire best-effort failed: {exc!r}")
     return None
+
+
+_MEDIA_ID_RE = __import__("re").compile(r"^[A-Za-z0-9_-]{5,100}$")
+_MEDIA_HOSTS = (".fbsbx.com", ".whatsapp.net", ".facebook.com", ".fbcdn.net")
+_MEDIA_INLINE = {"image/jpeg", "image/png", "image/webp", "image/gif", "application/pdf"}
+MAX_PROXY_MEDIA_BYTES = 25 * 1024 * 1024
+
+
+@app.get("/api/inbox/media/{media_id}")
+async def api_inbox_media(media_id: str, request: Request) -> Response:
+    """Show a photo / voice note / document (received or sent) in the inbox. The server fetches it from WhatsApp with
+    the access token, so the token never reaches the browser; only logged-in team members can call this."""
+    from urllib.parse import urlparse
+    fail = _requires_inbox_bearer(request)
+    if fail:
+        return fail
+    if not _MEDIA_ID_RE.match(media_id or ""):
+        return JSONResponse(content={"detail": "invalid media id"}, status_code=400)
+    if not ACCESS_TOKEN:
+        return JSONResponse(content={"detail": "WHATSAPP_ACCESS_TOKEN is not set on the server"}, status_code=503)
+    auth = {"Authorization": f"Bearer {ACCESS_TOKEN}"}
+    try:
+        async with httpx.AsyncClient(timeout=30.0, follow_redirects=False) as client:
+            m = await client.get(f"https://graph.facebook.com/{API_VERSION}/{media_id}", headers=auth)
+            if m.status_code in (400, 404):
+                return JSONResponse(content={"detail": "This file is no longer available from WhatsApp (files expire after about 30 days)."}, status_code=404)
+            if not (200 <= m.status_code < 300):
+                return JSONResponse(content={"detail": f"WhatsApp refused the file request ({m.status_code})."}, status_code=502)
+            meta = m.json() if m.content else {}
+            url = str((meta or {}).get("url") or "")
+            host = (urlparse(url).hostname or "").lower()
+            if urlparse(url).scheme != "https" or not any(host.endswith(sfx) for sfx in _MEDIA_HOSTS):
+                return JSONResponse(content={"detail": "WhatsApp returned an unexpected file address."}, status_code=502)
+            if int(meta.get("file_size") or 0) > MAX_PROXY_MEDIA_BYTES:
+                return JSONResponse(content={"detail": "This file is too large to preview here."}, status_code=413)
+            f = await client.get(url, headers=auth)
+            if not (200 <= f.status_code < 300):
+                return JSONResponse(content={"detail": f"Could not download the file ({f.status_code})."}, status_code=502)
+            data = f.content
+    except Exception as exc:
+        return JSONResponse(content={"detail": f"Could not reach WhatsApp: {type(exc).__name__}"}, status_code=502)
+    if len(data) > MAX_PROXY_MEDIA_BYTES:
+        return JSONResponse(content={"detail": "This file is too large to preview here."}, status_code=413)
+    ctype = str(f.headers.get("content-type") or meta.get("mime_type") or "application/octet-stream")
+    base = ctype.split(";")[0].strip().lower()
+    inline = base in _MEDIA_INLINE or base.startswith("audio/") or base.startswith("video/")
+    headers = {"Cache-Control": "private, max-age=3600", "X-Content-Type-Options": "nosniff",
+               "Content-Disposition": "inline" if inline else "attachment"}
+    return Response(content=data, media_type=ctype if inline else "application/octet-stream", headers=headers)
 
 
 @app.post("/api/inbox/chats/{e164}/attachments")

@@ -420,14 +420,27 @@
       const quoteHtml = quoteText
         ? `<div class="mb-1 pl-2 border-l-4 border-black/20 text-xs text-gray-600 line-clamp-2 break-words">${escapeHtml(String(quoteText).slice(0, 200))}</div>`
         : "";
-      const attHtml = attachment
-        ? `<div class="attachment-chip mt-1 inline-flex items-center gap-1.5 px-2 py-1 rounded-md bg-white/70 border border-black/10 text-xs text-gray-800"><span aria-hidden="true">${attachment.kind === "image" ? "🖼" : "📄"}</span><span class="break-all">${escapeHtml(attachment.name || "")}</span></div>` +
-          (attachment.previewUrl ? `<img src="${attachment.previewUrl}" alt="" class="mt-1 max-h-48 rounded-lg">` : "")
-        : "";
+      const mediaUrl = attachment && attachment.mediaId ? "/api/inbox/media/" + encodeURIComponent(attachment.mediaId) : "";
+      let attHtml = "";
+      if (attachment) {
+        if (mediaUrl && attachment.kind === "image") {
+          attHtml = `<a href="${mediaUrl}" target="_blank" rel="noopener" class="block mt-1"><img src="${mediaUrl}" alt="${escapeHtml(attachment.name || "Photo")}" loading="lazy" class="max-h-64 max-w-full rounded-lg bg-white/60"></a>`;
+        } else if (mediaUrl && attachment.kind === "audio") {
+          attHtml = `<audio controls preload="none" src="${mediaUrl}" class="mt-1 max-w-full"></audio>`;
+        } else if (mediaUrl && attachment.kind === "video") {
+          attHtml = `<video controls preload="none" src="${mediaUrl}" class="mt-1 max-h-64 max-w-full rounded-lg"></video>`;
+        } else {
+          const chip = `<span aria-hidden="true">${attachment.kind === "image" ? "🖼" : "📄"}</span><span class="break-all">${escapeHtml(attachment.name || "")}</span>`;
+          attHtml = mediaUrl
+            ? `<a href="${mediaUrl}" target="_blank" rel="noopener" class="attachment-chip mt-1 inline-flex items-center gap-1.5 px-2 py-1 rounded-md bg-white/70 border border-black/10 text-xs text-gray-800 hover:bg-white">${chip}</a>`
+            : `<div class="attachment-chip mt-1 inline-flex items-center gap-1.5 px-2 py-1 rounded-md bg-white/70 border border-black/10 text-xs text-gray-800">${chip}</div>`;
+          if (attachment.previewUrl) attHtml += `<img src="${attachment.previewUrl}" alt="" class="mt-1 max-h-48 rounded-lg">`;
+        }
+      }
       bubble.innerHTML =
         label +
         quoteHtml +
-        `<div class="whitespace-pre-wrap break-words">${escapeHtml(text || "")}</div>` +
+        ((text || !attachment) ? `<div class="whitespace-pre-wrap break-words">${escapeHtml(text || "")}</div>` : "") +
         attHtml +
         erroredHtml +
         `<div class="mt-1 flex items-center justify-end gap-2">
@@ -478,15 +491,34 @@
     function showServerMessage(m) {
       if (m == null || m.id == null) return;
       const id = String(m.id);
-      const known = Array.from(stack.querySelectorAll("[data-msg-id]")).some(function (n) { return n.getAttribute("data-msg-id") === id; });
-      if (known) return;
+      const knownEl = Array.from(stack.querySelectorAll("[data-msg-id]")).find(function (n) { return n.getAttribute("data-msg-id") === id; });
+      if (knownEl) { updateTicks(knownEl, m); return; }
       if (m.direction === "human") {
         const opt = Array.from(stack.querySelectorAll("[data-optimistic]")).find(function (n) { return n.getAttribute("data-text") === (m.text || ""); });
         if (opt) opt.remove();
       }
       appendBubble({ direction: m.direction, text: m.text, held_by: m.held_by, created_at: m.created_at, id: m.id, wamid: m.wamid || "", reply_to_wamid: m.reply_to_wamid || "",
-        attachment: m.media_type ? { kind: m.media_type, name: m.filename || (m.media_type === "image" ? "Photo" : "Document") } : null });
+        attachment: m.media_type ? { kind: m.media_type, name: m.filename || (m.media_type === "image" ? "Photo" : "Document"), mediaId: m.media_id || "" } : null });
+      const added = stack.querySelector('[data-msg-id="' + id.replace(/"/g, "") + '"]');
+      if (added) updateTicks(added, m);
       if (m.direction === "buyer") pollWindowStatus(E164);
+    }
+    // WhatsApp-style delivery marks on messages we sent: ✓ sent, ✓✓ delivered, ✓✓ read (blue), failed
+    function updateTicks(el, m) {
+      if (!m || m.direction === "buyer") return;
+      const st = m.meta_statuses_jsonb || {};
+      const label = st.read ? "✓✓ read" : st.delivered ? "✓✓ delivered" : st.sent ? "✓ sent" : st.failed ? "failed" : "";
+      if (!label) return;
+      let t = el.querySelector(".msg-ticks");
+      if (!t) {
+        t = document.createElement("div");
+        t.className = "msg-ticks mt-1 text-[10px] text-right font-mono";
+        const bubble = el.querySelector(".message-bubble");
+        if (bubble) bubble.appendChild(t);
+      }
+      t.textContent = label;
+      t.classList.toggle("text-blue-500", !!st.read);
+      t.classList.toggle("text-gray-400", !st.read);
     }
     async function pollThread() {
       try {

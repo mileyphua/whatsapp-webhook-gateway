@@ -120,17 +120,24 @@
           {% if m.reply_to_wamid and qmap.d.get(m.reply_to_wamid) %}
           <div class="mb-1 pl-2 border-l-4 border-black/20 text-xs text-gray-600 line-clamp-2 break-words">{{ qmap.d.get(m.reply_to_wamid) }}</div>
           {% endif %}
-          <div class="whitespace-pre-wrap break-words">{{ m.text or '📎 [non-text media — see raw payload]' }}</div>
+          {% if m.text or not m.media_type %}<div class="whitespace-pre-wrap break-words">{{ m.text or '📎 [non-text media — see raw payload]' }}</div>{% endif %}
           {% if m.media_type %}
-          <div class="attachment-chip mt-1 inline-flex items-center gap-1.5 px-2 py-1 rounded-md bg-white/70 border border-black/10 text-xs text-gray-800">
-            <span aria-hidden="true">{{ '🖼' if m.media_type == 'image' else '📄' }}</span><span class="break-all">{{ m.filename or ('Photo' if m.media_type == 'image' else 'Document') }}</span>
-          </div>
-          {% endif %}
-
-          {% if m.media_type and m.media_url %}
-            <div class="mt-1.5 text-xs border-t {% if is_system %}border-amber-200{% else %}border-black/5{% endif %} pt-1 opacity-70">
-              📎 {{ m.media_type }}
-            </div>
+            {% set murl = ('/api/inbox/media/' ~ m.media_id) if m.media_id else '' %}
+            {% if murl and m.media_type == 'image' %}
+              <a href="{{ murl }}" target="_blank" rel="noopener" class="block mt-1"><img src="{{ murl }}" alt="{{ m.filename or 'Photo' }}" loading="lazy" class="max-h-64 max-w-full rounded-lg bg-white/60"></a>
+            {% elif murl and m.media_type == 'audio' %}
+              <audio controls preload="none" src="{{ murl }}" class="mt-1 max-w-full"></audio>
+            {% elif murl and m.media_type == 'video' %}
+              <video controls preload="none" src="{{ murl }}" class="mt-1 max-h-64 max-w-full rounded-lg"></video>
+            {% elif murl %}
+              <a href="{{ murl }}" target="_blank" rel="noopener" class="attachment-chip mt-1 inline-flex items-center gap-1.5 px-2 py-1 rounded-md bg-white/70 border border-black/10 text-xs text-gray-800 hover:bg-white">
+                <span aria-hidden="true">📄</span><span class="break-all">{{ m.filename or 'Document' }}</span>
+              </a>
+            {% else %}
+              <div class="attachment-chip mt-1 inline-flex items-center gap-1.5 px-2 py-1 rounded-md bg-white/70 border border-black/10 text-xs text-gray-800">
+                <span aria-hidden="true">{{ '🖼' if m.media_type == 'image' else '📄' }}</span><span class="break-all">{{ m.filename or ('Photo' if m.media_type == 'image' else 'Document') }}</span>
+              </div>
+            {% endif %}
           {% endif %}
 
           {% if m.errored %}
@@ -139,13 +146,9 @@
             </div>
           {% endif %}
 
-          {% if m.meta_statuses_jsonb %}
-            <div class="mt-1 text-[10px] text-gray-400 text-right font-mono">
-              {% set ns = namespace(first=true) %}
-              {% for s, t in (m.meta_statuses_jsonb or {}).items() %}
-                {% if not ns.first %} · {% endif %}{{ s }}{% set ns.first = false %}
-              {% endfor %}
-            </div>
+          {% set st = m.meta_statuses_jsonb or {} %}
+          {% if not is_buyer and st %}
+            <div class="msg-ticks mt-1 text-[10px] text-right font-mono {{ 'text-blue-500' if 'read' in st else 'text-gray-400' }}">{{ '✓✓ read' if 'read' in st else ('✓✓ delivered' if 'delivered' in st else ('✓ sent' if 'sent' in st else ('failed' if 'failed' in st else ''))) }}</div>
           {% endif %}
 
           <div class="mt-1 flex items-center justify-end gap-2 {% if is_system %}opacity-70{% endif %}">

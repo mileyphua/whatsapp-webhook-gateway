@@ -79,27 +79,28 @@ async def recent_wamid_mark(wamid: str) -> None:
 # ================================================================
 
 async def insert_inbound_message(msg: Dict[str, Any]) -> None:
+    d = describe_inbound(msg)
     if not ENABLED:
+        created = None
+        try:
+            created = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(int(msg["timestamp"]))) if msg.get("timestamp") else None
+        except Exception:
+            pass
+        _store_local(e164=str(msg.get("from") or ""), direction="buyer", text=d["text"], sent_id=msg.get("id"), media_type=d["media_type"],
+                     media_id=d["media_id"], mime=d["mime"], filename=d["filename"], created_at=created)
         return
     wamid = msg.get("id")
     from_e164 = msg.get("from")
     msg_type = msg.get("type")
-    text = None
-    media_url = None
-    if msg_type == "text":
-        text = (msg.get("text") or {}).get("body")
-    else:
-        blob = msg.get(msg_type) or {}
-        if isinstance(blob, dict):
-            text = blob.get("caption")
-            media_url = blob.get("link") or blob.get("id")
+    text = d["text"] or (media_placeholder(d["media_type"], d["filename"]) if d["media_type"] else None)
+    media_url = d["media_id"]
     payload_jsonb = {k: v for k, v in msg.items() if k not in {"id", "from", "type", "timestamp", "text"}}
     body = {
         "wamid": wamid,
         "direction": "buyer",
         "e164": from_e164,
         "text": text,
-        "media_type": msg_type if msg_type != "text" else None,
+        "media_type": d["media_type"] or (msg_type if msg_type not in ("text", "interactive", "button", "location", "contacts", "reaction") else None),
         "media_url": media_url,
         "payload_jsonb": payload_jsonb,
     }
@@ -150,7 +151,11 @@ def _save_local_outbound() -> None:
 
 
 def local_outbound_messages(e164: str) -> List[Dict[str, Any]]:
-    return [dict(m) for m in _LOCAL_OUTBOUND.get(_digits(e164), [])]
+    out = [dict(m) for m in _LOCAL_OUTBOUND.get(_digits(e164), [])]
+    for m in out:
+        if m.get("media_type") and m.get("text") in (media_placeholder(m["media_type"], m.get("filename")), f"📎 {m.get('filename')}"):
+            m["text"] = ""             # the file itself is shown; no filler line above it
+    return out
 
 
 def local_outbound_chats() -> Dict[str, Dict[str, Any]]:
@@ -158,22 +163,82 @@ def local_outbound_chats() -> Dict[str, Dict[str, Any]]:
     return {k: dict(v[-1]) for k, v in _LOCAL_OUTBOUND.items() if v}
 
 
-def _store_local_outbound(*, e164: str, direction: str, text: str, sent_id: Optional[str], errored: bool, error_detail: Optional[str],
-                          reply_to_wamid: Optional[str], sent_by: Optional[str], media_type: Optional[str],
-                          media_meta: Optional[Dict[str, Any]]) -> None:
+def media_placeholder(media_type: Optional[str], filename: Optional[str] = None) -> str:
+    """Readable stand-in text for a file without a caption (shown in the chat list; hidden inside the bubble)."""
+    return {"image": "📷 Photo", "audio": "🎤 Voice message", "video": "🎥 Video"}.get(media_type or "") or f"📄 {filename or 'Document'}"
+
+
+def describe_inbound(msg: Dict[str, Any]) -> Dict[str, Any]:
+    """What an inbound WhatsApp message looks like in the inbox: readable text for every message type, plus the
+    media id/filename/mime when it carries a file (so the thread can show the photo, voice note or document)."""
+    t = str(msg.get("type") or "")
+    blob = msg.get(t) if isinstance(msg.get(t), (dict, list)) else {}
+    out: Dict[str, Any] = {"text": "", "media_type": None, "media_id": None, "filename": None, "mime": None}
+    if t == "text":
+        out["text"] = (msg.get("text") or {}).get("body") or ""
+    elif t in ("image", "audio", "video", "document", "sticker"):
+        out["media_type"] = "image" if t == "sticker" else t
+        out["media_id"] = blob.get("id") or blob.get("link")
+        out["mime"] = blob.get("mime_type")
+        out["filename"] = blob.get("filename")
+        out["text"] = blob.get("caption") or ""
+    elif t == "button":
+        out["text"] = blob.get("text") or blob.get("payload") or ""
+    elif t == "interactive":
+        kind = blob.get("type")
+        pick = blob.get(kind) if kind else None
+        out["text"] = (pick or {}).get("title") or (pick or {}).get("id") or "[interactive reply]"
+    elif t == "location":
+        name = " – ".join(x for x in (blob.get("name"), blob.get("address")) if x)
+        out["text"] = f"📍 {name + ' ' if name else ''}({blob.get('latitude')}, {blob.get('longitude')})"
+    elif t == "contacts":
+        names = [((c.get("name") or {}).get("formatted_name") or "contact") for c in (blob if isinstance(blob, list) else [])]
+        out["text"] = "👤 Shared contact: " + ", ".join(names) if names else "👤 Shared contact"
+    elif t == "reaction":
+        out["text"] = blob.get("emoji") or "(reaction removed)"
+    else:
+        out["text"] = f"[{t or 'unknown'} message – not supported in the inbox]"
+    return out
+
+
+def _store_local(*, e164: str, direction: str, text: str, sent_id: Optional[str] = None, errored: bool = False,
+                 error_detail: Optional[str] = None, reply_to_wamid: Optional[str] = None, sent_by: Optional[str] = None,
+                 media_type: Optional[str] = None, media_meta: Optional[Dict[str, Any]] = None, media_id: Optional[str] = None,
+                 mime: Optional[str] = None, filename: Optional[str] = None, created_at: Optional[str] = None) -> None:
     key = _digits(e164)
     if not key:
         return
+    meta = media_meta or {}
     rows = _LOCAL_OUTBOUND.setdefault(key, [])
     rows.append({
         "id": f"local-{key}-{len(rows) + 1}-{int(time.time() * 1000)}", "wamid": sent_id or "", "sent_id_from_graph": sent_id,
-        "direction": direction if direction in ("ai", "human", "system") else "system", "e164": key, "text": text,
-        "reply_to_wamid": reply_to_wamid, "media_type": media_type, "filename": (media_meta or {}).get("filename"),
-        "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "errored": errored, "error_detail": error_detail,
-        "meta_statuses_jsonb": {}, "held_by": sent_by,
+        "direction": direction if direction in ("ai", "human", "system", "buyer") else "system", "e164": key, "text": text,
+        "reply_to_wamid": reply_to_wamid, "media_type": media_type, "media_id": media_id or meta.get("media_id"),
+        "mime": mime or meta.get("mime"), "filename": filename or meta.get("filename"),
+        "created_at": created_at or time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "errored": errored,
+        "error_detail": error_detail, "meta_statuses_jsonb": {}, "held_by": sent_by,
     })
     del rows[:-_LOCAL_MAX_PER_CHAT]
     _save_local_outbound()
+
+
+def _store_local_outbound(*, e164: str, direction: str, text: str, sent_id: Optional[str], errored: bool, error_detail: Optional[str],
+                          reply_to_wamid: Optional[str], sent_by: Optional[str], media_type: Optional[str],
+                          media_meta: Optional[Dict[str, Any]]) -> None:
+    _store_local(e164=e164, direction=direction, text=text, sent_id=sent_id, errored=errored, error_detail=error_detail,
+                 reply_to_wamid=reply_to_wamid, sent_by=sent_by, media_type=media_type, media_meta=media_meta)
+
+
+def local_mark_status(wamid: str, status_value: str, errors: Optional[str]) -> bool:
+    for rows in _LOCAL_OUTBOUND.values():
+        for r in rows:
+            if r.get("sent_id_from_graph") == wamid:
+                r.setdefault("meta_statuses_jsonb", {})[status_value] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+                if errors:
+                    r["errored"], r["error_detail"] = True, errors
+                _save_local_outbound()
+                return True
+    return False
 
 
 def _forget_local_outbound(variants: List[str]) -> None:
@@ -239,7 +304,11 @@ async def insert_outbound_message(
 
 async def mark_status(wamid: str, recipient_e164: str, status_value: str, errors: Optional[str] = None) -> None:
     """Update meta_statuses_jsonb on outbound rows when Graph sends a status."""
-    if not (ENABLED and wamid):
+    if not ENABLED:
+        if wamid:
+            local_mark_status(wamid, status_value, errors)
+        return
+    if not wamid:
         return
     patch = {
         "meta_statuses_jsonb": (
@@ -353,7 +422,7 @@ async def thread_messages(e164: str, limit: int = 200) -> List[Dict[str, Any]]:
                 "e164": f"eq.{e164}",
                 "order": "created_at.desc",
                 "limit": str(limit),
-                "select": "id,wamid,direction,e164,reply_to_wamid,text,media_type,created_at,sent_id_from_graph,errored,error_detail,meta_statuses_jsonb,payload_jsonb",
+                "select": "id,wamid,direction,e164,reply_to_wamid,text,media_type,media_url,created_at,sent_id_from_graph,errored,error_detail,meta_statuses_jsonb,payload_jsonb",
             },
         )
         if r.status_code >= 300:
@@ -365,8 +434,13 @@ async def thread_messages(e164: str, limit: int = 200) -> List[Dict[str, Any]]:
     for r in rows:   # show who on the team wrote a human message
         pj = r.get("payload_jsonb") or {}
         r["held_by"] = pj.get("sent_by")
-        if r.get("media_type") and not r.get("filename"):
-            r["filename"] = pj.get("filename")             # shown as the attachment name in the thread
+        if r.get("media_type"):
+            blob = pj.get(r["media_type"]) if isinstance(pj.get(r["media_type"]), dict) else {}
+            r["filename"] = r.get("filename") or pj.get("filename") or blob.get("filename")   # shown as the attachment name
+            r["media_id"] = pj.get("media_id") or r.get("media_url") or blob.get("id")         # lets the thread show the file itself
+            r["mime"] = pj.get("mime") or blob.get("mime_type")
+            if r.get("text") in (media_placeholder(r["media_type"], r.get("filename")), f"📎 {r.get('filename')}"):
+                r["text"] = ""                                 # the file itself is shown; no filler line above it
     rows.reverse()  # oldest first for the UI chat bubble stack
     return rows
 
