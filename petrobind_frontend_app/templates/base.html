@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>{% block title %}Petrobind Shared Inbox{% endblock %}</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+  tailwind.config = {
+    theme: {
+      extend: {
+        colors: {
+          pb: {
+            green: '#25D366',       /* WhatsApp green */
+            greenDark: '#128C7E',
+            navy: '#071A2F',
+            slateDark: '#111B21',
+            chatBg: '#ECE5DD',
+            panel: '#F0F2F5',
+            aiBubble: '#D9FDD3',
+            humanBubble: '#D1E7FF',
+            systemBubble: '#FEF3C7',
+          }
+        },
+        fontFamily: {
+          sans: ['-apple-system', 'BlinkMacSystemFont', 'Segoe UI', 'Roboto', 'Helvetica', 'Arial', 'sans-serif'],
+        }
+      }
+    }
+  }
+</script>
+<script src="https://unpkg.com/htmx.org@2.0.2"></script>
+{% if supa_url %}
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+{% endif %}
+<link rel="stylesheet" href="/inbox/static/app.css">
+<style>[hidden]{display:none!important} .embed .embed-hide{display:none} .embed #claim-banner{top:0}</style>
+<meta name="inbox-admin-name" content="{{ admin_name }}">
+<meta name="inbox-session-id" content="{{ session_id }}">
+</head>
+<body class="bg-gray-50 text-gray-900 antialiased h-screen flex flex-col overflow-hidden{% if embed %} embed{% endif %}">
+  {% if not embed %}
+  <header class="bg-pb-navy text-white px-6 py-3 flex items-center justify-between border-b border-gray-800 shadow-sm z-10">
+    <div class="flex items-center gap-3">
+      <div class="w-8 h-8 rounded-full bg-pb-green flex items-center justify-center font-bold text-pb-navy">P</div>
+      <div>
+        <div class="font-semibold leading-tight">Petrobind Global</div>
+        <div class="text-xs text-gray-400 leading-tight">Shared Inbox — WhatsApp + AI</div>
+      </div>
+    </div>
+    <div class="flex items-center gap-4">
+      <button type="button" id="ho-toggle" aria-haspopup="true" aria-expanded="false"
+              class="relative text-sm bg-gray-700 hover:bg-gray-600 text-white px-3 py-1.5 rounded-md transition">
+        Needs human <span id="ho-count" class="ml-1 inline-block min-w-[1.25rem] px-1.5 rounded-full bg-gray-500 text-center text-xs font-semibold">0</span>
+      </button>
+      <div class="text-sm text-gray-300">
+        Logged in as <span class="font-medium text-white">{{ admin_name }}</span>
+      </div>
+      <a href="/inbox/logout" class="text-sm bg-gray-700 hover:bg-gray-600 text-white px-3 py-1.5 rounded-md transition">
+        Logout
+      </a>
+    </div>
+  </header>
+  {% endif %}
+
+  {% if not embed %}
+  <!-- Human-handoff: banner for the open chat -->
+  <div id="ho-bar" hidden role="status" class="px-6 py-2 bg-red-600 text-white text-sm flex flex-wrap items-center justify-between gap-2"></div>
+  {% endif %}
+
+  {% block content %}{% endblock %}
+
+  {% if not embed %}
+  <!-- Human-handoff: "Needs human" tab (dropdown list) -->
+  <div id="ho-panel" hidden role="region" aria-label="Chats waiting for a human reply"
+       class="fixed top-14 right-4 z-40 w-[min(26rem,calc(100vw-2rem))] max-h-[70vh] overflow-y-auto rounded-lg bg-white text-gray-900 shadow-2xl border border-gray-200">
+    <div class="px-4 py-2.5 border-b border-gray-100 bg-gray-50 text-xs font-semibold uppercase tracking-wide text-gray-600">
+      Waiting for a human reply · most urgent first
+    </div>
+    <ul id="ho-list"></ul>
+  </div>
+
+  <!-- Human-handoff: popup when the AI hands a chat over -->
+  <div id="ho-popup" hidden role="alertdialog" aria-labelledby="ho-popup-title"
+       class="fixed bottom-4 right-4 z-50 w-[min(24rem,calc(100vw-2rem))] rounded-xl bg-white text-gray-900 shadow-2xl border-2 border-red-500 p-4">
+    <div id="ho-popup-title" class="font-semibold text-red-700">Human reply needed</div>
+    <div id="ho-popup-who" class="mt-1 text-sm font-medium"></div>
+    <div id="ho-popup-reason" class="text-xs text-gray-600 mt-0.5"></div>
+    <div class="mt-2 text-sm">Reply window closes in <span id="ho-popup-cd" class="font-mono font-bold"></span></div>
+    <div class="mt-3 flex justify-end gap-2">
+      <button type="button" id="ho-popup-dismiss" class="px-3 py-1.5 rounded border border-gray-300 text-sm">Later</button>
+      <a id="ho-popup-open" href="#" class="px-3 py-1.5 rounded bg-red-600 text-white text-sm font-medium">Reply now</a>
+    </div>
+  </div>
+
+  <script>
+  (function () {
+    var items = [], offset = 0, seenKey = "ho_seen", lastFetchOk = false;
+    var $ = function (id) { return document.getElementById(id); };
+    function seen() { try { return JSON.parse(sessionStorage.getItem(seenKey) || "[]"); } catch (e) { return []; } }
+    function markSeen(k) { var s = seen(); if (s.indexOf(k) < 0) s.push(k); try { sessionStorage.setItem(seenKey, JSON.stringify(s)); } catch (e) {} }
+    function key(i) { return i.e164 + "@" + i.since; }
+    function nowSec() { return Date.now() / 1000 + offset; }
+    function left(i) { return Math.floor(i.window_closes_at - nowSec()); }
+    function fmt(sec) {
+      if (sec <= 0) return "closed";
+      var h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
+      return (h < 10 ? "0" : "") + h + ":" + (m < 10 ? "0" : "") + m + ":" + (s < 10 ? "0" : "") + s;
+    }
+    function urgency(sec) { return sec <= 0 ? "WINDOW CLOSED – template only" : sec < 3600 ? "URGENT" : sec < 6 * 3600 ? "Soon" : "On track"; }
+    function who(i) { return i.display_name ? i.display_name + " · " + i.e164 : i.e164; }
+    function chatUrl(i) { return "/inbox/chats#" + encodeURIComponent(i.e164); }
+    function currentE164() {
+      var m = location.pathname.match(/\/inbox\/chat\/([^/]+)$/); if (m) return decodeURIComponent(m[1]);
+      if (location.pathname === "/inbox/chats" && location.hash.length > 1) return decodeURIComponent(location.hash.slice(1));
+      return null;
+    }
+    function norm(x) { return String(x || "").replace(/\D/g, ""); }
+
+    function resolve(i) {
+      fetch("/api/inbox/chats/" + encodeURIComponent(i.e164) + "/handoff/resolve", { method: "POST", credentials: "same-origin" })
+        .then(function () { load(); });
+    }
+
+    function render() {
+      $("ho-count").textContent = items.length;
+      $("ho-count").className = "ml-1 inline-block min-w-[1.25rem] px-1.5 rounded-full text-center text-xs font-semibold " + (items.length ? "bg-red-500" : "bg-gray-500");
+      var ul = $("ho-list"); ul.textContent = "";
+      if (!items.length) {
+        var li0 = document.createElement("li"); li0.className = "px-4 py-6 text-sm text-gray-500 text-center";
+        li0.textContent = "Nothing waiting. The AI is handling every chat."; ul.appendChild(li0);
+      }
+      items.forEach(function (i) {
+        var li = document.createElement("li"); li.className = "px-4 py-3 border-b border-gray-100";
+        var top = document.createElement("div"); top.className = "flex items-center justify-between gap-2";
+        var a = document.createElement("a"); a.href = chatUrl(i); a.className = "font-medium text-sm text-pb-navy hover:underline truncate"; a.textContent = who(i);
+        var cd = document.createElement("span"); cd.className = "font-mono text-sm font-bold"; cd.setAttribute("data-cd", key(i));
+        top.appendChild(a); top.appendChild(cd);
+        var st = document.createElement("div"); st.className = "text-[11px] font-semibold"; st.setAttribute("data-urg", key(i));
+        var msg = document.createElement("div"); msg.className = "text-xs text-gray-600 truncate";
+        msg.textContent = (i.last_message_from === "buyer" ? "Buyer: " : "AI: ") + (i.last_message_text || "");
+        var why = document.createElement("div"); why.className = "text-[11px] text-gray-500 truncate"; why.textContent = i.reason ? "Why: " + i.reason : "";
+        var act = document.createElement("div"); act.className = "mt-1.5 flex gap-3 text-xs";
+        var open = document.createElement("a"); open.href = chatUrl(i); open.className = "text-red-700 font-semibold hover:underline"; open.textContent = "Reply now";
+        var done = document.createElement("button"); done.type = "button"; done.className = "text-gray-500 hover:text-gray-800 underline"; done.textContent = "Mark handled";
+        done.addEventListener("click", function () { resolve(i); });
+        act.appendChild(open); act.appendChild(done);
+        [top, st, msg, why, act].forEach(function (n) { li.appendChild(n); });
+        ul.appendChild(li);
+      });
+      tick();
+    }
+
+    function tick() {
+      items.forEach(function (i) {
+        var sec = left(i), k = key(i);
+        var cd = document.querySelector('[data-cd="' + k + '"]'); if (cd) { cd.textContent = fmt(sec); cd.className = "font-mono text-sm font-bold " + (sec <= 0 ? "text-gray-500" : sec < 3600 ? "text-red-600" : sec < 6 * 3600 ? "text-amber-600" : "text-green-700"); }
+        var u = document.querySelector('[data-urg="' + k + '"]'); if (u) { u.textContent = urgency(sec); u.className = "text-[11px] font-semibold " + (sec <= 0 ? "text-gray-500" : sec < 3600 ? "text-red-600" : sec < 6 * 3600 ? "text-amber-600" : "text-green-700"); }
+      });
+      // banner for the chat currently open
+      var cur = currentE164(), bar = $("ho-bar"), mine = cur && items.filter(function (i) { return norm(i.e164) === norm(cur); })[0];
+      if (mine) {
+        var sec = left(mine);
+        bar.hidden = false; bar.textContent = "";
+        var t = document.createElement("span"); t.textContent = "The AI handed this chat to you. " + (sec > 0 ? "Reply window closes in " + fmt(sec) + "." : "The 24h window has closed – send an approved template.");
+        var b = document.createElement("button"); b.type = "button"; b.className = "underline text-sm"; b.textContent = "Mark handled";
+        b.addEventListener("click", function () { resolve(mine); });
+        bar.appendChild(t); bar.appendChild(b);
+      } else if (!bar.hidden) { bar.hidden = true; }
+      var pop = $("ho-popup"); if (!pop.hidden && pop.getAttribute("data-k")) {
+        var pi = items.filter(function (i) { return key(i) === pop.getAttribute("data-k"); })[0];
+        if (!pi) pop.hidden = true; else $("ho-popup-cd").textContent = fmt(left(pi));
+      }
+    }
+
+    function maybePopup() {
+      var cur = currentE164(), s = seen(), pop = $("ho-popup");
+      var fresh = items.filter(function (i) { return s.indexOf(key(i)) < 0 && !(cur && norm(i.e164) === norm(cur)); })[0];
+      if (!fresh || !pop.hidden) return;
+      markSeen(key(fresh));
+      pop.setAttribute("data-k", key(fresh)); pop.hidden = false;
+      $("ho-popup-who").textContent = who(fresh);
+      $("ho-popup-reason").textContent = fresh.reason || "The AI could not answer this safely.";
+      $("ho-popup-open").href = chatUrl(fresh);
+      $("ho-popup-cd").textContent = fmt(left(fresh));
+    }
+
+    function load() {
+      fetch("/api/inbox/handoffs", { credentials: "same-origin" }).then(function (r) { return r.ok ? r.json() : null; }).then(function (j) {
+        if (!j) return;
+        offset = j.now - Date.now() / 1000; items = j.handoffs || []; render(); maybePopup();
+      }).catch(function () {});
+    }
+
+    $("ho-toggle").addEventListener("click", function () {
+      var p = $("ho-panel"); p.hidden = !p.hidden; $("ho-toggle").setAttribute("aria-expanded", String(!p.hidden));
+    });
+    $("ho-popup-dismiss").addEventListener("click", function () { $("ho-popup").hidden = true; });
+    document.addEventListener("keydown", function (e) { if (e.key === "Escape") { $("ho-panel").hidden = true; $("ho-popup").hidden = true; } });
+    window.addEventListener("hashchange", function () { tick(); }); load(); setInterval(function () { if (!document.hidden) load(); }, 5000); setInterval(tick, 1000);
+  })();
+  </script>
+  {% endif %}
+
+  <script src="/inbox/static/app.js"></script>
+</body>
+</html>

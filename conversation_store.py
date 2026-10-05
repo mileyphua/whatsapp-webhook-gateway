@@ -112,6 +112,13 @@ class ConversationSession:
     booking_details: Dict[str, Any] = field(default_factory=dict)  # raw Cal.com payload fields
     booking_followup_sent_at: Optional[float] = None  # dedup: only send 1 follow-up nudge
 
+    # --- Human-handoff queue (shared inbox) ---
+    # last_buyer_ts: when the buyer last wrote (WhatsApp's 24h reply window runs from it).
+    # needs_human_since: set when the AI hands the chat to a human; cleared when a human replies/resolves.
+    last_buyer_ts: Optional[float] = None
+    needs_human_since: Optional[float] = None
+    needs_human_reason: str = ""
+
     # --- Inquiry follow-up state (Part 3.3 idle-session nudge) ---
     inquiry_followup_sent_at: Optional[float] = None  # dedup: 1 quote-request nudge max
 
@@ -122,6 +129,7 @@ class ConversationSession:
         self.last_activity_ts = time.time()
         if role == "user":
             self.message_count += 1
+            self.last_buyer_ts = self.last_activity_ts
 
     def relationship_summary(self) -> str:
         """Human-readable buyer-memory line, e.g. '4th message, first contacted
@@ -166,6 +174,9 @@ class ConversationSession:
 
 _SESSIONS: Dict[str, ConversationSession] = {}
 
+_PROCESS_START_TS: float = time.time()
+_last_redis_full_scan_ts: Optional[float] = None
+
 
 def _redis_key(phone_number: str) -> str:
     return f"session:{phone_number}"
@@ -208,20 +219,44 @@ async def save_session(session: ConversationSession) -> None:
     (after mutations are done), not after every individual field change —
     cheap enough to call generously, but doesn't need to be in the hot path
     of every attribute assignment. Best-effort: never raises, a save
-    failure just means the NEXT successful save catches up the state."""
-    if not (_REDIS_URL and _REDIS_TOKEN):
-        return
+    failure just means the NEXT successful save catches up the state.
+
+    Additive (no breaking change): also mirrors a compact snapshot of the
+    session to Supabase.sessions (for the shared-inbox UI's v_inbox_chat_list
+    view). Supabase mirror runs in a fire-and-forget asyncio task — it is
+    never awaited, never blocks the caller, never raises to the caller."""
+    if _REDIS_URL and _REDIS_TOKEN:
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.post(
+                    f"{_REDIS_URL}/set/{_redis_key(session.phone_number)}",
+                    headers={"Authorization": f"Bearer {_REDIS_TOKEN}"},
+                    params={"EX": str(_REDIS_TTL_SECONDS)},
+                    content=_serialize(session),
+                )
+            resp.raise_for_status()
+        except Exception as exc:  # pragma: no cover - best-effort, never block a reply
+            print(f"[conversation_store] Redis save failed for {session.phone_number!r}: {exc!r}")
+    # --- Supabase mirror (additive, fire-and-forget) ---
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.post(
-                f"{_REDIS_URL}/set/{_redis_key(session.phone_number)}",
-                headers={"Authorization": f"Bearer {_REDIS_TOKEN}"},
-                params={"EX": str(_REDIS_TTL_SECONDS)},
-                content=_serialize(session),
-            )
-        resp.raise_for_status()
-    except Exception as exc:  # pragma: no cover - best-effort, never block a reply
-        print(f"[conversation_store] Redis save failed for {session.phone_number!r}: {exc!r}")
+        import asyncio as _aiom
+        import supabase_client as _sc
+        if not _sc.ENABLED:
+            return
+        _aiom.create_task(_sc.mirror_session(
+            e164=session.phone_number,
+            inquiry_dict=asdict(session.inquiry),
+            history_list=list(session.history[-200:]),
+            is_new_prospect=session.inquiry.is_new_prospect,
+            lead_notified=bool(session.lead_notified),
+            handoff_notified=bool(session.handoff_notified),
+            booking_intent_notified=bool(session.booking_intent_notified),
+            booking_link_shared_at_ts=session.booking_link_shared_at,
+            followup_nudge_1_ts=session.booking_followup_sent_at,
+            followup_nudge_2_ts=session.inquiry_followup_sent_at,
+        ))
+    except Exception as exc:  # pragma: no cover - mirror is a "nice to have"
+        print(f"[conversation_store] Supabase mirror save skipped for {session.phone_number!r}: {type(exc).__name__}: {exc!s}")
 
 
 async def get_session(phone_number: str) -> ConversationSession:
@@ -250,6 +285,102 @@ def all_sessions() -> List[ConversationSession]:
     Only sees sessions already loaded into this process's cache — see the
     module docstring's "Known limitation" note."""
     return list(_SESSIONS.values())
+
+
+async def redis_scan_all_sessions(limit: int = 5000, *, force: bool = False) -> int:
+    """Full Redis keyspace scan to hydrate this process's in-memory _SESSIONS
+    cache with every persisted session (not just ones this process has seen
+    via get_session since last restart).
+
+    Safety guarantees:
+    - 3-hour guard: skips re-scan if now()-_last_redis_full_scan_ts < 10800
+      UNLESS _last_redis_full_scan_ts is None (never scanned) OR process
+      started <10s ago (startup hydrate) OR force=True (admin override).
+    - force=True (admin ops console): bypass the 3h guard AND the 10s
+      post-startup guard.  Used by POST /api/inbox/admin/force-redis-scan so
+      a human can re-hydrate immediately after a manual data repair on
+      Redis keys without waiting 3 hours.
+    - Wraps entire scan in try/except: Redis/network/parse failure prints
+      ONE WARN line, returns 0 added, never raises (no crash).
+    - Each individual key load is wrapped in its own try/except so one
+      corrupt/partial row doesn't abort the rest of the scan.
+    - Uses /scan cursor loop (Upstash REST API); falls back to
+      GET /keys/session:* if /scan returns 404 (older/non-Upstash compat).
+
+    Returns count of sessions newly added to _SESSIONS (not overwriting
+    already-cached ones — those are presumed more recent)."""
+    global _last_redis_full_scan_ts
+    now = time.time()
+    if not force and (
+        _last_redis_full_scan_ts is not None
+        and (now - _last_redis_full_scan_ts) < 10800
+        and (now - _PROCESS_START_TS) >= 10
+    ):
+        return 0
+    if not (_REDIS_URL and _REDIS_TOKEN):
+        _last_redis_full_scan_ts = now
+        return 0
+    added = 0
+    try:
+        keys: List[str] = []
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            cursor = "0"
+            use_scan = True
+            while True:
+                if use_scan:
+                    try:
+                        resp = await client.get(
+                            f"{_REDIS_URL}/scan",
+                            headers={"Authorization": f"Bearer {_REDIS_TOKEN}"},
+                            params={"cursor": cursor, "match": "session:*", "count": "500"},
+                        )
+                        if resp.status_code == 404:
+                            use_scan = False
+                            continue
+                        resp.raise_for_status()
+                        data = resp.json().get("result", [])
+                        if isinstance(data, list) and len(data) == 2:
+                            next_cursor, batch_keys = data[0], data[1]
+                        else:
+                            next_cursor, batch_keys = "0", []
+                        if isinstance(batch_keys, list):
+                            keys.extend(batch_keys)
+                        cursor = next_cursor
+                        if cursor in (None, "0", 0) or len(keys) >= limit:
+                            break
+                    except Exception:
+                        use_scan = False
+                        continue
+                else:
+                    resp = await client.get(
+                        f"{_REDIS_URL}/keys/session:*",
+                        headers={"Authorization": f"Bearer {_REDIS_TOKEN}"},
+                    )
+                    resp.raise_for_status()
+                    raw = resp.json().get("result") or []
+                    if isinstance(raw, list):
+                        keys.extend(raw)
+                    break
+            if len(keys) > limit:
+                keys = keys[:limit]
+        for key in keys:
+            try:
+                if not isinstance(key, str) or not key.startswith("session:"):
+                    continue
+                phone = key[len("session:"):]
+                if not phone or phone in _SESSIONS:
+                    continue
+                sess = await _redis_load(phone)
+                if sess is not None:
+                    _SESSIONS[phone] = sess
+                    added += 1
+            except Exception as row_exc:
+                print(f"[conversation_store] redis_scan bad row {key!r}: {row_exc!r}")
+    except Exception as exc:
+        print(f"[conversation_store] WARN redis_scan_all_sessions failed: {exc!r}")
+        return 0
+    _last_redis_full_scan_ts = time.time()
+    return added
 
 
 async def reset_session(phone_number: str) -> None:
@@ -397,6 +528,7 @@ __all__ = [
     "get_session",
     "save_session",
     "all_sessions",
+    "redis_scan_all_sessions",
     "reset_session",
     "MAX_HISTORY_TURNS",
     "FollowupAction",

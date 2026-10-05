@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Petrobind — System Architecture</title>
+<style>
+  :root {
+    --bg: #14161a; --panel: #1c1f25; --line: #2f343d; --text: #e8e6e1; --muted: #9aa0a9;
+    --accent: #e8651a; --ok: #3fb26b; --bad: #e5484d; --warn: #f2c230; --human: #4da3ff;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  header { display: flex; flex-wrap: wrap; gap: .75rem 1.5rem; align-items: center; justify-content: space-between;
+           padding: 1rem 1.25rem; border-bottom: 1px solid var(--line); }
+  h1 { margin: 0; font-size: 1.15rem; }
+  h1 small { display: block; color: var(--muted); font-weight: 400; font-size: .8rem; }
+  nav a { color: var(--text); text-decoration: none; border: 1px solid var(--line); padding: .35rem .75rem; border-radius: 4px; margin-left: .4rem; }
+  nav a:hover, nav a:focus-visible { border-color: var(--accent); outline: none; }
+  main { padding: 1rem 1.25rem 2rem; }
+  .legend { display: flex; flex-wrap: wrap; gap: .5rem 1.25rem; color: var(--muted); font-size: .8rem; margin-bottom: .75rem; }
+  .legend i { display: inline-block; width: 22px; height: 0; border-top: 3px solid; vertical-align: middle; margin-right: .35rem; }
+  .canvas { overflow-x: auto; border: 1px solid var(--line); border-radius: 6px; background:
+            radial-gradient(circle, #2a2e36 1px, transparent 1px) 0 0 / 22px 22px, var(--panel); }
+  svg { display: block; min-width: 1000px; width: 100%; height: auto; }
+  .edge { fill: none; stroke: var(--muted); stroke-width: 2; }
+  .edge.ai { stroke: var(--accent); }
+  .edge.human { stroke: var(--human); }
+  .edge.data { stroke: #6b7280; stroke-dasharray: 5 4; }
+  .edge-label { fill: var(--muted); font-size: 11px; }
+  .node rect { fill: var(--bg); stroke: var(--line); stroke-width: 2; rx: 6; }
+  .node.ai rect { stroke: var(--accent); }
+  .node.human rect { stroke: var(--human); }
+  .node.store rect { stroke-dasharray: 0; fill: #181b20; }
+  .node:hover rect, .node:focus-visible rect, .node.sel rect { stroke-width: 3.5; }
+  .node:focus-visible { outline: none; }
+  .node text { fill: var(--text); pointer-events: none; }
+  .node .t { font-size: 13px; font-weight: 600; }
+  .node .s { font-size: 11px; fill: var(--muted); }
+  .dot { stroke: none; }
+  .dot.ok { fill: var(--ok); } .dot.bad { fill: var(--bad); } .dot.na { fill: #555b66; }
+  #detail { margin-top: 1rem; border: 1px solid var(--line); border-radius: 6px; padding: 1rem 1.25rem; background: var(--panel); }
+  #detail h2 { margin: 0 0 .25rem; font-size: 1rem; }
+  #detail p { margin: .25rem 0; }
+  #detail code { background: var(--bg); padding: .1rem .35rem; border-radius: 3px; color: var(--accent); }
+  .status-line { color: var(--muted); font-size: .8rem; margin-top: .6rem; }
+  @media (prefers-reduced-motion: no-preference) { .node rect { transition: stroke-width .12s; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>Petrobind Global — System Architecture
+    <small>How a WhatsApp message flows: AI (RAG) answers FAQs, a human can take over any chat in real time</small></h1>
+  <nav aria-label="Console">
+    <a href="/inbox/chats">Inbox</a>
+    <a href="/inbox/admin">Ops Console</a>
+    <a href="/inbox/architecture" aria-current="page">Architecture</a>
+  </nav>
+</header>
+<main>
+  <div class="legend" aria-label="Legend">
+    <span><i style="border-color:var(--accent)"></i>AI path (RAG + LLM)</span>
+    <span><i style="border-color:var(--human)"></i>Human path</span>
+    <span><i style="border-color:#6b7280;border-top-style:dashed"></i>Storage / data</span>
+    <span>● green = healthy · ● red = not configured · ● grey = no live check</span>
+  </div>
+
+  <div class="canvas">
+    <svg id="graph" viewBox="0 0 1200 600" role="group" aria-label="Architecture node graph. Use Tab to move between nodes, Enter for details."></svg>
+  </div>
+
+  <section id="detail" aria-live="polite">
+    <h2>Select a node</h2>
+    <p>Click (or Tab + Enter) any node to see what it does, where the code lives, and its live status.</p>
+  </section>
+  <div class="status-line" id="status-line">Live status: loading…</div>
+</main>
+
+<script>
+(function () {
+  "use strict";
+  var W = 200, H = 64;
+  var colX = [20, 250, 480, 710, 960], rowY = [70, 180, 290, 400, 510];
+
+  // check = key in /api/inbox/admin/dashboard → checks (optional)
+  var NODES = [
+    { id: "buyer",   c: 0, r: 2, kind: "",      t: "Buyer", s: "WhatsApp · Meta Cloud API",
+      d: "A customer messages the Petrobind WhatsApp number. Meta delivers it to our webhook and carries the reply back.",
+      where: "Meta WhatsApp Business", check: "whatsapp_env" },
+    { id: "webhook", c: 1, r: 2, kind: "ai",    t: "POST /webhook", s: "verify signature · dedupe",
+      d: "Entry point. Verifies Meta's signature, drops duplicate message ids (wamid), then hands the text to the assistant. Always answers 200 fast.",
+      where: "main.py → /webhook", check: "whatsapp_env" },
+    { id: "gate",    c: 2, r: 2, kind: "",      t: "Human has this chat?", s: "claim mutex check",
+      d: "Before sending anything, the assistant checks whether a human operator has claimed the chat. No claim: the AI replies. Claimed: the AI only drafts a suggestion and stays silent to the buyer.",
+      where: "llm_assistant.py → handle_incoming_message · supabase inbox_claims", check: "supabase_inbox" },
+    { id: "rag",     c: 3, r: 0, kind: "ai",    t: "RAG retrieve", s: "FAQ / product knowledge",
+      d: "Always runs on every inbound text. Finds the best knowledge chunks for the question. If nothing relevant is found for a product/spec question, the LLM is skipped and a safe handoff reply is sent (zero-hallucination guardrail).",
+      where: "rag/ package · llm_assistant.py retrieve()", check: "rag_index_ready" },
+    { id: "llm",     c: 4, r: 0, kind: "ai",    t: "LLM · gpt-5-mini", s: "via OpenRouter",
+      d: "Writes the reply from the retrieved FAQ context, in Petrobind's sales tone. Can call tools (e.g. notify the team).",
+      where: "llm_assistant.py", check: "llm_ready" },
+    { id: "send",    c: 4, r: 1, kind: "",      t: "Send via Meta API", s: "text · or template outside 24h",
+      d: "Single exit to WhatsApp. AI replies and human replies both go out here. Outside the 24-hour window only approved templates are allowed.",
+      where: "main.py → send_whatsapp_text / send-template", check: "whatsapp_env" },
+    { id: "email",   c: 3, r: 1, kind: "ai",    t: "Email handoff", s: "Gmail relay → sales team",
+      d: "When the AI can't answer safely, the team is emailed the conversation so a human can reach out.",
+      where: "notify.py", check: "email_configured" },
+    { id: "draft",   c: 3, r: 3, kind: "human", t: "AI draft suggestion", s: "shown as a pill, not sent",
+      d: "While a human holds the chat, the AI still reads the message and prepares a suggested reply. The operator can click to use or edit it. Nothing is sent automatically.",
+      where: "GET /api/inbox/chats/{e164}/suggestion", check: null },
+    { id: "inbox",   c: 4, r: 3, kind: "human", t: "Human Inbox UI", s: "/inbox/chats · real time",
+      d: "Operators see every message (buyer, AI and human) live. Click Claim to take over; typing a reply sends it to the buyer through Meta. Release hands the chat back to the AI.",
+      where: "petrobind_frontend_app/ · /inbox/chats, /inbox/chat/{e164}", check: null },
+    { id: "supa",    c: 2, r: 4, kind: "store", t: "Supabase (Postgres)", s: "messages · claims · schedules",
+      d: "Shared inbox storage and the Realtime feed that pushes new messages to the inbox. Fire-and-forget: if it is down, WhatsApp replies still work.",
+      where: "supabase_client.py · supabase/migrations/", check: "supabase_inbox" },
+    { id: "redis",   c: 1, r: 4, kind: "store", t: "Upstash Redis", s: "conversation sessions",
+      d: "Keeps each buyer's conversation memory so it survives redeploys and idle sleep.",
+      where: "conversation_store.py", check: "redis_scan_available" },
+    { id: "cron",    c: 0, r: 4, kind: "",      t: "Follow-up cron", s: "GitHub Actions · quiet hours",
+      d: "Periodically scans idle conversations and sends scheduled follow-ups, respecting buyer-local quiet hours and weekends.",
+      where: ".github/workflows/followups-cron.yml · scheduler.py", check: "followups_configured" }
+  ];
+
+  var EDGES = [
+    ["buyer","webhook","ai","message in"],
+    ["webhook","gate","ai",""],
+    ["gate","rag","ai","no human"],
+    ["rag","llm","ai",""],
+    ["llm","send","ai","reply"],
+    ["rag","email","ai","can't answer"],
+    ["gate","draft","human","human claimed"],
+    ["draft","inbox","human",""],
+    ["inbox","send","human","human reply"],
+    ["send","buyer","ai","delivered","top"],
+    ["webhook","redis","data","session"],
+    ["gate","supa","data","mirror"],
+    ["supa","inbox","data","realtime","bottom"],
+    ["cron","redis","data","scan"]
+  ];
+
+  var NS = "http://www.w3.org/2000/svg";
+  var svg = document.getElementById("graph");
+  var byId = {};
+  function el(n, a, p) { var e = document.createElementNS(NS, n); for (var k in a) e.setAttribute(k, a[k]); if (p) p.appendChild(e); return e; }
+  NODES.forEach(function (n) { n.x = colX[n.c]; n.y = rowY[n.r]; byId[n.id] = n; });
+
+  // arrowheads
+  var defs = el("defs", {}, svg);
+  [["ai","#e8651a"],["human","#4da3ff"],["data","#6b7280"]].forEach(function (m) {
+    var mk = el("marker", { id: "ah-" + m[0], viewBox: "0 0 10 10", refX: 9, refY: 5, markerWidth: 7, markerHeight: 7, orient: "auto-start-reverse" }, defs);
+    el("path", { d: "M0,0 L10,5 L0,10 z", fill: m[1] }, mk);
+  });
+
+  EDGES.forEach(function (e) {
+    var a = byId[e[0]], b = byId[e[1]], kind = e[2], d, lx, ly;
+    var ax = a.x + W / 2, ay = a.y + H / 2, bx = b.x + W / 2, by = b.y + H / 2;
+    if (e[4] === "top") {
+      d = "M" + ax + "," + a.y + " C" + ax + ",18 " + bx + ",18 " + bx + "," + b.y; lx = (ax + bx) / 2; ly = 26;
+    } else if (e[4] === "bottom") {
+      d = "M" + (a.x + W) + "," + ay + " C" + (a.x + W + 80) + "," + ay + " " + (b.x + W / 2) + "," + (b.y + H + 70) + " " + (b.x + W / 2) + "," + (b.y + H);
+      lx = b.x + W / 2 + 6; ly = b.y + H + 40;
+    } else if (Math.abs(bx - ax) >= Math.abs(by - ay) && a.c !== b.c) {
+      var right = bx > ax, x1 = right ? a.x + W : a.x, x2 = right ? b.x : b.x + W, mx = (x1 + x2) / 2;
+      d = "M" + x1 + "," + ay + " C" + mx + "," + ay + " " + mx + "," + by + " " + x2 + "," + by; lx = mx; ly = (ay + by) / 2 - 6;
+    } else {
+      var down = by > ay, y1 = down ? a.y + H : a.y, y2 = down ? b.y : b.y + H, my = (y1 + y2) / 2;
+      d = "M" + ax + "," + y1 + " C" + ax + "," + my + " " + bx + "," + my + " " + bx + "," + y2; lx = (ax + bx) / 2 + 6; ly = my;
+    }
+    el("path", { d: d, "class": "edge " + kind, "marker-end": "url(#ah-" + kind + ")" }, svg);
+    if (e[3]) { var t = el("text", { x: lx, y: ly, "class": "edge-label", "text-anchor": "middle" }, svg); t.textContent = e[3]; }
+  });
+
+  var detail = document.getElementById("detail"), selected = null;
+  function esc(s) { return String(s).replace(/[&<>"]/g, function (c) { return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]; }); }
+  var status = {};
+  function show(n) {
+    if (selected) selected.g.classList.remove("sel");
+    n.g.classList.add("sel"); selected = n;
+    var st = n.check ? (status[n.check] === undefined ? "no live data yet" : (status[n.check] ? "healthy ✓" : "not configured ✗")) : "no live check for this node";
+    detail.innerHTML = "<h2>" + esc(n.t) + "</h2><p>" + esc(n.d) + "</p><p>Code: <code>" + esc(n.where) + "</code></p><p>Live status: " + esc(st) + "</p>";
+  }
+
+  NODES.forEach(function (n) {
+    var g = el("g", { "class": "node " + n.kind, tabindex: 0, role: "button", "aria-label": n.t + ". " + n.s, transform: "translate(" + n.x + "," + n.y + ")" }, svg);
+    el("rect", { width: W, height: H }, g);
+    el("text", { x: 14, y: 27, "class": "t" }, g).textContent = n.t;
+    el("text", { x: 14, y: 46, "class": "s" }, g).textContent = n.s;
+    n.dot = el("circle", { cx: W - 14, cy: 14, r: 5, "class": "dot na" }, g);
+    n.g = g;
+    g.addEventListener("click", function () { show(n); });
+    g.addEventListener("keydown", function (ev) { if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); show(n); } });
+  });
+
+  // zone labels
+  [["AI auto-reply", 710, 52, "#e8651a"], ["Human takeover", 710, 392, "#4da3ff"]].forEach(function (z) {
+    var t = el("text", { x: z[1], y: z[2] - (z[2] > 300 ? 0 : 0), fill: z[3], "font-size": 12, "font-weight": 600 }, svg); t.textContent = z[0];
+  });
+
+  // live status from existing dashboard API (cookie auth)
+  fetch("/api/inbox/admin/dashboard", { credentials: "same-origin" }).then(function (r) {
+    if (r.status === 401) { document.getElementById("status-line").innerHTML = 'Live status: <a href="/inbox/login?next=%2Finbox%2Farchitecture" style="color:#e8651a">log in</a> to see health dots.'; return null; }
+    return r.json();
+  }).then(function (j) {
+    if (!j) return;
+    var c = j.checks || {}; status = {};
+    Object.keys(c).forEach(function (k) { if (typeof c[k] === "boolean") status[k] = c[k]; });
+    var up = 0, down = 0;
+    NODES.forEach(function (n) {
+      if (!n.check || status[n.check] === undefined) return;
+      n.dot.setAttribute("class", "dot " + (status[n.check] ? "ok" : "bad"));
+      status[n.check] ? up++ : down++;
+    });
+    document.getElementById("status-line").textContent = "Live status: " + up + " healthy, " + down + " not configured · updated " + new Date().toLocaleTimeString();
+    if (selected) show(selected);
+  }).catch(function () { document.getElementById("status-line").textContent = "Live status unavailable."; });
+})();
+</script>
+</body>
+</html>

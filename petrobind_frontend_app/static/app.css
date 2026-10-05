@@ -1,0 +1,136 @@
+/* ========== Petrobind Shared Inbox styles ========== */
+
+/* Reset scrollbars for chat list + thread views */
+.chat-list-scroll::-webkit-scrollbar,
+#message-stack::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+.chat-list-scroll::-webkit-scrollbar-thumb,
+#message-stack::-webkit-scrollbar-thumb {
+  background: rgba(0,0,0,0.15);
+  border-radius: 4px;
+}
+.chat-list-scroll::-webkit-scrollbar-thumb:hover,
+#message-stack::-webkit-scrollbar-thumb:hover {
+  background: rgba(0,0,0,0.25);
+}
+
+/* Chat list item hover/selection */
+.chat-item:hover {
+  background-color: #f7f7f7;
+}
+.chat-item[data-e164].active {
+  background-color: #E1F7EA;
+}
+
+/* Slow pulse for "CLAIMED" pill so you notice, but don't get epileptic */
+@keyframes pulse-slow {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0.75; }
+}
+.animate-pulse-slow {
+  animation: pulse-slow 2.4s ease-in-out infinite;
+}
+
+/* Line clamp utility (Tailwind v2 compatibility fallback) */
+.line-clamp-1 {
+  display: -webkit-box;
+  -webkit-line-clamp: 1;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+/* Bubble subtle tail effect for desktop */
+.message-bubble {
+  word-break: break-word;
+}
+
+/* AI suggestion pill loading skeleton */
+#suggestion-text.loading::after {
+  content: "…";
+  display: inline-block;
+  margin-left: 2px;
+  animation: ellipsis 1.4s infinite;
+}
+@keyframes ellipsis {
+  0%   { content: ""; }
+  25%  { content: "."; }
+  50%  { content: ".."; }
+  75%  { content: "..."; }
+  100% { content: ""; }
+}
+
+/* Banner at top fixed when claim conflict */
+#claim-banner {
+  animation: slideInTop 0.22s ease-out;
+}
+@keyframes slideInTop {
+  from { transform: translateY(-100%); opacity: 0; }
+  to   { transform: translateY(0);     opacity: 1; }
+}
+
+kbd {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+/* Ensure HTMX hx-indicator buttons don't jump when disabled */
+button[disabled] { cursor: not-allowed; }
+
+/* Banner slide-in animation (reuse pattern from claim-banner) */
+.banner-slideIn {
+  animation: slideInTop 0.28s ease-out;
+}
+
+/* Send form disabled overlay — used when outside 24h window */
+.send-form-disabled-overlay {
+  position: absolute;
+  inset: 0;
+  background: rgba(255, 255, 255, 0.72);
+  backdrop-filter: blur(2px);
+  -webkit-backdrop-filter: blur(2px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  color: #475569;
+  pointer-events: auto;
+  z-index: 5;
+  border-radius: 1rem;
+  margin: 1rem;
+}
+
+/* Template badge pill shown inside template bubble label */
+.template-badge {
+  display: inline-block;
+  font-size: 10px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: #f1f5f9;
+  color: #64748b;
+  font-weight: 500;
+  letter-spacing: 0;
+}
+
+/* Template bubble extra class for future theming hooks */
+.template-bubble {
+  position: relative;
+}
+
+/* Native <dialog> backdrop for new-conversation modal */
+#new-conversation-modal::backdrop {
+  background: rgba(15, 23, 42, 0.45);
+  backdrop-filter: blur(2px);
+  -webkit-backdrop-filter: blur(2px);
+}
+
+/* Polyfill-style fallback backdrop for browsers without dialog::backdrop */
+#new-conversation-modal[open] {
+  margin-top: 5vh;
+}
+
+/* Tab buttons hover cursor for the modal */
+.tab-btn {
+  cursor: pointer;
+  transition: color 120ms ease, border-color 120ms ease;
+}

@@ -1,0 +1,348 @@
+{% extends "base.html" %}
+{% block title %}Chats — Petrobind Inbox{% endblock %}
+{% block content %}
+<div class="flex-1 flex overflow-hidden">
+  <aside class="w-full md:w-[380px] lg:w-[420px] border-r border-gray-200 bg-white flex flex-col overflow-hidden shadow-sm">
+    <div class="px-4 py-3 border-b border-gray-100 bg-pb-panel flex items-center justify-between gap-3">
+      <div class="text-sm font-medium text-gray-700 flex items-center gap-2">
+        <svg class="w-4 h-4 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"/></svg>
+        Chats
+        <span class="ml-1 px-2 py-0.5 rounded-full bg-gray-200 text-gray-600 text-xs font-mono">{{ chats|length }}</span>
+      </div>
+      <div class="text-xs text-gray-500">
+        Token <span class="font-mono">{{ inbox_admin_token_preview }}</span>
+      </div>
+    </div>
+
+    <div class="px-4 pt-3 mb-3">
+      <button
+        type="button"
+        id="btn-new-conversation"
+        onclick="openNewConversationModal()"
+        class="w-full inline-flex items-center justify-center gap-2 px-3 py-2 rounded-md bg-pb-navy hover:bg-slate-900 text-white text-sm font-medium shadow-sm transition"
+      >
+        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/></svg>
+        + New Conversation
+      </button>
+    </div>
+
+    <div class="px-4 pb-3">
+      <label for="chat-search" class="sr-only">Search by number or name</label>
+      <input id="chat-search" type="search" autocomplete="off" placeholder="Search number or name…"
+             class="w-full px-3 py-2 rounded-md border border-gray-300 text-sm focus:outline-none focus:ring-2 focus:ring-pb-green/40">
+    </div>
+
+    <div class="overflow-y-auto flex-1 chat-list-scroll" id="chat-scroll">
+      {% if not chats %}
+      <div class="p-8 text-center text-gray-500 text-sm space-y-2">
+        <svg class="mx-auto w-12 h-12 text-gray-300 mb-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"/></svg>
+        <div class="font-medium text-gray-700">No chats yet</div>
+        <div>Send a WhatsApp message to the Petrobind number and it'll appear here.</div>
+      </div>
+      {% else %}
+      <ul>
+        {% for chat in chats %}
+        {% set e164 = chat.e164 %}
+        {% set inq = chat.inquiry_jsonb or {} %}
+        {% set product = inq.product_grade or inq.product or '' %}
+        {% set dest_port = inq.destination_port or '' %}
+        {% set chips = [] %}
+        {% if product %}{% set _ = chips.append(product) %}{% endif %}
+        {% if dest_port %}{% set _ = chips.append(dest_port) %}{% endif %}
+        {% set inquiry_preview = chips[:2] %}
+        <li class="relative" data-search="{{ ((chat.display_name or '') ~ ' ' ~ e164) | lower }}" data-e164="{{ e164 }}" data-name="{{ chat.display_name or '' }}">
+          <button type="button" class="chat-menu-btn absolute right-2 bottom-2 z-10 w-8 h-8 rounded-full text-gray-500 hover:bg-gray-200 hover:text-gray-900 text-lg leading-none"
+                  aria-label="Options for {{ chat.display_name or e164 }}" aria-haspopup="true">&#8942;</button>
+          <a
+            href="/inbox/chat/{{ e164 | urlencode }}"
+            class="chat-item block px-4 py-3 hover:bg-gray-50 transition border-b border-gray-100 {% if chat.last_message_is_buyer %}bg-green-50/40 hover:bg-green-50/70{% endif %}"
+            data-e164="{{ e164 }}"
+          >
+            <div class="flex items-start gap-3">
+              <div class="w-10 h-10 shrink-0 rounded-full bg-gradient-to-br from-pb-navy to-slate-700 text-white flex items-center justify-center font-semibold text-sm">
+                {{ ((chat.display_name or e164) | replace('+', '') | first | upper) }}
+              </div>
+              <div class="flex-1 min-w-0">
+                <div class="flex items-center justify-between gap-2">
+                  <div class="font-medium text-gray-900 truncate {% if chat.last_message_is_buyer %}font-semibold{% endif %}">
+                    {{ chat.display_name or e164 }}
+                    {% if chat.display_name %}<span class="ml-1 text-xs font-mono font-normal text-gray-400">{{ e164 }}</span>{% endif %}
+                  </div>
+                  {% if chat.last_message_created_at %}
+                  <div class="text-xs text-gray-400 whitespace-nowrap shrink-0">
+                    <time>{{ chat.last_message_created_at[:16].replace('T', ' ') }}</time>
+                  </div>
+                  {% endif %}
+                </div>
+                <div class="mt-1 text-sm text-gray-600 line-clamp-1 {% if chat.last_message_is_buyer %}text-gray-900{% endif %}">
+                  {% if chat.last_direction == 'ai' %}
+                    <span class="inline-block mr-1 px-1 rounded text-[10px] font-semibold bg-green-100 text-green-800 align-middle" title="Last message was sent by the AI (RAG + LLM)">AI</span>
+                  {% elif chat.last_direction == 'human' %}
+                    <span class="inline-block mr-1 px-1 rounded text-[10px] font-semibold bg-blue-100 text-blue-800 align-middle" title="Last message was sent by a human">Human</span>
+                  {% elif chat.last_direction == 'system' %}
+                    <span class="inline-block mr-1 px-1 rounded text-[10px] font-semibold bg-amber-100 text-amber-800 align-middle" title="System note">Note</span>
+                  {% elif chat.last_message_is_buyer %}
+                    <span class="inline-block mr-1 px-1 rounded text-[10px] font-semibold bg-gray-200 text-gray-700 align-middle" title="Last message is from the buyer, awaiting a reply">Buyer</span>
+                  {% endif %}
+                  {{ chat.last_message_text or '(no text)' }}
+                </div>
+                {% if inquiry_preview or chat.claim_held_by %}
+                <div class="mt-2 flex flex-wrap items-center gap-1.5">
+                  {% for chip in inquiry_preview %}
+                    <span class="inline-block px-2 py-0.5 text-[11px] rounded-full bg-blue-50 text-blue-700 border border-blue-100 font-medium">
+                      {{ chip }}
+                    </span>
+                  {% endfor %}
+                  {% if chat.lead_notified %}
+                    <span class="inline-block px-2 py-0.5 text-[11px] rounded-full bg-amber-50 text-amber-700 border border-amber-200">lead email</span>
+                  {% endif %}
+                  {% if chat.handoff_notified %}
+                    <span class="inline-block px-2 py-0.5 text-[11px] rounded-full bg-orange-50 text-orange-700 border border-orange-200">handoff</span>
+                  {% endif %}
+                  {% if chat.claim_held_by %}
+                    <span class="inline-flex items-center gap-1 px-2 py-0.5 text-[11px] font-semibold rounded-full bg-red-100 text-red-800 border border-red-200 animate-pulse-slow">
+                      <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"/></svg>
+                      {{ chat.claim_held_by }}
+                    </span>
+                  {% endif %}
+                </div>
+                {% endif %}
+              </div>
+            </div>
+          </a>
+        </li>
+        {% endfor %}
+      </ul>
+      {% endif %}
+    </div>
+  </aside>
+
+  <iframe id="thread-pane" title="Conversation" hidden class="hidden md:block flex-1 min-w-0 border-0 bg-pb-chatBg"></iframe>
+
+  <main id="thread-placeholder" class="hidden md:flex flex-1 items-center justify-center bg-pb-chatBg/50">
+    <div class="text-center max-w-md p-8">
+      <div class="w-20 h-20 rounded-full bg-white shadow-lg mx-auto flex items-center justify-center mb-5">
+        <svg class="w-10 h-10 text-pb-green/80" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"/></svg>
+      </div>
+      <h2 class="text-lg font-semibold text-gray-700">Select a conversation</h2>
+      <p class="mt-2 text-sm text-gray-500 leading-relaxed">
+        Pick a chat on the left to see the full thread, claim it for human response,
+        and accept/edit AI-suggested replies powered by Petrobind's RAG (bitumen catalog).
+      </p>
+    </div>
+  </main>
+</div>
+
+<dialog id="new-conversation-modal" class="rounded-xl p-0 w-[92vw] max-w-[560px] border-0 shadow-2xl">
+  <div class="flex flex-col max-h-[85vh] overflow-hidden">
+    <div class="px-5 py-4 border-b border-gray-200 bg-gray-50 flex items-center justify-between">
+      <h3 class="font-semibold text-gray-900 text-lg flex items-center gap-2">
+        <svg class="w-5 h-5 text-pb-navy" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"/></svg>
+        New Conversation
+      </h3>
+      <button type="button" id="modal-close-btn" class="p-1.5 rounded-md hover:bg-gray-200 text-gray-500 transition">&times;</button>
+    </div>
+
+    <div class="px-5 pt-4 border-b border-gray-100">
+      <div class="flex gap-1 -mb-px">
+        <button type="button" id="tab-freeform" class="tab-btn px-4 py-2 text-sm font-medium border-b-2 border-pb-navy text-pb-navy">
+          Freeform (24h only)
+        </button>
+        <button type="button" id="tab-template" class="tab-btn px-4 py-2 text-sm font-medium border-b-2 border-transparent text-gray-500 hover:text-gray-700">
+          Approved Meta Template
+        </button>
+      </div>
+    </div>
+
+    <div id="new-conv-info" class="hidden mx-5 mt-3 p-2.5 rounded bg-blue-50 border border-blue-200 text-blue-800 text-xs"></div>
+
+    <div id="tab-pane-freeform" class="flex-1 overflow-y-auto px-5 py-4 space-y-4">
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-1">WhatsApp number (E.164)</label>
+        <input
+          type="tel"
+          id="freeform-e164"
+          placeholder="+65 9123 4567"
+          class="w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-pb-green/30 focus:border-pb-green"
+        >
+      </div>
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-1">Message</label>
+        <textarea
+          id="freeform-text"
+          rows="5"
+          placeholder="Type the first message to start the conversation. Note: only works if buyer has been active in the last 24 hours."
+          class="w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-pb-green/30 focus:border-pb-green resize-y"
+        ></textarea>
+      </div>
+      <div class="flex items-center justify-between gap-2 pt-1">
+        <button
+          type="button"
+          id="btn-check-window"
+          class="inline-flex items-center gap-1.5 px-3 py-2 rounded-md text-sm font-medium bg-white border border-gray-300 text-gray-700 hover:bg-gray-50 transition"
+        >
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+          Check Window
+        </button>
+        <div class="flex items-center gap-2">
+          <button type="button" id="btn-freeform-cancel" class="px-4 py-2 rounded-md text-sm font-medium text-gray-600 hover:bg-gray-100 transition">Cancel</button>
+          <button
+            type="button"
+            id="btn-freeform-send"
+            class="inline-flex items-center gap-1.5 px-4 py-2 rounded-md text-sm font-medium bg-pb-navy hover:bg-slate-900 text-white transition disabled:opacity-50"
+          >
+            Send & open
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8"/></svg>
+          </button>
+        </div>
+      </div>
+      <div id="freeform-status" class="text-xs text-gray-500 min-h-[1.25rem]"></div>
+    </div>
+
+    <div id="tab-pane-template" class="flex-1 overflow-y-auto px-5 py-4 space-y-4 hidden">
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-1">Choose template</label>
+        <select
+          id="template-select"
+          class="w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-pb-green/30 focus:border-pb-green bg-white"
+        >
+          <option value="">— Loading templates… —</option>
+        </select>
+      </div>
+      <div id="template-info" class="p-3 rounded-lg border border-gray-200 bg-gray-50 text-xs space-y-1 hidden">
+        <div><span class="font-medium text-gray-600">Category:</span> <span id="tpl-category" class="text-gray-800"></span></div>
+        <div><span class="font-medium text-gray-600">Language:</span> <span id="tpl-language" class="text-gray-800"></span></div>
+        <div><span class="font-medium text-gray-600">Summary:</span> <span id="tpl-summary" class="text-gray-800"></span></div>
+      </div>
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-1">WhatsApp number (E.164)</label>
+        <input
+          type="tel"
+          id="template-e164"
+          placeholder="+65 9123 4567"
+          class="w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-pb-green/30 focus:border-pb-green"
+        >
+      </div>
+      <div id="template-params" class="space-y-2"></div>
+      <div class="flex items-center justify-end gap-2 pt-1">
+        <button type="button" id="btn-template-cancel" class="px-4 py-2 rounded-md text-sm font-medium text-gray-600 hover:bg-gray-100 transition">Cancel</button>
+        <button
+          type="button"
+          id="btn-template-send"
+          class="inline-flex items-center gap-1.5 px-4 py-2 rounded-md text-sm font-medium bg-pb-navy hover:bg-slate-900 text-white transition disabled:opacity-50"
+        >
+          Send template & open
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8"/></svg>
+        </button>
+      </div>
+      <div id="template-status" class="text-xs text-gray-500 min-h-[1.25rem]"></div>
+    </div>
+  </div>
+</dialog>
+
+<div id="chat-menu" role="dialog" aria-label="Set reference name" hidden
+     class="fixed z-50 w-64 rounded-lg border border-gray-200 bg-white shadow-xl p-3 text-sm">
+  <div class="font-medium text-gray-800">Reference name</div>
+  <div id="chat-menu-num" class="text-xs font-mono text-gray-500 mb-2"></div>
+  <input id="chat-menu-input" type="text" maxlength="60" placeholder="e.g. Ahmad – Dubai buyer"
+         class="w-full px-2 py-1.5 rounded border border-gray-300 text-sm" aria-label="Reference name">
+  <div class="mt-2 flex items-center justify-end gap-2">
+    <button type="button" id="chat-menu-clear" class="text-xs text-gray-500 hover:text-gray-800 underline">Clear</button>
+    <button type="button" id="chat-menu-cancel" class="px-2.5 py-1 rounded border border-gray-300 text-xs">Cancel</button>
+    <button type="button" id="chat-menu-save" class="px-2.5 py-1 rounded bg-pb-navy text-white text-xs font-medium">Save</button>
+  </div>
+  <div id="chat-menu-err" class="mt-1 text-xs text-red-600" hidden></div>
+</div>
+
+<script>
+(function () {
+  var search = document.getElementById("chat-search"),
+      menu = document.getElementById("chat-menu"),
+      input = document.getElementById("chat-menu-input"),
+      err = document.getElementById("chat-menu-err"),
+      current = null;
+
+  // ---- search: by name or number (digits-only match ignores +, spaces, dashes)
+  function applyFilter() {
+    var q = (search.value || "").trim().toLowerCase(), qd = q.replace(/\D/g, ""), shown = 0, rows = document.querySelectorAll("#chat-scroll li[data-search]");
+    rows.forEach(function (li) {
+      var hay = li.getAttribute("data-search"), ok = !q || hay.indexOf(q) !== -1 || (qd && hay.replace(/\D/g, "").indexOf(qd) !== -1);
+      li.hidden = !ok; if (ok) shown++;
+    });
+    var none = document.getElementById("chat-no-match");
+    if (rows.length && !shown) {
+      if (!none) { none = document.createElement("div"); none.id = "chat-no-match"; none.className = "p-6 text-center text-sm text-gray-500"; document.getElementById("chat-scroll").appendChild(none); }
+      none.textContent = "No chat matches \u201c" + search.value.trim() + "\u201d.";
+    } else if (none) none.remove();
+  }
+  search.addEventListener("input", applyFilter);
+
+  // ---- 3-dot menu (event delegation: survives live list refresh)
+  function closeMenu() { menu.hidden = true; current = null; err.hidden = true; }
+  document.getElementById("chat-scroll").addEventListener("click", function (ev) {
+    var btn = ev.target.closest(".chat-menu-btn"); if (!btn) return;
+    ev.preventDefault(); ev.stopPropagation();
+    var li = btn.closest("li"); current = li;
+    document.getElementById("chat-menu-num").textContent = li.getAttribute("data-e164");
+    input.value = li.getAttribute("data-name") || "";
+    var r = btn.getBoundingClientRect();
+    menu.style.left = Math.max(8, Math.min(r.left - 200, window.innerWidth - 272)) + "px";
+    menu.style.top = Math.min(r.bottom + 4, window.innerHeight - 180) + "px";
+    menu.hidden = false; input.focus(); input.select();
+  });
+  function save(name) {
+    if (!current) return;
+    var e164 = current.getAttribute("data-e164");
+    fetch("/api/inbox/chats/" + encodeURIComponent(e164) + "/name", {
+      method: "PUT", credentials: "same-origin", headers: {"Content-Type": "application/json"}, body: JSON.stringify({name: name})
+    }).then(function (r) { return r.json(); }).then(function (j) {
+      if (!j.ok) throw new Error(j.detail || "failed");
+      closeMenu(); refresh();
+    }).catch(function (e) { err.textContent = "Could not save: " + e.message; err.hidden = false; });
+  }
+  document.getElementById("chat-menu-save").addEventListener("click", function () { save(input.value.trim()); });
+  document.getElementById("chat-menu-clear").addEventListener("click", function () { save(""); });
+  document.getElementById("chat-menu-cancel").addEventListener("click", closeMenu);
+  input.addEventListener("keydown", function (ev) { if (ev.key === "Enter") save(input.value.trim()); if (ev.key === "Escape") closeMenu(); });
+  document.addEventListener("click", function (ev) { if (!menu.hidden && !menu.contains(ev.target)) closeMenu(); });
+  document.addEventListener("keydown", function (ev) { if (ev.key === "Escape") closeMenu(); });
+
+  // ---- open a conversation in the right pane (desktop); mobile keeps normal navigation
+  var pane = document.getElementById("thread-pane"), ph = document.getElementById("thread-placeholder"), openE164 = null;
+  function mark() {
+    document.querySelectorAll("#chat-scroll li[data-e164]").forEach(function (li) {
+      var on = li.getAttribute("data-e164") === openE164;
+      li.classList.toggle("bg-gray-100", on); if (on) li.setAttribute("aria-current", "true"); else li.removeAttribute("aria-current");
+    });
+  }
+  function openChat(e164) {
+    openE164 = e164; pane.hidden = false; ph.style.display = "none";
+    pane.src = "/inbox/chat/" + encodeURIComponent(e164) + "?embed=1";
+    if (location.hash !== "#" + encodeURIComponent(e164)) history.replaceState(null, "", "#" + encodeURIComponent(e164));
+    mark();
+  }
+  document.getElementById("chat-scroll").addEventListener("click", function (ev) {
+    if (ev.target.closest(".chat-menu-btn")) return;
+    var a = ev.target.closest("a.chat-item"); if (!a || ev.metaKey || ev.ctrlKey || ev.shiftKey || window.innerWidth < 768) return;
+    ev.preventDefault(); openChat(a.closest("li").getAttribute("data-e164"));
+  });
+  function fromHash() { if (location.hash.length > 1 && window.innerWidth >= 768) openChat(decodeURIComponent(location.hash.slice(1))); }
+  window.addEventListener("hashchange", function () { if (decodeURIComponent(location.hash.slice(1)) !== openE164) fromHash(); });
+  fromHash();
+
+  // ---- live list: new conversations / new AI + human replies show without reload
+  function refresh() {
+    fetch("/inbox/chats", {credentials: "same-origin"}).then(function (r) { return r.ok ? r.text() : null; }).then(function (html) {
+      if (!html) return;
+      var doc = new DOMParser().parseFromString(html, "text/html"),
+          fresh = doc.getElementById("chat-scroll"), cnt = doc.querySelector("aside span.font-mono");
+      if (!fresh) return;
+      document.getElementById("chat-scroll").innerHTML = fresh.innerHTML;
+      var mine = document.querySelector("aside span.font-mono"); if (mine && cnt) mine.textContent = cnt.textContent;
+      applyFilter(); mark();
+    }).catch(function () {});
+  }
+  setInterval(function () { if (!document.hidden && menu.hidden) refresh(); }, 4000);
+})();
+</script>
+{% endblock %}

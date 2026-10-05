@@ -1,24 +1,31 @@
-name: WhatsApp follow-up nudge scan
+name: WhatsApp follow-up nudge scan (Petrobind legacy)
 
-# Triggers the deployed webhook's /followups-scan endpoint on a schedule so
-# idle buyers (never booked their call, or went quiet mid-inquiry) get a
-# single automatic nudge — see conversation_store.scan_for_followups() and
-# main.py's /followups-scan for the actual send logic and dedup rules.
+# NOTE 2026-10-04: Repo split into apps/ subfolders.
+# This workflow targets ONLY the Petrobind single-tenant SaaS legacy app in
+# apps/petrobind-saas-legacy/. The new multi-tenant Agentic ISV platform has
+# its own cron defined in apps/multi-tenant-agentic-isv/render.yaml blueprint
+# (Render cron job mt-agentic-followups-staging).
+#
+# Triggers the deployed Petrobind webhook's /followups-scan endpoint on a
+# schedule so idle buyers (never booked their call, or went quiet mid-inquiry)
+# get a single automatic nudge — see apps/petrobind-saas-legacy/conversation_store.py
+# and apps/petrobind-saas-legacy/main.py for the actual send logic and dedup rules.
 #
 # Setup (one-time):
 #   1. Repo → Settings → Secrets and variables → Actions → New repository secret
-#      Name:  FOLLOWUPS_CRON_TOKEN
-#      Value: same random string you set as FOLLOWUPS_CRON_TOKEN in Render's
-#             Environment tab (generate one with:
+#      Name:  PETROBIND_FOLLOWUPS_CRON_TOKEN
+#      Value: same random string you set as FOLLOWUPS_CRON_TOKEN in Petrobind's
+#             Render Environment tab (generate one with:
 #             python3 -c "import secrets; print(secrets.token_urlsafe(32))")
 #   2. Repo → Settings → Secrets and variables → Actions → New repository variable
-#      Name:  WEBHOOK_BASE_URL
+#      Name:  PETROBIND_WEBHOOK_BASE_URL
 #      Value: https://whatsapp-webhook-gateway-e08w.onrender.com
-#      (or your current Render service URL, if it ever changes)
+#      (or your current Petrobind Render service URL)
 #
-# Render's free plan spins the service down after 15 minutes idle — this
-# hourly ping also acts as a keep-alive, which is a side benefit, not the
-# point of this workflow.
+# If you create a 3rd cron workflow for the multi-tenant Agentic platform later
+# (because you move away from Render-native cron), add a SEPARATE workflow
+# file (e.g. followups-cron-mt-agentic.yml) targeting apps/multi-tenant-agentic-isv
+# and its OWN BASE_URL + TOKEN secrets. DO NOT reuse Petrobind tokens.
 
 on:
   schedule:
@@ -26,26 +33,26 @@ on:
   workflow_dispatch: {} # manual "Run workflow" button for on-demand testing
 
 jobs:
-  scan:
+  scan-petrobind-legacy:
     runs-on: ubuntu-latest
     steps:
-      - name: Call /followups-scan
+      - name: Call /followups-scan (Petrobind service only)
         run: |
           set -e
-          url="${WEBHOOK_BASE_URL:?WEBHOOK_BASE_URL repo variable is not set}"
-          if [ -z "${FOLLOWUPS_CRON_TOKEN}" ]; then
-            echo "::warning::FOLLOWUPS_CRON_TOKEN secret is not set — the endpoint will still run but logs a WARN and accepts unauthenticated calls. Set the secret to secure it."
+          url="${PETROBIND_WEBHOOK_BASE_URL:?PETROBIND_WEBHOOK_BASE_URL repo variable is not set — this cron is ONLY for apps/petrobind-saas-legacy/. Multi-tenant Agentic cron is separate in its Render blueprint.}"
+          if [ -z "${PETROBIND_FOLLOWUPS_CRON_TOKEN}" ]; then
+            echo "::warning::PETROBIND_FOLLOWUPS_CRON_TOKEN secret is not set — the endpoint will still run but logs a WARN and accepts unauthenticated calls. Set the secret to secure it."
           fi
           http_code=$(curl -sS -o response.json -w "%{http_code}" -X POST \
-            -H "Authorization: Bearer ${FOLLOWUPS_CRON_TOKEN}" \
+            -H "Authorization: Bearer ${PETROBIND_FOLLOWUPS_CRON_TOKEN}" \
             "${url%/}/followups-scan")
           echo "HTTP status: $http_code"
           cat response.json
           echo
           if [ "$http_code" -ge 300 ]; then
-            echo "::error::followups-scan returned HTTP $http_code"
+            echo "::error::Petrobind followups-scan returned HTTP $http_code"
             exit 1
           fi
         env:
-          FOLLOWUPS_CRON_TOKEN: ${{ secrets.FOLLOWUPS_CRON_TOKEN }}
-          WEBHOOK_BASE_URL: ${{ vars.WEBHOOK_BASE_URL }}
+          PETROBIND_FOLLOWUPS_CRON_TOKEN: ${{ secrets.PETROBIND_FOLLOWUPS_CRON_TOKEN }}
+          PETROBIND_WEBHOOK_BASE_URL: ${{ vars.PETROBIND_WEBHOOK_BASE_URL }}

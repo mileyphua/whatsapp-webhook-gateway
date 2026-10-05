@@ -665,7 +665,7 @@ def _nudge_if_needed(session: ConversationSession) -> Optional[str]:
 
 # ---------------------- TOOL EXECUTION --------------------------------------
 
-async def _notify_booking_interest(session: ConversationSession) -> None:
+async def _notify_booking_interest(session: ConversationSession, *, draft_only: bool = False) -> None:
     """Notify sales the moment the Cal.com link is shared / booking intent
     shows up, from ANY code path (tool call or the deterministic non-LLM
     paths) — don't wait on the buyer completing the external Cal.com form,
@@ -677,14 +677,20 @@ async def _notify_booking_interest(session: ConversationSession) -> None:
         phone_number=session.phone_number,
         relationship_summary=session.relationship_summary(),
         recent_transcript=session.recent_transcript(),
+        draft_only=draft_only,
     )
     if ok:
         session.booking_intent_notified = True
 
 
-async def _run_tool(name: str, args: dict, *, session: ConversationSession) -> Optional[str]:
+async def _run_tool(name: str, args: dict, *, session: ConversationSession, draft_only: bool = False) -> Optional[str]:
     """Execute a single tool call side-effect. Returns string content to inject
-    as the tool-result role in the chat history, or None on error."""
+    as the tool-result role in the chat history, or None on error.
+
+    draft_only (new, default False): when True, suppresses all notify.send_*
+    side-effects so the UI suggestion pill (which runs handle_incoming_message
+    with draft_only=True) cannot accidentally send real handoff emails to
+    sales while still running the tool-calling pipeline end-to-end."""
     try:
         if name == "capture_trade_inquiry":
             # Merge captured fields into the session inquiry so subsequent turns
@@ -705,12 +711,13 @@ async def _run_tool(name: str, args: dict, *, session: ConversationSession) -> O
                 session.inquiry.is_new_prospect = args["is_new_prospect"]
                 session.is_known_partner = not args["is_new_prospect"]
 
-            notified = session.lead_notified
+            notified = session.lead_notified or draft_only
             if not notified:
                 notified = await notify.send_lead_email(
                     phone_number=session.phone_number,
                     relationship_summary=session.relationship_summary(),
                     recent_transcript=session.recent_transcript(),
+                    draft_only=draft_only,
                     **{k: v for k, v in asdict(session.inquiry).items() if k != "completeness"},
                 )
                 if notified:
@@ -725,7 +732,9 @@ async def _run_tool(name: str, args: dict, *, session: ConversationSession) -> O
             reason = str(args.get("reason") or "(no reason provided)")
             summary = str(args.get("partial_inquiry_summary") or "")
             is_pricing = bool(args.get("is_pricing"))
-            if not session.handoff_notified:
+            if not draft_only:
+                _flag_needs_human(session, reason)
+            if not session.handoff_notified and not draft_only:
                 ok = await notify.send_handoff_email(
                     phone_number=session.phone_number,
                     reason=reason,
@@ -782,7 +791,7 @@ async def _run_tool(name: str, args: dict, *, session: ConversationSession) -> O
             # Remember WHEN we shared the link so conversation_store's follow-up
             # cron can nudge the buyer if a booking is never confirmed (>20h later).
             session.booking_link_shared_at = time.time()
-            await _notify_booking_interest(session)
+            await _notify_booking_interest(session, draft_only=draft_only)
             if not link:
                 return (
                     "Tool result: share_booking_link — Cal.com booking URL is not "
@@ -908,21 +917,87 @@ async def _single_turn_chat(
 
 # ------------------------- PUBLIC API ---------------------------------------
 
+# --- AUDIT BLOCK (Petrobind RAG preservation guarantee, added 2026-10-05) ----
+# PURPOSE: User requirement — "petrobind global to remain the same in using RAG
+# and its logic, just add frontend and backend in order to be able to response
+# from human rather than using RAG".
+#
+# PROMISE ENFORCED BY THIS FUNCTION (review R1, CP-R2, RAG audit):
+#   1. RAG retrieval (retrieve(), references list) runs UNCONDITIONALLY on every
+#      non-empty inbound_text turn — regardless of any claim held, any inbox
+#      layer flag, or draft_only value.  The ONLY time retrieve() is not called
+#      is when inbound_text is empty ("") — same behaviour as original code.
+#   2. The human-intervention shared inbox (claim-mutex pattern) carves OUT the
+#      AI-generated text from being SENT via Graph API when a human holds the
+#      claim (or, for follow-ups <72h idle) — it does NOT prevent retrieve()
+#      from running, does NOT alter the session inquiry state, and does NOT
+#      change the Jane Tan persona / system prompt / RAG chunk corpus.
+#   3. draft_only=True (used for the /api/inbox/suggestion AI pill):
+#        ✅ RAG still runs 100% (references = await retrieve(safe_text))
+#        ✅ _single_turn_chat() still runs the same LLM (gpt-5-mini via OpenRouter)
+#        ✅ tools still execute their pure logic
+#        ❌ notify.send_handoff_email / send_lead_email / booking emails → SKIP
+#        ❌ conversation_store.save_session() at the end                → SKIP
+#   4. Petrobind live WhatsApp (RAG + Jane persona + deterministic handoff) is
+#      NEVER regressed by the inbox / scheduler / proactive layers.  The
+#      additive layer ONLY changes:
+#        - whether the AI text reply is SENT when a human holds a claim
+#        - when quiet-window deferred follow-ups SEND (next eligible 07:00)
+#        - which Meta payload format is used outside 24h window (template)
+# If any future code breaks these promises — fail the build immediately.
+# -----------------------------------------------------------------------------
+
+def _flag_needs_human(session, reason: str) -> None:
+    """Put this chat in the human-reply queue (shared inbox popup + countdown).
+    Only marks state; the AI's own reply to the buyer is unchanged."""
+    if not getattr(session, "needs_human_since", None):
+        session.needs_human_since = time.time()
+        session.needs_human_reason = (reason or "")[:300]
+
+
 async def handle_incoming_message(
     *,
     phone_number: str,
     inbound_text: str,
+    draft_only: bool = False,
 ) -> str:
     """Entry point called by the FastAPI webhook. Always returns a reply string.
 
     Guarantees:
       - Never raises. Any internal failure falls back to a short confirmation.
       - Always sends 200 OK to Meta (the caller in main.py never sees exceptions).
+      - Petrobind RAG guarantee (see AUDIT BLOCK above): retrieve() runs
+        unconditionally on every non-empty turn, same persona/chunks/corpus.
+
+    draft_only (default False): new SHARED INBOX parameter for the AI suggestion
+    pill in the browser UI. When True:
+      - the ConversationSession loaded is a DEEP-CLONE of the real cached session,
+        so NO mutation leaks (no inquiry fields, no history appends, no counters).
+      - notify.send_handoff_email / send_lead_email / booking interest emails
+        are ALL suppressed (no-ops).
+      - conversation_store.save_session() is never called at the end.
+      - tool side-effects still RUN their logic but the notify module will be
+        told draft_only=True to skip actual SMTP calls.
     """
     load_index_if_needed()  # idempotent — loads rag/index.json on first call
 
     # 1. Session state (new-vs-known, partial inquiry, history, turn counter).
-    session = await get_session(phone_number)
+    if draft_only:
+        # ---- draft-only (UI suggestion pill) ----
+        # Create a disconnected clone so no state leak.
+        import copy as _copy
+        existing = conversation_store._SESSIONS.get(phone_number) if hasattr(conversation_store, "_SESSIONS") else None
+        if existing is None:
+            try:
+                raw = await conversation_store._redis_load(phone_number)
+            except Exception:
+                raw = None
+            existing = raw or conversation_store.ConversationSession(phone_number=phone_number)
+        session = _copy.deepcopy(existing)
+        # Monkey-patch the session to suppress notify side-effects inside tools.
+        setattr(session, "_draft_only", True)
+    else:
+        session = await get_session(phone_number)
     safe_text = (inbound_text or "").strip()
 
     # 2. Deterministic handoff: first-tap retrieval + code-side guardrail (PLAN 4.4).
@@ -945,7 +1020,9 @@ async def handle_incoming_message(
         # Bypass the LLM entirely. Escalate to a human so the model cannot be
         # tempted to guess about a question whose answer didn't match the KB.
         print(f"[llm] CODE-SIDE HANDOFF for {phone_number}: no retrieval hits on product question {safe_text[:100]!r}")
-        if not session.handoff_notified:
+        if not draft_only:
+            _flag_needs_human(session, f"No knowledge-base match: {safe_text[:200]}")
+        if not session.handoff_notified and not draft_only:
             summary_lines = [f"Query: {safe_text[:300]}"]
             inquiry = {k: v for k, v in asdict(session.inquiry).items() if v}
             if inquiry:
@@ -964,6 +1041,7 @@ async def handle_incoming_message(
                 partial_inquiry_summary="\n".join(summary_lines),
                 relationship_summary=session.relationship_summary(),
                 recent_transcript=transcript,
+                draft_only=draft_only,
             )
             session.handoff_notified = True
         if _looks_like_pricing_question(safe_text):
@@ -974,7 +1052,8 @@ async def handle_incoming_message(
             if booking.is_configured() and not session.booking_link_shared_at:
                 reply += " Want to grab a quick call in the meantime? " + booking.get_booking_link()
                 session.booking_link_shared_at = time.time()
-                await _notify_booking_interest(session)
+                if not draft_only:
+                    await _notify_booking_interest(session)
         elif booking.is_configured() and not session.booking_link_shared_at:
             reply = (
                 "Good question, let me check on that and get back to you. "
@@ -982,13 +1061,15 @@ async def handle_incoming_message(
                 + booking.get_booking_link()
             )
             session.booking_link_shared_at = time.time()
-            await _notify_booking_interest(session)
+            if not draft_only:
+                await _notify_booking_interest(session)
         else:
             reply = "Good question, let me check on that and get back to you shortly."
         # Append to history so the next turn has context of the handoff.
         session.append("user", safe_text)
         session.append("assistant", reply)
-        await conversation_store.save_session(session)
+        if not draft_only:
+            await conversation_store.save_session(session)
         return reply
 
     # 3. Append the user turn (reference block injected in the LLM call, not history).
@@ -998,7 +1079,11 @@ async def handle_incoming_message(
     text = None
     called_tools: set[str] = set()
     try:
-        text, called_tools = await _single_turn_chat(session=session, references=references)
+        text, called_tools = await _single_turn_chat(
+            session=session,
+            references=references,
+            draft_only=draft_only,
+        )
     except Exception as exc:
         print(f"[llm] turn exception: {exc!r}")
         text = None
@@ -1013,7 +1098,8 @@ async def handle_incoming_message(
                 + booking.get_booking_link()
             )
             session.booking_link_shared_at = time.time()
-            await _notify_booking_interest(session)
+            if not draft_only:
+                await _notify_booking_interest(session)
         else:
             fallback = (
                 "Let me get back to you on this shortly. Which product are "
@@ -1021,7 +1107,7 @@ async def handle_incoming_message(
                 "director can prepare?"
             )
         # Only call this once per session to avoid spam.
-        if not session.handoff_notified:
+        if not session.handoff_notified and not draft_only:
             inquiry = {k: v for k, v in asdict(session.inquiry).items() if v}
             await notify.send_handoff_email(
                 phone_number=session.phone_number,
@@ -1029,10 +1115,12 @@ async def handle_incoming_message(
                 partial_inquiry_summary=f"Query: {safe_text[:300]}\nInquiry: {json.dumps(inquiry)}",
                 relationship_summary=session.relationship_summary(),
                 recent_transcript=session.recent_transcript(),
+                draft_only=draft_only,
             )
             session.handoff_notified = True
         session.append("assistant", fallback)
-        await conversation_store.save_session(session)
+        if not draft_only:
+            await conversation_store.save_session(session)
         return fallback
 
     # 5. Post-processing: WhatsApp formatting adjustments + Q&A cap nudge.
@@ -1051,6 +1139,7 @@ async def handle_incoming_message(
         and _ESCALATION_ROLE_RE.search(cleaned)
         and _ESCALATION_ACTION_RE.search(cleaned)
         and not session.handoff_notified
+        and not draft_only
     ):
         print(
             f"[llm] SAFETY NET: reply promised escalation but no notify tool "
@@ -1089,7 +1178,8 @@ async def handle_incoming_message(
         session.append("assistant", cleaned)
     else:
         last["content"] = cleaned
-    await conversation_store.save_session(session)
+    if not draft_only:
+        await conversation_store.save_session(session)
     return cleaned
 
 

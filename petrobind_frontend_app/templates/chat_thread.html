@@ -1,0 +1,270 @@
+{% extends "base.html" %}
+{% block title %}Chat {{ e164 }} — Petrobind Inbox{% endblock %}
+{% block content %}
+<div class="flex-1 flex overflow-hidden">
+  <div id="claim-banner" class="hidden fixed top-14 left-0 right-0 z-20 px-6 py-2.5 bg-red-600 text-white text-sm font-medium shadow-md flex items-center justify-between">
+    <div id="claim-banner-text">
+      ⚠ Chat CLAIMED by another admin. You can read but not send.
+    </div>
+    <button id="claim-banner-dismiss" class="ml-4 text-white/80 hover:text-white">&times;</button>
+  </div>
+
+  <!-- LEFT: chat list condensed (mobile-only visibility below). Desktop: show both via sidebar-style layout -->
+  <aside class="embed-hide hidden lg:block w-[340px] border-r border-gray-200 bg-white overflow-hidden flex flex-col">
+    <div class="embed-hide px-4 py-2.5 border-b border-gray-100 bg-gray-50 text-xs text-gray-500 font-medium uppercase tracking-wide">
+      Back to list
+    </div>
+    <div class="embed-hide px-4 py-3">
+      <a href="/inbox/chats" class="inline-flex items-center gap-1.5 text-sm text-pb-navy hover:text-pb-greenDark font-medium transition">
+        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/></svg>
+        All chats
+      </a>
+    </div>
+    <div class="px-4 py-3 border-t border-gray-100 space-y-2 text-sm">
+      <div class="flex items-start gap-2">
+        <div class="w-10 h-10 shrink-0 rounded-full bg-gradient-to-br from-pb-navy to-slate-700 text-white flex items-center justify-center font-semibold">
+          {{ (e164 | replace('+', '') | last) }}
+        </div>
+        <div class="min-w-0">
+          {% if contact_name %}<div class="font-medium text-gray-900 break-all">{{ contact_name }}</div>{% endif %}
+          <div class="font-mono font-medium text-gray-900 break-all">{{ e164 }}</div>
+          <div class="text-xs text-gray-500 mt-0.5">WhatsApp buyer</div>
+        </div>
+      </div>
+
+    </div>
+  </aside>
+
+  <!-- RIGHT: main thread -->
+  <section class="flex-1 flex flex-col overflow-hidden bg-pb-chatBg">
+    <!-- Header -->
+    <div class="bg-white px-5 py-3 border-b border-gray-200 flex items-center justify-between shadow-sm z-10">
+      <div class="flex items-center gap-3">
+        <a href="/inbox/chats" class="md:hidden inline-flex p-1.5 rounded-md hover:bg-gray-100 text-gray-600 -ml-1">
+          <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/></svg>
+        </a>
+        <div class="w-9 h-9 rounded-full bg-gradient-to-br from-pb-navy to-slate-700 text-white flex items-center justify-center font-semibold text-sm">
+          {{ (e164 | replace('+', '') | last) }}
+        </div>
+        <div>
+          {% if contact_name %}<div class="font-semibold text-gray-900">{{ contact_name }}</div>{% endif %}
+          <div class="flex flex-wrap items-center gap-x-3">
+            <span class="font-mono {% if contact_name %}text-xs text-gray-500{% else %}font-semibold text-gray-900{% endif %}">{{ e164 }}</span>
+            <span id="hdr-countdown" class="text-xs font-mono font-semibold text-gray-400" title="WhatsApp only allows free-text replies for 24h after the buyer's last message">⏱ …</span>
+          </div>
+          <div class="text-xs text-gray-500">{{ messages|length }} message{{ 's' if messages|length != 1 else '' }} in thread</div>
+        </div>
+      </div>
+      <div class="flex flex-col items-end gap-1">
+        <button type="button" id="mode-switch" role="switch" aria-checked="false" aria-label="Who replies: AI or Human"
+                class="inline-flex items-center gap-2 rounded-full border border-gray-300 pl-1 pr-3 py-1 text-sm font-medium transition">
+          <span id="mode-knob" class="inline-block w-5 h-5 rounded-full bg-white shadow transition"></span>
+          <span id="mode-label">AI replying</span>
+        </button>
+        <div id="claim-status-text" class="hidden sm:block max-w-[18rem] text-right text-[11px] text-gray-500" aria-live="polite"></div>
+      </div>
+    </div>
+
+    <!-- Messages -->
+    <div id="message-stack" class="flex-1 overflow-y-auto px-4 md:px-10 py-6 space-y-3">
+      {% if not messages %}
+      <div class="h-full flex items-center justify-center">
+        <div class="text-center max-w-sm">
+          <div class="w-16 h-16 rounded-full bg-white shadow mx-auto flex items-center justify-center mb-4">
+            <svg class="w-8 h-8 text-pb-green/70" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"/></svg>
+          </div>
+          <div class="text-sm font-medium text-gray-700">No messages in this thread yet</div>
+          <div class="text-xs text-gray-500 mt-1">Messages from the buyer and replies will appear here.</div>
+        </div>
+      </div>
+      {% else %}
+      {% for m in messages %}
+      {% set dir = m.direction %}
+      {% set is_buyer = (dir == 'buyer') %}
+      {% set is_ai = (dir == 'ai') %}
+      {% set is_human = (dir == 'human') %}
+      {% set is_system = (dir == 'system') %}
+      <div
+        class="flex {% if is_buyer %}justify-start{% else %}justify-end{% endif %}"
+        data-msg-id="{{ m.id }}"
+        data-direction="{{ dir }}"
+        data-wamid="{{ m.wamid }}"
+      >
+        <div
+          class="message-bubble
+                 max-w-[80%] md:max-w-[70%]
+                 px-3.5 py-2
+                 rounded-2xl
+                 text-[15px] leading-relaxed
+                 shadow-sm
+                 {% if is_buyer %}
+                   bg-white text-gray-900 rounded-tl-sm border border-gray-100
+                 {% elif is_ai %}
+                   bg-pb-aiBubble text-gray-900 rounded-tr-sm border border-green-100
+                 {% elif is_human %}
+                   bg-pb-humanBubble text-gray-900 rounded-tr-sm border border-blue-100
+                 {% elif is_system %}
+                   bg-pb-systemBubble text-amber-900 rounded-tr-sm border border-amber-200 italic text-sm
+                 {% else %}
+                   bg-white
+                 {% endif %}"
+        >
+          {% if is_ai %}<div class="text-[10px] font-bold uppercase tracking-wider text-pb-greenDark/80 mb-0.5">AI · Jane Tan</div>
+          {% elif is_human %}<div class="text-[10px] font-bold uppercase tracking-wider text-blue-700/80 mb-0.5">{{ m.held_by or admin_name }} · human</div>
+          {% elif is_system %}<div class="text-[10px] font-bold uppercase tracking-wider text-amber-700/80 mb-0.5">system note</div>
+          {% endif %}
+
+          <div class="whitespace-pre-wrap break-words">{{ m.text or '📎 [non-text media — see raw payload]' }}</div>
+
+          {% if m.media_type and m.media_url %}
+            <div class="mt-1.5 text-xs border-t {% if is_system %}border-amber-200{% else %}border-black/5{% endif %} pt-1 opacity-70">
+              📎 {{ m.media_type }}
+            </div>
+          {% endif %}
+
+          {% if m.errored %}
+            <div class="mt-1.5 text-[11px] text-red-700 bg-red-50 rounded px-2 py-1 border border-red-100">
+              ⚠ Send failed: {{ m.error_detail or 'unknown error' }}
+            </div>
+          {% endif %}
+
+          {% if m.meta_statuses_jsonb %}
+            <div class="mt-1 text-[10px] text-gray-400 text-right font-mono">
+              {% set ns = namespace(first=true) %}
+              {% for s, t in (m.meta_statuses_jsonb or {}).items() %}
+                {% if not ns.first %} · {% endif %}{{ s }}{% set ns.first = false %}
+              {% endfor %}
+            </div>
+          {% endif %}
+
+          <div class="mt-1 flex items-center justify-end gap-2 {% if is_system %}opacity-70{% endif %}">
+            <div class="text-[10px] text-gray-400">
+              <time>{{ (m.created_at or '')[:19].replace('T', ' ') }}</time>
+              {% if m.sent_id_from_graph %}<span class="ml-1 text-gray-300 font-mono">{{ m.sent_id_from_graph[-8:] }}</span>{% endif %}
+            </div>
+          </div>
+        </div>
+      </div>
+      {% endfor %}
+      {% endif %}
+    </div>
+
+    <!-- 24h window status banner (sticky ribbon) -->
+    <div id="window-status-banner" class="w-full sticky top-0 z-40"></div>
+
+    <!-- AI suggestion pill (hidden by default) -->
+    <div id="suggestion-pill" class="hidden bg-white border-t border-gray-200 px-4 md:px-10 py-3 shadow-[0_-1px_2px_rgba(0,0,0,0.03)] z-10">
+      <div class="max-w-5xl mx-auto">
+        <div class="flex items-center justify-between mb-1.5">
+          <div class="inline-flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wider text-pb-greenDark bg-pb-green/10 px-2 py-0.5 rounded-full">
+            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
+            AI suggested reply · Petrobind RAG
+          </div>
+          <div id="suggestion-meta" class="text-[11px] text-gray-400">—</div>
+        </div>
+        <div id="suggestion-text" class="text-sm text-gray-800 bg-pb-aiBubble/30 border border-pb-green/20 rounded-lg p-3 italic whitespace-pre-wrap max-h-44 overflow-y-auto">
+          (Loading…)
+        </div>
+        <div class="mt-2 flex flex-wrap items-center gap-2">
+          <button
+            id="btn-suggestion-accept"
+            class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-pb-green text-white text-sm font-medium hover:bg-pb-greenDark transition"
+          >
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/></svg>
+            Accept & send
+          </button>
+          <button
+            id="btn-suggestion-edit"
+            class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-white border border-gray-300 text-gray-700 text-sm font-medium hover:bg-gray-50 transition"
+          >
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/></svg>
+            Edit in input
+          </button>
+          <button
+            id="btn-suggestion-discard"
+            class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-white border border-gray-200 text-gray-500 text-sm font-medium hover:bg-gray-50 hover:text-gray-700 transition"
+          >
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+            Discard
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Send input (HTMX form) — wrapped in relative for disabled overlay -->
+    <div id="send-form-wrapper" class="bg-white border-t border-gray-200 px-4 md:px-10 py-4 z-10 relative">
+      <form
+        id="human-send-form"
+        class="max-w-5xl mx-auto"
+        hx-post="/api/inbox/chats/{{ e164 }}/messages"
+        hx-swap="none"
+        hx-headers='{"Authorization": "Bearer __INBOX_ADMIN_TOKEN_PLACEHOLDER__"}'
+        hx-on::after-request="window.__handleSendResult(event)"
+      >
+        <input type="hidden" name="reply_to_wamid" id="form-reply-to" value="{{ last_buyer_wamid }}">
+        <div class="rounded-2xl border border-gray-200 focus-within:border-pb-green focus-within:ring-2 focus-within:ring-pb-green/20 transition bg-white shadow-sm">
+          <textarea
+            id="human-text-input"
+            name="text"
+            rows="2"
+            required
+            placeholder="Type your reply to {{ e164 }}… (Shift+Enter for newline, Enter to send)"
+            class="w-full resize-none rounded-t-2xl px-4 py-3 outline-none text-[15px] leading-relaxed placeholder:text-gray-400"
+            data-e164="{{ e164 }}"
+          ></textarea>
+          <div class="flex items-center justify-between px-4 py-2 border-t border-gray-100 bg-gray-50/60 rounded-b-2xl">
+            <div class="text-xs text-gray-500" id="send-status-text">
+              Press <kbd class="px-1.5 py-0.5 rounded bg-white border border-gray-200 text-[10px] font-mono">Enter</kbd> to send
+              ·
+              <kbd class="px-1.5 py-0.5 rounded bg-white border border-gray-200 text-[10px] font-mono">Shift+Enter</kbd> newline
+            </div>
+            <div class="flex items-center gap-2">
+              <button
+                type="button"
+                id="btn-suggestion-reload-inline"
+                class="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md text-xs text-pb-greenDark bg-pb-green/10 hover:bg-pb-green/20 font-medium transition"
+              >
+                <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
+                AI suggest
+              </button>
+              <button
+                type="submit"
+                id="btn-send-submit"
+                class="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-pb-navy hover:bg-slate-900 text-white text-sm font-medium transition disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                Send
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8"/></svg>
+              </button>
+            </div>
+          </div>
+        </div>
+      </form>
+      <div id="send-form-disabled-overlay" class="send-form-disabled-overlay hidden rounded-2xl">
+        <div class="p-4">
+          <div class="text-sm font-medium text-amber-800 mb-1">Freeform disabled — outside 24-hour window</div>
+          <button
+            type="button"
+            id="btn-pick-template-inline"
+            class="text-sm text-amber-700 underline hover:text-amber-900 font-medium"
+          >
+            Pick Template →
+          </button>
+        </div>
+      </div>
+    </div>
+  </section>
+</div>
+
+<script>
+  // Inject the session_id + admin token into HTMX headers (templates don't have direct access to INBOX_ADMIN_TOKEN at render time for the bearer header; frontend reads the login cookie for sid and uses the bearer token fetched at runtime).
+  window.__INBOX_CTX__ = {
+    e164: {{ e164 | tojson }},
+    session_id: {{ session_id | tojson }},
+    admin_name: {{ admin_name | tojson }},
+    last_buyer_wamid: {{ last_buyer_wamid | tojson }},
+    supa_url: {{ supa_url | tojson }},
+    supa_anon_key: {{ supa_anon_key | tojson }},
+  };
+</script>
+
+{% endblock %}

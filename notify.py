@@ -453,8 +453,19 @@ async def send_lead_email(
     is_new_prospect: Optional[bool] = None,
     relationship_summary: Optional[str] = None,
     recent_transcript: Optional[str] = None,
+    draft_only: bool = False,
 ) -> bool:
-    """Called by llm_assistant when capture_trade_inquiry tool is invoked."""
+    """Called by llm_assistant when capture_trade_inquiry tool is invoked.
+
+    draft_only (new, default False): when True, returns True without actually
+    sending an email. Used by the shared inbox's AI suggestion pill (which
+    runs the full pipeline as a "what if" so the UI can show what Jane Tan
+    would have done, without spamming Petrobind sales while a human is still
+    reviewing the chat).
+    """
+    if draft_only:
+        print(f"[notify] DRAFT_ONLY send_lead_email: phone={phone_number!r} product={product!r} — NO SMTP SENT")
+        return True
     fields: Dict[str, Any] = {
         "whatsapp_number": f"+{phone_number.lstrip('+')}",
         "company_name": company_name,
@@ -496,8 +507,12 @@ async def send_handoff_email(
     partial_inquiry_summary: str = "",
     relationship_summary: Optional[str] = None,
     recent_transcript: Optional[str] = None,
+    draft_only: bool = False,
 ) -> bool:
     """Called when the model hits something outside the KB (zero-hallucination guard)."""
+    if draft_only:
+        print(f"[notify] DRAFT_ONLY send_handoff_email: phone={phone_number!r} — NO SMTP SENT")
+        return True
     fields: Dict[str, Any] = {
         "whatsapp_number": f"+{phone_number.lstrip('+')}",
         "reason": reason,
@@ -522,6 +537,7 @@ async def send_booking_interest_email(
     phone_number: str,
     relationship_summary: Optional[str] = None,
     recent_transcript: Optional[str] = None,
+    draft_only: bool = False,
 ) -> bool:
     """Called the moment the assistant shares the Cal.com link / the buyer
     says they want to book, BEFORE they've necessarily completed the actual
@@ -529,6 +545,9 @@ async def send_booking_interest_email(
     Cal.com's BOOKING_CREATED webhook confirms a real slot) — without this,
     a buyer who says "yes I'd like to book" in chat but never finishes the
     external Cal.com flow would generate no notification at all."""
+    if draft_only:
+        print(f"[notify] DRAFT_ONLY send_booking_interest_email: phone={phone_number!r} — NO SMTP SENT")
+        return True
     fields: Dict[str, Any] = {
         "whatsapp_number": f"+{phone_number.lstrip('+')}",
     }
