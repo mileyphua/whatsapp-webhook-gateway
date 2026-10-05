@@ -644,9 +644,12 @@ def _format_buyer_memory(session: ConversationSession) -> str:
         else "booking link not yet shared"
     )
     return (
-        f"Buyer memory: {session.relationship_summary()}. Known so far: {known}. "
+        f"Buyer memory (background only): {session.relationship_summary()}. Known so far: {known}. "
         f"Do NOT ask again for any field already listed above, only ask for "
-        f"what's genuinely still missing. {booking_status}."
+        f"what's genuinely still missing. {booking_status}. "
+        f"Do NOT bring up their earlier order, quote or inquiry, or remind them about it, unless the buyer "
+        f"mentions orders first; a salesperson who keeps circling back to an old order sounds desperate. "
+        f"Chat casually about what they say now and let them lead."
     )
 
 
@@ -1167,6 +1170,12 @@ async def handle_incoming_message(
         cleaned = reply_guard.strip_repeats(cleaned, reply_guard.previous_assistant_replies(session.history[:last_user_idx]))
     except Exception as exc:
         print(f"[llm] repetition guard skipped: {type(exc).__name__}: {exc!s}")
+
+    # Don't chase: no reminders about an earlier order unless the buyer brought orders up themselves.
+    try:
+        cleaned = reply_guard.strip_order_reminders(cleaned, safe_text)
+    except Exception as exc:
+        print(f"[llm] order-reminder guard skipped: {type(exc).__name__}: {exc!s}")
 
     # Safety net: the model sometimes promises an escalation in its reply
     # text ("I'll arrange a discussion with our senior sales team...")

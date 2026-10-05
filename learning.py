@@ -36,6 +36,17 @@ BUILTIN_SKILLS: List[Dict[str, Any]] = [
         ),
     },
     {
+        "id": "builtin-casual-not-pushy", "builtin": True, "always": True, "status": "active",
+        "name": "Casual, never pushy",
+        "description": "Applies to every reply. How to treat a buyer who has an earlier order, quote or inquiry, or who is just chatting.",
+        "instructions": (
+            "Talk about what the buyer says now, casually, and let them lead. Don't bring up their earlier order, quote or inquiry, or "
+            "ask for updates on it, until they mention orders themselves; a salesperson who keeps circling back to an old order "
+            "sounds desperate and pushes people away. Use what you remember silently (don't re-ask known details) and never recap "
+            "it just to show you remember. Skip chasing questions like \"any update on...\"; if they're chatting, chat."
+        ),
+    },
+    {
         "id": "builtin-hand-over", "builtin": True, "always": False, "status": "active",
         "name": "Hand over to a human",
         "description": "Use when the buyer asks for a person, a call or a manager, wants to negotiate or confirm price, contract or payment terms, is upset or frustrated, or the question cannot be answered from the reference material.",

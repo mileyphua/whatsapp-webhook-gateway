@@ -80,3 +80,43 @@ def strip_repeats(new_text: str, previous_replies: List[str], **kw) -> str:
 def previous_assistant_replies(history: list, limit: int = 8) -> List[str]:
     out = [str(m.get("content")) for m in history if m.get("role") == "assistant" and m.get("content")]
     return out[-limit:]
+
+
+# ------------------------------------------------------------------ order reminders
+# A salesperson who keeps bringing up "your earlier order" sounds desperate. The AI chats casually and only talks
+# about an earlier order when the buyer raises order topics themselves.
+_ORDER_WORDS = re.compile(
+    r"\b(?:orders?|ordered|ordering|quote|quotes|quotation|inquiry|inquiries|enquiry|enquiries|shipment|shipping|shipped|delivery|"
+    r"deliver|invoice|invoices|po|purchase|payment|container|containers|loading|cargo|vessel|consignment|booking)\b", re.I)
+
+_ORDER_REMINDER = re.compile(
+    r"(?:"
+    r"\byour\s+(?:earlier|previous|last|recent|pending|open|existing)\s+(?:order|inquiry|enquiry|quote|quotation|request|shipment)"
+    r"|\b(?:following|follow(?:ing)?\s+up|circling|circle|checking|check(?:ing)?\s+in|touching|touch|any\s+update)\s+(?:up\s+)?(?:back\s+)?(?:on|about|regarding|with)\s+(?:your|the)\s+(?:\w+\s+){0,4}?(?:order|inquiry|enquiry|quote|quotation|request|shipment)"
+    r"|\bas\s+(?:we\s+)?discussed\b"
+    r"|\bthe\s+(?:order|inquiry|enquiry|quote|quotation)\s+(?:you|we)\s+(?:mentioned|discussed|placed|made|talked)"
+    r"|\byou\s+(?:mentioned|asked\s+about|inquired\s+about|enquired\s+about)\s+(?:earlier|before|previously|last\s+time)"
+    r"|\bregarding\s+your\s+(?:\w+\s+){0,3}?(?:order|inquiry|enquiry|quote|quotation)"
+    r")", re.I)
+
+
+def buyer_mentions_order(text: str) -> bool:
+    return bool(text and _ORDER_WORDS.search(text))
+
+
+def strip_order_reminders(reply: str, buyer_text: str) -> str:
+    """Remove sentences that remind the buyer of an earlier order/inquiry when the buyer did not bring orders up.
+    Never returns an empty reply."""
+    if buyer_mentions_order(buyer_text):
+        return reply
+    kept_lines = []
+    for line in reply.split("\n"):
+        sents = split_sentences(line)
+        if not sents:
+            kept_lines.append(line)
+            continue
+        kept = [x for x in sents if not _ORDER_REMINDER.search(x)]
+        if kept:
+            kept_lines.append(" ".join(kept))
+    result = re.sub(r"\n{3,}", "\n\n", "\n".join(kept_lines)).strip()
+    return result or reply

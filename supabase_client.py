@@ -795,3 +795,21 @@ async def delete_chat(e164_variants: List[str]) -> Dict[str, int]:
             except Exception as exc:
                 print(f"[supabase_client] delete_chat {table} failed: {type(exc).__name__}: {exc!s}")
     return out
+
+
+async def reset_session_mirror(e164_variants: List[str]) -> bool:
+    """After "forget AI memory": blank the mirrored session summary (inquiry chips, history, flags).
+    Messages are left untouched so the thread stays readable in the inbox."""
+    if not (ENABLED and e164_variants):
+        return False
+    flt = "in.(" + ",".join('"%s"' % v.replace('"', "") for v in e164_variants) + ")"
+    body = {"inquiry_jsonb": {}, "history_jsonb": [], "lead_notified": False, "handoff_notified": False,
+            "booking_intent_notified": False, "booking_link_shared_at": None,
+            "followup_nudge_kind_1_at": None, "followup_nudge_kind_2_at": None}
+    try:
+        async with httpx.AsyncClient(timeout=_LONG_TIMEOUT) as c:
+            r = await c.patch(f"{_REST_BASE}/sessions", headers={**_HEADERS, "Prefer": "return=minimal"}, params={"e164": flt}, json=body)
+        return r.status_code < 300
+    except Exception as exc:
+        print(f"[supabase_client] reset_session_mirror failed: {type(exc).__name__}: {exc!s}")
+        return False

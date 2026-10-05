@@ -243,6 +243,7 @@
 <!-- ⋮ action menu -->
 <div id="chat-actions" role="menu" hidden class="fixed z-50 w-48 rounded-lg border border-gray-200 bg-white shadow-xl py-1 text-sm">
   <button type="button" role="menuitem" id="act-rename" class="w-full text-left px-3 py-2 hover:bg-gray-50">Set name</button>
+  <button type="button" role="menuitem" id="act-forget" class="w-full text-left px-3 py-2 hover:bg-gray-50">Forget AI memory</button>
   <button type="button" role="menuitem" id="act-delete" class="w-full text-left px-3 py-2 text-red-700 hover:bg-red-50">Delete chat</button>
 </div>
 
@@ -258,6 +259,20 @@
   </div>
   <div id="chat-menu-err" class="mt-1 text-xs text-red-600" hidden></div>
 </div>
+
+<!-- forget AI memory confirmation (centered) -->
+<dialog id="forget-dialog" aria-labelledby="forget-title" class="rounded-2xl p-0 w-[92vw] max-w-sm border-0 shadow-2xl">
+  <div class="p-6">
+    <h2 id="forget-title" class="text-lg font-semibold text-gray-900">Make the AI forget this chat?</h2>
+    <p id="forget-body" class="mt-2 text-sm text-gray-600"></p>
+    <div id="forget-err" class="mt-2 text-sm text-red-600" hidden></div>
+    <div class="mt-6 flex justify-end gap-2">
+      <button type="button" id="forget-cancel" class="px-4 py-2 rounded-full border border-gray-300 text-sm font-medium text-gray-700 hover:bg-gray-50">Cancel</button>
+      <button type="button" id="forget-confirm" class="px-4 py-2 rounded-full bg-gray-900 hover:bg-black text-white text-sm font-medium">Forget</button>
+    </div>
+  </div>
+</dialog>
+<div id="list-toast" hidden role="status" class="fixed left-1/2 -translate-x-1/2 bottom-6 z-50 max-w-[92vw] rounded-lg bg-gray-900 text-white text-sm px-4 py-2.5 shadow-xl"></div>
 
 <!-- delete confirmation (centered, like WhatsApp) -->
 <dialog id="del-dialog" aria-labelledby="del-title" class="rounded-2xl p-0 w-[92vw] max-w-sm border-0 shadow-2xl">
@@ -356,6 +371,26 @@
       })
       .catch(function (e) { var d = document.getElementById("del-err"); d.textContent = "Could not delete: " + e.message; d.hidden = false; })
       .finally(function () { btn.disabled = false; btn.textContent = "Delete"; });
+  });
+
+  // ---- forget AI memory: the AI treats the next message as a brand-new conversation; messages stay visible
+  var forgetDlg = document.getElementById("forget-dialog"), forgetTarget = null, toastTimer = null;
+  function listToast(msg) { var t = document.getElementById("list-toast"); t.textContent = msg; t.hidden = false; clearTimeout(toastTimer); toastTimer = setTimeout(function () { t.hidden = true; }, 5000); }
+  document.getElementById("act-forget").addEventListener("click", function () {
+    actions.hidden = true; forgetTarget = current.getAttribute("data-e164");
+    document.getElementById("forget-body").textContent = "The AI will treat the next message from " + label() + " as a brand-new conversation and won\u2019t remember earlier orders or details. The messages stay visible here.";
+    document.getElementById("forget-err").hidden = true;
+    forgetDlg.showModal(); document.getElementById("forget-cancel").focus();
+  });
+  document.getElementById("forget-cancel").addEventListener("click", function () { forgetDlg.close(); });
+  document.getElementById("forget-confirm").addEventListener("click", function () {
+    var btn = this, e164 = forgetTarget; if (!e164) return;
+    btn.disabled = true; btn.textContent = "Forgetting\u2026";
+    fetch("/api/inbox/chats/" + encodeURIComponent(e164) + "/forget-memory", { method: "POST", credentials: "same-origin" })
+      .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); })
+      .then(function (res) { if (!res.ok) throw new Error(res.j.detail || "failed"); forgetDlg.close(); listToast("Done. The AI no longer remembers this chat."); refresh(); })
+      .catch(function (e) { var d = document.getElementById("forget-err"); d.textContent = "Could not reset: " + e.message; d.hidden = false; })
+      .finally(function () { btn.disabled = false; btn.textContent = "Forget"; });
   });
 
   document.addEventListener("click", function (ev) { if (!actions.hidden && !actions.contains(ev.target)) actions.hidden = true; if (!menu.hidden && !menu.contains(ev.target)) menu.hidden = true; });

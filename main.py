@@ -2702,6 +2702,32 @@ async def api_inbox_handoff_resolve(e164: str, request: Request) -> JSONResponse
 # ---------------------------------------------------------------------------
 # Admin: delete a chat (with transcript kept in the logs) / import old history
 # ---------------------------------------------------------------------------
+@app.post("/api/inbox/chats/{e164}/forget-memory")
+async def api_inbox_forget_memory(e164: str, request: Request) -> JSONResponse:
+    """Make the AI forget this chat: the next message starts a brand-new conversation. Messages stay visible."""
+    fail = _requires_inbox_bearer(request)
+    if fail:
+        return fail
+    key = contact_names.normalize(e164)
+    if not key:
+        return JSONResponse(content={"detail": "invalid number"}, status_code=400)
+    try:
+        await conversation_store.redis_scan_all_sessions()
+    except Exception:
+        pass
+    sess = _find_session_by_number(e164)
+    variants = {e164, key, "+" + key}
+    if sess is not None:
+        variants.add(sess.phone_number)
+    turns = len([m for m in (sess.history if sess is not None else []) if m.get("role") in ("user", "assistant")])
+    for v in variants:
+        await conversation_store.reset_session(v)
+    mirrored = await _sb.reset_session_mirror(sorted(variants))
+    await _sb.audit(actor=INBOX_ADMIN_NAME, action="memory_reset", e164=e164,
+                    detail={"had_ai_memory": sess is not None, "turns_forgotten": turns, "supabase_summary_reset": mirrored})
+    return JSONResponse(content={"ok": True, "e164": e164, "turns_forgotten": turns})
+
+
 @app.delete("/api/inbox/chats/{e164}")
 async def api_inbox_delete_chat(e164: str, request: Request) -> JSONResponse:
     """Permanently delete a conversation (Supabase + Redis + name). A transcript copy is written to the logs."""
