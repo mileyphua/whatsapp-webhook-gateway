@@ -339,6 +339,7 @@ async def _persist_outbound_safe(
     sent_id_from_graph: Optional[str] = None,
     errored: bool = False,
     error_detail: Optional[str] = None,
+    sent_by: Optional[str] = None,
 ) -> None:
     if not _sb_enabled():
         return
@@ -352,6 +353,7 @@ async def _persist_outbound_safe(
                 sent_id_from_graph=sent_id_from_graph,
                 errored=errored,
                 error_detail=error_detail,
+                sent_by=sent_by,
             )
     except Exception as exc:
         print(
@@ -1007,6 +1009,7 @@ async def send_whatsapp_text(
     preview_url: bool = True,
     reply_to_message_id: Optional[str] = None,
     sender_direction: str = "ai",   # NEW: "ai" | "human" | "system" for inbox thread
+    sent_by: Optional[str] = None,  # display name of the team member who sent a human message
 ) -> Dict[str, Any]:
     """Send a WhatsApp text via Cloud API Graph.
 
@@ -1053,6 +1056,7 @@ async def send_whatsapp_text(
                 text=text,
                 reply_to_wamid=reply_to_message_id,
                 sent_id_from_graph=sent_id,
+                sent_by=sent_by,
             ))
             return body
         # --- additive: persist failed send with errored flag ---
@@ -2478,6 +2482,13 @@ def _requires_admin(request: Request) -> Optional[JSONResponse]:
     return None
 
 
+def _identity(request: Request) -> tuple:
+    """(lock id, display name) of whoever is calling. A chat is held by a PERSON, not a browser tab, so the same
+    person in two tabs is never locked out of their own chat, while two different people can't both reply."""
+    info = _auth_info(request) or {}
+    return "u:" + str(info.get("user") or "admin"), info.get("name") or INBOX_ADMIN_NAME
+
+
 @app.get("/api/inbox/me")
 async def api_inbox_me(request: Request) -> JSONResponse:
     """Who am I logged in as, and what may I do?"""
@@ -2558,10 +2569,7 @@ async def api_inbox_send_human_message(e164: str, request: Request) -> JSONRespo
     # --- claim check: only the holder (or unclaimed) can send ---
     # We extract the session_id from a custom header if present (the frontend
     # sets it on each request after login), else treat as generic admin send.
-    my_session_id = (
-        request.headers.get("X-Inbox-Session-Id")
-        or f"rest-send-{secrets.token_hex(6)}"
-    )
+    my_session_id, my_name = _identity(request)
     held = await _sb.claim_is_human_held(e164)
     if held and held.get("session_id") != my_session_id:
         # Someone else holds the claim → 409
@@ -2584,7 +2592,7 @@ async def api_inbox_send_human_message(e164: str, request: Request) -> JSONRespo
         try:
             await _sb.claim_acquire(
                 e164=e164,
-                held_by=INBOX_ADMIN_NAME,
+                held_by=my_name,
                 session_id=my_session_id,
                 ttl_seconds=120,
             )
@@ -2597,6 +2605,7 @@ async def api_inbox_send_human_message(e164: str, request: Request) -> JSONRespo
             text=text,
             reply_to_message_id=reply_to,
             sender_direction="human",
+            sent_by=my_name,
         )
     except RuntimeError as exc:
         return JSONResponse(
@@ -2606,7 +2615,7 @@ async def api_inbox_send_human_message(e164: str, request: Request) -> JSONRespo
     sent_id = (result.get("messages") or [{}])[0].get("id") if result else None
     await _clear_needs_human(e164)
     asyncio.create_task(_sb.audit(
-        actor=INBOX_ADMIN_NAME,
+        actor=my_name,
         action="human_send",
         e164=e164,
         detail={"session_id": my_session_id, "chars": len(text), "sent_id": sent_id},
@@ -2619,12 +2628,7 @@ async def api_inbox_acquire_claim(e164: str, request: Request) -> JSONResponse:
     fail = _requires_inbox_bearer(request)
     if fail:
         return fail
-    # session_id: prefer X-Inbox-Session-Id header (frontend), else generate
-    my_session_id = (
-        request.headers.get("X-Inbox-Session-Id")
-        or request.headers.get("x-inbox-session-id")
-        or secrets.token_urlsafe(24)
-    )
+    my_session_id, my_name = _identity(request)
     ttl = 120
     try:
         body = await request.json()
@@ -2635,7 +2639,7 @@ async def api_inbox_acquire_claim(e164: str, request: Request) -> JSONResponse:
     try:
         acquired, conflict = await _sb.claim_acquire(
             e164=e164,
-            held_by=INBOX_ADMIN_NAME,
+            held_by=my_name,
             session_id=my_session_id,
             ttl_seconds=ttl,
         )
@@ -2647,7 +2651,7 @@ async def api_inbox_acquire_claim(e164: str, request: Request) -> JSONResponse:
         )
     if acquired:
         asyncio.create_task(_sb.audit(
-            actor=INBOX_ADMIN_NAME,
+            actor=my_name,
             action="claim_acquire",
             e164=e164,
             detail={"session_id": my_session_id, "ttl_seconds": ttl},
@@ -2659,7 +2663,7 @@ async def api_inbox_acquire_claim(e164: str, request: Request) -> JSONResponse:
         })
     # 409 conflict
     asyncio.create_task(_sb.audit(
-        actor=INBOX_ADMIN_NAME,
+        actor=my_name,
         action="claim_conflict",
         e164=e164,
         detail={"session_id": my_session_id, "conflict_with": conflict},
@@ -2681,7 +2685,7 @@ async def api_inbox_claim_status(e164: str, request: Request) -> JSONResponse:
     fail = _requires_inbox_bearer(request)
     if fail:
         return fail
-    my_sid = request.headers.get("X-Inbox-Session-Id") or request.headers.get("x-inbox-session-id") or ""
+    my_sid, _name = _identity(request)
     try:
         held = await _sb.claim_is_human_held(e164)
     except Exception as exc:
@@ -2702,16 +2706,17 @@ async def api_inbox_release_claim(e164: str, request: Request) -> JSONResponse:
     fail = _requires_inbox_bearer(request)
     if fail:
         return fail
-    my_session_id = (
-        request.headers.get("X-Inbox-Session-Id")
-        or request.headers.get("x-inbox-session-id")
-    )
+    my_session_id, my_name = _identity(request)
+    force = request.query_params.get("force") in ("1", "true")
+    if force:                                   # only the admin may break someone else's lock
+        denied = _requires_admin(request)
+        if denied:
+            return denied
     try:
-        ok = await _sb.claim_release(
-            e164=e164,
-            held_by=INBOX_ADMIN_NAME,
-            session_id=my_session_id,
-        )
+        if force:
+            ok = await _sb.claim_force_release(e164)
+        else:
+            ok = await _sb.claim_release(e164=e164, held_by=None, session_id=my_session_id)
     except Exception as exc:
         print(f"[INBOX] claim_release error {e164!r}: {type(exc).__name__}: {exc!s}")
         return JSONResponse(
@@ -2719,8 +2724,8 @@ async def api_inbox_release_claim(e164: str, request: Request) -> JSONResponse:
             status_code=502,
         )
     asyncio.create_task(_sb.audit(
-        actor=INBOX_ADMIN_NAME,
-        action="claim_release",
+        actor=my_name,
+        action="claim_force_release" if force else "claim_release",
         e164=e164,
         detail={"session_id": my_session_id, "released": ok},
     ))

@@ -128,6 +128,7 @@ async def insert_outbound_message(
     errored: bool = False,
     error_detail: Optional[str] = None,
     meta_statuses: Optional[Dict[str, Any]] = None,
+    sent_by: Optional[str] = None,
 ) -> None:
     if not ENABLED:
         return
@@ -143,6 +144,8 @@ async def insert_outbound_message(
         "error_detail": error_detail,
         "meta_statuses_jsonb": meta_statuses or {},
     }
+    if sent_by:
+        body["payload_jsonb"] = {"sent_by": sent_by}       # who on the team sent it
     if sent_id_from_graph:
         # Use Graph message-id as wamid for dedup uniqueness on send side.
         body["wamid"] = sent_id_from_graph
@@ -270,7 +273,7 @@ async def thread_messages(e164: str, limit: int = 200) -> List[Dict[str, Any]]:
                 "e164": f"eq.{e164}",
                 "order": "created_at.desc",
                 "limit": str(limit),
-                "select": "id,wamid,direction,e164,reply_to_wamid,text,media_type,created_at,sent_id_from_graph,errored,error_detail,meta_statuses_jsonb",
+                "select": "id,wamid,direction,e164,reply_to_wamid,text,media_type,created_at,sent_id_from_graph,errored,error_detail,meta_statuses_jsonb,payload_jsonb",
             },
         )
         if r.status_code >= 300:
@@ -279,6 +282,8 @@ async def thread_messages(e164: str, limit: int = 200) -> List[Dict[str, Any]]:
             rows = r.json() or []
         except Exception:
             return []
+    for r in rows:   # show who on the team wrote a human message
+        r["held_by"] = (r.get("payload_jsonb") or {}).get("sent_by")
     rows.reverse()  # oldest first for the UI chat bubble stack
     return rows
 
@@ -812,4 +817,16 @@ async def reset_session_mirror(e164_variants: List[str]) -> bool:
         return r.status_code < 300
     except Exception as exc:
         print(f"[supabase_client] reset_session_mirror failed: {type(exc).__name__}: {exc!s}")
+        return False
+
+
+async def claim_force_release(e164: str) -> bool:
+    """Admin override: clear whoever holds this chat."""
+    if not (ENABLED and e164):
+        return True
+    try:
+        async with _client() as c:
+            await c.delete(f"{_REST_BASE}/inbox_claims", headers={**_HEADERS}, params={"e164": f"eq.{e164}"})
+        return True
+    except Exception:
         return False
