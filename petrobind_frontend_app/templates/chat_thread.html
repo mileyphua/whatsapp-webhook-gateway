@@ -121,6 +121,11 @@
           <div class="mb-1 pl-2 border-l-4 border-black/20 text-xs text-gray-600 line-clamp-2 break-words">{{ qmap.d.get(m.reply_to_wamid) }}</div>
           {% endif %}
           <div class="whitespace-pre-wrap break-words">{{ m.text or '📎 [non-text media — see raw payload]' }}</div>
+          {% if m.media_type %}
+          <div class="attachment-chip mt-1 inline-flex items-center gap-1.5 px-2 py-1 rounded-md bg-white/70 border border-black/10 text-xs text-gray-800">
+            <span aria-hidden="true">{{ '🖼' if m.media_type == 'image' else '📄' }}</span><span class="break-all">{{ m.filename or ('Photo' if m.media_type == 'image' else 'Document') }}</span>
+          </div>
+          {% endif %}
 
           {% if m.media_type and m.media_url %}
             <div class="mt-1.5 text-xs border-t {% if is_system %}border-amber-200{% else %}border-black/5{% endif %} pt-1 opacity-70">
@@ -213,6 +218,16 @@
             </div>
             <button type="button" id="quote-clear" class="shrink-0 text-gray-500 hover:text-gray-900 text-lg leading-none" aria-label="Cancel reply to this message">&times;</button>
           </div>
+          <div id="attach-preview" hidden class="flex items-center justify-between gap-3 mx-3 mt-3 px-3 py-2 rounded-lg bg-gray-100 border-l-4 border-pb-navy">
+            <div class="flex items-center gap-3 min-w-0">
+              <img id="attach-thumb" alt="" hidden class="w-12 h-12 object-cover rounded-md">
+              <div class="min-w-0">
+                <div id="attach-name" class="text-sm font-medium text-gray-800 truncate"></div>
+                <div id="attach-size" class="text-[11px] text-gray-500"></div>
+              </div>
+            </div>
+            <button type="button" id="attach-clear" class="shrink-0 text-gray-500 hover:text-gray-900 text-lg leading-none" aria-label="Remove attachment">&times;</button>
+          </div>
           <textarea
             id="human-text-input"
             name="text"
@@ -229,6 +244,12 @@
               <kbd class="px-1.5 py-0.5 rounded bg-white border border-gray-200 text-[10px] font-mono">Shift+Enter</kbd> newline
             </div>
             <div class="flex items-center gap-2">
+              <input type="file" id="attach-input" hidden accept=".doc,.docx,.jpeg,.jpg,.pdf,.png,.ppt,.pptx,.txt,.xls,.xlsx">
+              <button type="button" id="attach-btn" title="Attach a photo or document" aria-label="Attach a photo or document"
+                      class="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md text-xs text-gray-700 bg-gray-100 hover:bg-gray-200 font-medium transition disabled:opacity-40 disabled:cursor-not-allowed">
+                <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13"/></svg>
+                Attach
+              </button>
               <button
                 type="button"
                 id="btn-suggestion-reload-inline"

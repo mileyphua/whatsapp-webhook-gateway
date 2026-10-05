@@ -190,6 +190,7 @@
           : sendEnabled ? `Type your reply to ${E164}… (Shift+Enter for newline, Enter to send)`
           : "The AI is replying. Start typing to take over and reply yourself…";
       }
+      syncAttach();
     }
 
     function setClaimBannerVisible(visible, heldInfo = null) {
@@ -267,7 +268,7 @@
         e.preventDefault();
         if (!textarea) return;
         const text = (textarea.value || "").trim();
-        if (!text) return;
+        if (!text && !pendingFile) return;
         if (sendBtn && sendBtn.disabled) {
           // claimed by other → flash
           const banner = document.getElementById("claim-banner");
@@ -279,8 +280,14 @@
         // Quote a message only if the admin chose "Reply" on it (like WhatsApp), never automatically.
         const quoted = pendingQuote;
         clearQuote();
+        const file = pendingFile;                       // photo/document chosen with the paperclip (sent with the text as its caption)
+        const fileKind = file ? (/\.(jpe?g|png)$/i.test(file.name) ? "image" : "document") : null;
+        const previewUrl = file && fileKind === "image" ? URL.createObjectURL(file) : null;
+        clearAttachment(true);
         // Append optimistic bubble
-        appendBubble({ direction: "human", text, held_by: ctx.admin_name, created_at: new Date().toISOString(), _optimistic: true, quote: quoted ? quoted.text : null });
+        appendBubble({ direction: "human", text, held_by: ctx.admin_name, created_at: new Date().toISOString(), _optimistic: true, quote: quoted ? quoted.text : null,
+                       attachment: file ? { kind: fileKind, name: file.name, previewUrl: previewUrl } : null,
+                       matchText: file && !text ? "📎 " + file.name : null });
         textarea.value = "";
         textarea.focus();
         // If the send fails, drop the unsent bubble and put the text back so it can be retried.
@@ -289,12 +296,22 @@
           if (mine) mine.remove();
           if (!textarea.value) { textarea.value = text; autoGrowComposer(); }
           if (quoted) setQuote(quoted);
+          if (file) setAttachment(file);
         }
         try {
-          const resp = await inboxFetch(`/api/inbox/chats/${encodeURIComponent(E164)}/messages`, {
-            method: "POST",
-            body: { text, reply_to_wamid: quoted ? quoted.wamid : null },
-          });
+          let resp;
+          if (file) {
+            const fd = new FormData();
+            fd.append("file", file);
+            fd.append("caption", text);
+            if (quoted) fd.append("reply_to_wamid", quoted.wamid);
+            resp = await inboxFetch(`/api/inbox/chats/${encodeURIComponent(E164)}/attachments`, { method: "POST", body: fd, json: false });
+          } else {
+            resp = await inboxFetch(`/api/inbox/chats/${encodeURIComponent(E164)}/messages`, {
+              method: "POST",
+              body: { text, reply_to_wamid: quoted ? quoted.wamid : null },
+            });
+          }
           const data = await resp.json().catch(() => ({}));
           if (resp.ok && data && data.success) {
             // all good — bubble already there
@@ -364,12 +381,12 @@
     }
 
     // ---------- Append bubble helper (for optimistic human sends) ----------
-    function appendBubble({ direction, text, held_by = null, created_at = null, _optimistic = false, errored = false, id = null, wamid = "", reply_to_wamid = "", quote = null }) {
+    function appendBubble({ direction, text, held_by = null, created_at = null, _optimistic = false, errored = false, id = null, wamid = "", reply_to_wamid = "", quote = null, attachment = null, matchText = null }) {
       if (!stack) return;
       const wrap = document.createElement("div");
       if (id != null) wrap.setAttribute("data-msg-id", String(id));
       wrap.setAttribute("data-direction", direction || "");
-      wrap.setAttribute("data-text", text || "");
+      wrap.setAttribute("data-text", matchText != null ? matchText : (text || ""));
       if (wamid) wrap.setAttribute("data-wamid", wamid);
       wrap.className = "flex " + (direction === "buyer" ? "justify-start" : "justify-end");
       if (_optimistic) wrap.setAttribute("data-optimistic", "1");
@@ -403,10 +420,15 @@
       const quoteHtml = quoteText
         ? `<div class="mb-1 pl-2 border-l-4 border-black/20 text-xs text-gray-600 line-clamp-2 break-words">${escapeHtml(String(quoteText).slice(0, 200))}</div>`
         : "";
+      const attHtml = attachment
+        ? `<div class="attachment-chip mt-1 inline-flex items-center gap-1.5 px-2 py-1 rounded-md bg-white/70 border border-black/10 text-xs text-gray-800"><span aria-hidden="true">${attachment.kind === "image" ? "🖼" : "📄"}</span><span class="break-all">${escapeHtml(attachment.name || "")}</span></div>` +
+          (attachment.previewUrl ? `<img src="${attachment.previewUrl}" alt="" class="mt-1 max-h-48 rounded-lg">` : "")
+        : "";
       bubble.innerHTML =
         label +
         quoteHtml +
         `<div class="whitespace-pre-wrap break-words">${escapeHtml(text || "")}</div>` +
+        attHtml +
         erroredHtml +
         `<div class="mt-1 flex items-center justify-end gap-2">
            <div class="text-[10px] text-gray-400"><time>${timeStr}</time></div>
@@ -462,7 +484,8 @@
         const opt = Array.from(stack.querySelectorAll("[data-optimistic]")).find(function (n) { return n.getAttribute("data-text") === (m.text || ""); });
         if (opt) opt.remove();
       }
-      appendBubble({ direction: m.direction, text: m.text, held_by: m.held_by, created_at: m.created_at, id: m.id, wamid: m.wamid || "", reply_to_wamid: m.reply_to_wamid || "" });
+      appendBubble({ direction: m.direction, text: m.text, held_by: m.held_by, created_at: m.created_at, id: m.id, wamid: m.wamid || "", reply_to_wamid: m.reply_to_wamid || "",
+        attachment: m.media_type ? { kind: m.media_type, name: m.filename || (m.media_type === "image" ? "Photo" : "Document") } : null });
       if (m.direction === "buyer") pollWindowStatus(E164);
     }
     async function pollThread() {
@@ -527,6 +550,42 @@
     }
     function decorateAllReplies() { stack.querySelectorAll("[data-direction]").forEach(decorateReply); }
     decorateAllReplies();
+
+
+    // ---------- Attachments: photo / document sent with the reply (caption = the text box) ----------
+    let pendingFile = null;
+    const ATTACH_MAX_IMAGE = 5 * 1024 * 1024, ATTACH_MAX_DOC = 16 * 1024 * 1024;
+    const attachBtn = document.getElementById("attach-btn"), attachInput = document.getElementById("attach-input");
+    function fmtBytes(n) { return n < 1024 * 1024 ? Math.max(1, Math.round(n / 1024)) + " KB" : (n / 1048576).toFixed(1) + " MB"; }
+    function attachError(msg) { const st = document.getElementById("claim-status-text"); if (st) st.textContent = msg; }
+    function clearAttachment(keepUrl) {
+      pendingFile = null;
+      const box = document.getElementById("attach-preview"); if (box) box.hidden = true;
+      const th = document.getElementById("attach-thumb"); if (th) { th.hidden = true; if (!keepUrl && th.src) URL.revokeObjectURL(th.src); th.removeAttribute("src"); }
+      if (attachInput) attachInput.value = "";
+    }
+    function setAttachment(f) {
+      const isImage = /\.(jpe?g|png)$/i.test(f.name), isDoc = /\.(pdf|docx?|xlsx?|pptx?|txt)$/i.test(f.name);
+      if (!isImage && !isDoc) { attachError("This file type can't be sent. Use JPG, PNG, PDF, Word, Excel, PowerPoint or TXT."); return; }
+      if (f.size > (isImage ? ATTACH_MAX_IMAGE : ATTACH_MAX_DOC)) { attachError("That file is too large (images up to 5 MB, documents up to 16 MB)."); return; }
+      if (f.size === 0) { attachError("That file is empty."); return; }
+      pendingFile = f;
+      document.getElementById("attach-name").textContent = f.name;
+      document.getElementById("attach-size").textContent = (isImage ? "Photo" : "Document") + " · " + fmtBytes(f.size) + " · add a caption in the box, then Send";
+      const th = document.getElementById("attach-thumb");
+      if (isImage) { th.src = URL.createObjectURL(f); th.hidden = false; } else { th.hidden = true; th.removeAttribute("src"); }
+      document.getElementById("attach-preview").hidden = false;
+      if (!humanMode && !lockedBy) goHuman();          // sending a file is a human action: take over from the AI first
+      const ta = document.getElementById("human-text-input"); if (ta && !ta.disabled) ta.focus();
+    }
+    function syncAttach() { const b = document.getElementById("attach-btn"), ta = document.getElementById("human-text-input"); if (b && ta) b.disabled = ta.disabled; }
+    if (attachBtn && attachInput) {
+      attachBtn.addEventListener("click", function () { if (!attachBtn.disabled) attachInput.click(); });
+      attachInput.addEventListener("change", function () { if (attachInput.files && attachInput.files[0]) setAttachment(attachInput.files[0]); });
+    }
+    const attachClearBtn = document.getElementById("attach-clear");
+    if (attachClearBtn) attachClearBtn.addEventListener("click", function () { clearAttachment(false); });
+    syncAttach();
 
     // ---------- Feedback on AI replies (ChatGPT-style): good / bad under every AI message ----------
     // Bad opens a dialog where the admin says why; the server turns that into a suggested skill.
@@ -691,6 +750,7 @@
              <span class="text-green-700 font-mono text-xs">${closesAt ? new Date(closesAt * 1000).toLocaleTimeString() : ""}</span>
            </div>`;
         if (textarea) { textarea.disabled = !!lockedBy; textarea.style.opacity = "1"; }
+        syncAttach();
         if (sendBtn) sendBtn.disabled = !(humanMode && !lockedBy);   // Send needs Human mode
         if (overlay) overlay.classList.add("hidden");
       } else {
@@ -710,6 +770,7 @@
           if (typeof window.openNewConversationModal === "function") window.openNewConversationModal("template", E164);
         });
         if (textarea) { textarea.disabled = true; textarea.style.opacity = "0.45"; }
+        syncAttach();
         if (sendBtn) sendBtn.disabled = true;
         if (overlay && formWrap) {
           overlay.classList.remove("hidden");
