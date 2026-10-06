@@ -150,12 +150,13 @@ class AdminApiAndPage(Base):
         if os.path.exists(self._ufile): os.remove(self._ufile)
         super().tearDown()
 
-    def test_only_the_admin_can_see_or_change_stock(self):
+    def test_everyone_logged_in_can_see_stock_but_only_the_admin_can_change_it(self):
         anon = TestClient(self.main.app)
-        for method, path, body in (("get", "/api/inbox/catalog", None), ("put", "/api/inbox/catalog/item/products-bitumen-60-70", {"on": False}),
-                                   ("put", "/api/inbox/catalog/family/oxidized", {"on": False})):
-            self.assertEqual(getattr(anon, method)(path, **({"json": body} if body else {})).status_code, 401, path)
-            self.assertEqual(getattr(self.agent, method)(path, **({"json": body} if body else {})).status_code, 403, path)
+        self.assertEqual(anon.get("/api/inbox/catalog").status_code, 401)
+        self.assertEqual(self.agent.get("/api/inbox/catalog").status_code, 200)
+        for path, body in (("/api/inbox/catalog/item/products-bitumen-60-70", {"on": False}), ("/api/inbox/catalog/family/oxidized", {"on": False})):
+            self.assertEqual(anon.put(path, json=body).status_code, 401, path)
+            self.assertEqual(self.agent.put(path, json=body).status_code, 403, path)
         self.assertEqual(run(catalog.disabled_items()), [])
 
     def test_the_list_is_grouped_by_family_with_counts(self):
@@ -182,8 +183,8 @@ class AdminApiAndPage(Base):
         for needle in ('id="stock-families"', 'id="stock-search"', 'id="stock-filter-off"', "/api/inbox/catalog"):
             self.assertIn(needle, html)
         self.assertIn('href="/inbox/stock"', html)                       # nav link for the admin
-        r = self.agent.get("/inbox/stock", follow_redirects=False); self.assertEqual(r.status_code, 302)
-        self.assertNotIn('href="/inbox/stock"', self.agent.get("/inbox/chats").text)
+        self.assertEqual(self.agent.get("/inbox/stock").status_code, 200)               # team members see availability (read-only)
+        self.assertIn('href="/inbox/stock"', self.agent.get("/inbox/chats").text)
 
 
 if __name__ == "__main__":

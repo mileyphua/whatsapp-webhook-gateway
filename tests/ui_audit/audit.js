@@ -249,8 +249,19 @@ async function crawl(path, label, jar) {
   check("stock page: no script errors", K2.errors.length === 0, K2.errors.join(" | "));
   K2.w.close();
   const memS = await login("mei", "mei-password-1");
-  const rS = await fetch(BASE + "/inbox/stock", { redirect: "manual", headers: { cookie: memS.getCookieStringSync(BASE) } });
-  check("stock: team members are sent back to the inbox", rS.status === 302 && /\/inbox\/chats/.test(rS.headers.get("location") || ""), rS.status);
+  const MS = await openPage("/inbox/stock", memS); await sleep(1200);
+  check("stock (member): sees the availability list, read-only", MS.d.querySelectorAll("#stock-families li").length === 50 && !MS.d.querySelector("button[role=switch]") && /In stock|Out of stock/.test(MS.d.body.textContent), MS.d.querySelectorAll("#stock-families li").length);
+  const mt = MS.d.querySelector("main").textContent;
+  check("stock (member): no description, no on/off buttons, no admin details", !/Switch an item/.test(mt) && !/All on|All off/.test(mt) && !/Off since/.test(mt) && !MS.d.querySelector("#stock-links-warning"), ["Switch an item", "All on", "All off", "Off since"].filter((x) => mt.includes(x)).join(",") + (MS.d.querySelector("#stock-links-warning") ? " warning-box" : ""));
+  check("stock (member): a broken website link is simply not offered", !MS.d.querySelector('li[data-slug="products-bitumen-80-100"] a') && !!MS.d.querySelector('li[data-slug="products-bitumen-60-70"] a[href="https://www.petrobindglobal.com/products/bitumen-60-70"]'), "link shown for a dead page / missing for a live one");
+  check("stock (member): menu has the Stock link", !!MS.d.querySelector('nav a[href="/inbox/stock"]'), "missing");
+  check("stock (member): cannot change anything", (await fetch(BASE + "/api/inbox/catalog/item/products-bitumen-60-70", { method: "PUT", headers: { "content-type": "application/json", cookie: memS.getCookieStringSync(BASE) }, body: JSON.stringify({ on: false }) })).status === 403, "allowed");
+  MS.w.close();
+  const KA = await openPage("/inbox/stock", admin); await sleep(1500);
+  const warn = $(KA, "#stock-links-warning");
+  check("stock (admin): a warning explains that product pages are not opening on the website", !warn.hidden && /49 product pages|of 49/.test(warn.textContent) && /re-deployed/.test(warn.textContent), warn.hidden + " " + warn.textContent.slice(0, 120));
+  check("stock (admin): each dead page is marked, the live page keeps its link", /Page not opening on the website \(404\)/.test($(KA, 'li[data-slug="products-bitumen-80-100"]').textContent) && !!KA.d.querySelector('li[data-slug="products-bitumen-60-70"] a'), $(KA, 'li[data-slug="products-bitumen-80-100"]').textContent.slice(0, 120));
+  KA.w.close();
 
   // ---------------- AI offline banner ----------------
   const N0 = await openPage("/inbox/chats", admin); await sleep(500);

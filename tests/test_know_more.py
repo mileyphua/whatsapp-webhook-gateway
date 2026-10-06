@@ -31,6 +31,10 @@ class Base(unittest.TestCase):
         fs._FILE = "/tmp/_km_skills.json"; learning.invalidate_cache()
         R.load_index_if_needed()
         self.llm_calls, self.systems = 0, []
+        self._live = mock.patch.object(L.site_links, "is_live", mock.AsyncMock(return_value=True)); self._live.start()   # never touch the real website
+
+    def tearDown(self):
+        self._live.stop()
 
     def turn(self, text, reply, *, session=None, refs=None, message_count=3):
         plan = json.dumps({"intent": "x", "needs_human": False, "skills": [], "points": [], "avoid": [], "tone": "casual"})

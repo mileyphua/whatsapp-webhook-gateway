@@ -7,12 +7,17 @@
     <header class="flex flex-wrap items-end justify-between gap-3">
       <div>
         <h1 class="text-xl font-semibold">Stock</h1>
+        {% if is_admin %}
         <p class="text-sm text-gray-600 max-w-3xl">Every product in the AI's knowledge base. Switch an item <b>Off</b> when it is out of stock:
           the AI stops mentioning, offering or recommending it (it only says it is unavailable, and suggests an alternative, if a buyer asks for it by name).
           Changes apply to the next reply, within seconds.</p>
+        {% endif %}
       </div>
       <div id="stock-summary" class="text-sm text-gray-700 font-medium" aria-live="polite"></div>
     </header>
+    {% if is_admin %}
+    <div id="stock-links-warning" class="rounded-lg border border-amber-300 bg-amber-50 text-amber-900 text-sm p-3" role="alert" hidden></div>
+    {% endif %}
 
     <section class="bg-white border border-gray-200 rounded-lg p-3 flex flex-wrap items-center gap-3" aria-label="Filter">
       <label class="flex-1 min-w-[12rem]"><span class="sr-only">Search items</span>
@@ -29,7 +34,8 @@
 (function () {
   var $ = function (id) { return document.getElementById(id); };
   function el(tag, cls, text) { var e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; }
-  var data = null, armed = {};
+  var IS_ADMIN = {{ 'true' if is_admin else 'false' }};
+  var data = null, armed = {}, links = {};
 
   function api(path, method, body) {
     return fetch("/api/inbox/catalog" + path, { method: method || "GET", credentials: "same-origin", headers: { "Content-Type": "application/json" }, body: body ? JSON.stringify(body) : undefined })
@@ -59,6 +65,7 @@
     left.appendChild(el("div", "text-xs " + (onCount === fam.items.length ? "text-green-700" : "text-amber-700"), onCount + " of " + fam.items.length + " in stock"));
     head.appendChild(left);
     var acts = el("div", "flex gap-2");
+    if (!IS_ADMIN) { box.appendChild(head); } else {
     function actBtn(label, cls, fn) { var b = el("button", "px-3 py-1 rounded-md text-xs border " + cls, label); b.type = "button"; b.addEventListener("click", fn); return b; }
     acts.appendChild(actBtn("All on", "border-gray-300 hover:bg-gray-50", function () { setFamily(fam, true); }));
     var offLabel = armed[fam.id] ? "Confirm: switch all " + fam.items.length + " off" : "All off";
@@ -66,24 +73,37 @@
       if (!armed[fam.id]) { armed[fam.id] = true; render(); setTimeout(function () { armed[fam.id] = false; render(); }, 4000); return; }
       armed[fam.id] = false; setFamily(fam, false);
     }));
-    head.appendChild(acts); box.appendChild(head);
+    head.appendChild(acts); box.appendChild(head); }
     var list = el("ul", "divide-y divide-gray-100");
     rows.forEach(function (r) {
       var li = el("li", "flex items-center justify-between gap-3 px-4 py-2 " + (r.on ? "" : "bg-red-50")); li.setAttribute("data-slug", r.slug);
       var info = el("div", "min-w-0");
       var name = el("div", "text-sm " + (r.on ? "text-gray-900" : "text-gray-500 line-through"), r.title); info.appendChild(name);
-      var meta = [];
-      if (!r.on && r.ts) meta.push("Off since " + window.PBTime.format(r.ts) + " " + window.PBTime.LABEL + (r.by ? " by " + r.by : ""));
-      if (r.url) { var a = el("a", "text-xs text-pb-navy underline", "View page ↗"); a.href = r.url; a.target = "_blank"; a.rel = "noopener"; var sub = el("div", "text-xs text-gray-500"); if (meta.length) sub.appendChild(document.createTextNode(meta.join(" · ") + " · ")); sub.appendChild(a); info.appendChild(sub); }
-      else if (meta.length) info.appendChild(el("div", "text-xs text-gray-500", meta.join(" · ")));
+      var sub = el("div", "text-xs text-gray-500");
+      var parts = 0;
+      if (IS_ADMIN && !r.on && r.ts) { sub.appendChild(document.createTextNode("Off since " + window.PBTime.format(r.ts) + " " + window.PBTime.LABEL + (r.by ? " by " + r.by : ""))); parts++; }
+      var st = links[r.slug];
+      if (r.url) {
+        if (st && st.ok === false) {
+          if (IS_ADMIN) { if (parts++) sub.appendChild(document.createTextNode(" · ")); sub.appendChild(el("span", "text-red-700 font-medium", "Page not opening on the website (" + (st.status || "no answer") + ")")); }
+        } else {
+          if (parts++) sub.appendChild(document.createTextNode(" · "));
+          var a = el("a", "text-pb-navy underline", "View page ↗"); a.href = r.url; a.target = "_blank"; a.rel = "noopener"; sub.appendChild(a);
+        }
+      }
+      if (parts) info.appendChild(sub);
       li.appendChild(info);
-      var sw = el("button", "relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition " + (r.on ? "bg-green-500" : "bg-gray-300"));
-      sw.type = "button"; sw.setAttribute("role", "switch"); sw.setAttribute("aria-checked", String(r.on)); sw.setAttribute("aria-label", r.title + (r.on ? ": in stock" : ": out of stock"));
-      sw.title = r.on ? "In stock: click to switch Off" : "Out of stock: click to switch On";
-      var knob = el("span", "inline-block h-5 w-5 rounded-full bg-white shadow transform transition " + (r.on ? "translate-x-5" : "translate-x-0.5")); sw.appendChild(knob);
-      sw.addEventListener("click", function () { setItem(r, !r.on); });
-      li.appendChild(el("div", "flex items-center gap-2")).appendChild(el("span", "text-xs w-16 text-right " + (r.on ? "text-green-700" : "text-red-700"), r.on ? "In stock" : "Off"));
-      li.lastChild.appendChild(sw);
+      var right = el("div", "flex items-center gap-2");
+      right.appendChild(el("span", "text-xs " + (IS_ADMIN ? "w-16 text-right " : "px-2 py-0.5 rounded-full font-medium ") + (r.on ? (IS_ADMIN ? "text-green-700" : "bg-green-100 text-green-800") : (IS_ADMIN ? "text-red-700" : "bg-red-100 text-red-800")), r.on ? "In stock" : "Out of stock"));
+      if (IS_ADMIN) {
+        var sw = el("button", "relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition " + (r.on ? "bg-green-500" : "bg-gray-300"));
+        sw.type = "button"; sw.setAttribute("role", "switch"); sw.setAttribute("aria-checked", String(r.on)); sw.setAttribute("aria-label", r.title + (r.on ? ": in stock" : ": out of stock"));
+        sw.title = r.on ? "In stock: click to switch Off" : "Out of stock: click to switch On";
+        sw.appendChild(el("span", "inline-block h-5 w-5 rounded-full bg-white shadow transform transition " + (r.on ? "translate-x-5" : "translate-x-0.5")));
+        sw.addEventListener("click", function () { setItem(r, !r.on); });
+        right.appendChild(sw);
+      }
+      li.appendChild(right);
       list.appendChild(li);
     });
     box.appendChild(list); return box;
@@ -99,10 +119,20 @@
     data.families.forEach(function (f) { var b = familyBox(f, q, onlyOff); if (b) { box.appendChild(b); shown++; } });
     if (!shown) box.appendChild(el("div", "bg-white border border-dashed border-gray-300 rounded-lg p-6 text-center text-sm text-gray-500", onlyOff && !q ? "Everything is in stock." : "No item matches."));
   }
+  function loadLinks() {
+    return fetch("/api/inbox/catalog/links", { credentials: "same-origin" }).then(function (r) { return r.ok ? r.json() : null; }).then(function (j) {
+      if (!j) return; links = j.links || {}; render();
+      var w = $("stock-links-warning");
+      if (w && j.broken) {
+        w.textContent = "⚠ " + j.broken + " of " + j.checked + " product pages are not opening on the website (it answers “page not found”). The links are correct, but the website needs to be re-deployed. Until then the AI will not send these links to buyers; it hands the request to a colleague instead.";
+        w.hidden = false;
+      } else if (w) w.hidden = true;
+    }).catch(function () {});
+  }
   function load() { return api("").then(function (j) { data = j; render(); }).catch(function (e) { $("stock-families").textContent = "Could not load the list: " + e.message; }); }
   $("stock-search").addEventListener("input", render);
   $("stock-filter-off").addEventListener("change", render);
-  load();
+  load().then(loadLinks);
 })();
 </script>
 {% endblock %}

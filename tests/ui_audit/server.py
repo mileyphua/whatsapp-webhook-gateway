@@ -23,6 +23,13 @@ contact_names._FILE = os.path.join(tmp, "names.json")
 feedback_store._FILE = os.path.join(tmp, "learning.json")
 sb.ENABLED = False
 
+import site_links  # noqa: E402
+
+
+async def _fake_site_check(url):      # the website is NOT reachable from tests: pretend only the 60/70 page opens
+    return {"ok": url.endswith("/products/bitumen-60-70"), "status": 200 if url.endswith("/products/bitumen-60-70") else 404, "checked_at": 0}
+
+site_links.check = _fake_site_check
 import main  # noqa: E402
 import uvicorn  # noqa: E402
 

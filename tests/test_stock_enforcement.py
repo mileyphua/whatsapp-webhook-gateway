@@ -35,8 +35,10 @@ class Base(unittest.TestCase):
         if os.path.exists(fs._FILE): os.remove(fs._FILE)
         learning.invalidate_cache(); catalog.invalidate(); R.load_index_if_needed()
         self.llm_calls, self.systems, self.retrieve_kw = 0, [], []
+        self._live = mock.patch.object(L.site_links, "is_live", mock.AsyncMock(return_value=True)); self._live.start()   # never touch the real website
 
     def tearDown(self):
+        self._live.stop()
         if os.path.exists(fs._FILE): os.remove(fs._FILE)
         catalog.invalidate()
 

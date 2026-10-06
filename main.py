@@ -17,6 +17,7 @@ import booking
 import contact_names
 import ai_health
 import catalog
+import site_links
 import media_rules
 import notify
 import users_store
@@ -3625,7 +3626,7 @@ async def web_inbox_team(request: Request) -> Response:
 # ---------------------------------------------------------------- Stock: which items the AI may talk about
 @app.get("/inbox/stock")
 async def web_inbox_stock(request: Request) -> Response:
-    resp, ctx = _logged_in_page_ctx(request)
+    resp, ctx = _logged_in_page_ctx(request, admin_only=False)       # everyone sees availability; only the admin changes it
     if resp:
         return resp
     return _render_template("stock.html", **ctx)
@@ -3633,10 +3634,30 @@ async def web_inbox_stock(request: Request) -> Response:
 
 @app.get("/api/inbox/catalog")
 async def api_inbox_catalog(request: Request) -> JSONResponse:
-    fail = _requires_admin(request)
+    """Availability of every product. Everyone logged in sees what is in / out of stock; who switched it and when is admin-only."""
+    fail = _requires_inbox_bearer(request)
     if fail:
         return fail
-    return JSONResponse(content=await catalog.snapshot())
+    snap = await catalog.snapshot()
+    if (_auth_info(request) or {}).get("role") != "admin":
+        for fam in snap["families"]:
+            for item in fam["items"]:
+                item.pop("by", None); item.pop("ts", None)
+    return JSONResponse(content=snap)
+
+
+@app.get("/api/inbox/catalog/links")
+async def api_inbox_catalog_links(request: Request) -> JSONResponse:
+    """Is each product's website page reachable? (cached; the AI also checks before it sends a link)"""
+    fail = _requires_inbox_bearer(request)
+    if fail:
+        return fail
+    with_page = [i for i in catalog.items() if i.has_page]
+    res = await site_links.check_many([i.url for i in with_page])
+    links = {i.slug: {"ok": res[i.url]["ok"], "status": res[i.url]["status"]} for i in with_page}
+    vals = list(links.values())
+    return JSONResponse(content={"links": links, "checked": len(vals), "working": sum(1 for v in vals if v["ok"] is True),
+                                 "broken": sum(1 for v in vals if v["ok"] is False), "unknown": sum(1 for v in vals if v["ok"] is None)})
 
 
 async def _read_on_flag(request: Request) -> Optional[bool]:

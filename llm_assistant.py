@@ -38,6 +38,7 @@ import importlib
 import ai_health
 import booking
 import catalog
+import site_links
 import learning
 import supabase_client as _sbc
 import reply_guard
@@ -1234,6 +1235,13 @@ async def handle_incoming_message(
 
     # "Yes" to "would you like to know more?": send the page we offered (no AI call), unless that page has since gone Off.
     follow = None if any(i.url and i.url == session.more_info_url for i in off) else _more_info_followup(session, safe_text)
+    if follow and not await site_links.is_live(session.more_info_url):
+        # the website page is not opening (e.g. an old build is deployed): never send a dead link, hand it to a person
+        title = session.more_info_title or "that product"
+        follow = (f"Our website page for {title} isn't opening at the moment, so I'll ask a colleague to send you the full datasheet.\n\n"
+                  "Is there anything specific I can go through with you in the meantime?")
+        if not draft_only:
+            _flag_needs_human(session, f"Buyer wants the {title} page but the website link is down: please send the datasheet")
     if follow:
         session.more_info_url = ""
         session.append("user", safe_text)
