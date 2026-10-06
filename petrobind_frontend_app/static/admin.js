@@ -402,8 +402,64 @@
   }
 
   // -------- Boot ------------------------------------------------------------
+
+  // -------- AI model panel ---------------------------------------------------
+  function chip(text, on) {
+    return '<span class="ops-chip" style="' + (on === false ? "opacity:.55;text-decoration:line-through;" : on === true ? "border-color:#2a9d8f;" : "") + '">' + escapeHtml(text) + "</span>";
+  }
+  function renderModel(d) {
+    const $id = function (i) { return document.getElementById(i); };
+    $id("model-name").textContent = d.name || d.model;
+    $id("model-id").textContent = d.model + (d.found ? "" : "  (not found in OpenRouter's list)");
+    $id("model-desc").textContent = d.description || "";
+    const h = d.health || {};
+    const hc = $id("model-health");
+    hc.textContent = h.ok === false ? "✗ NOT ANSWERING: " + (h.title || "error") : "✓ answering (no failed call since last success)";
+    hc.style.color = h.ok === false ? "#e76f51" : "#2a9d8f";
+    const err = $id("model-error"); err.hidden = !d.error; err.textContent = d.error ? "⚠ " + d.error + (d.stale ? " (showing the last known details)" : "") : "";
+    $id("model-inputs").innerHTML = ["text", "image", "file"].map(function (m) { return chip(m === "file" ? "documents (PDF)" : m === "image" ? "images" : "text", (d.input_modalities || []).indexOf(m) !== -1); }).join("") +
+      (d.input_modalities || []).filter(function (m) { return ["text", "image", "file"].indexOf(m) === -1; }).map(function (m) { return chip(m, true); }).join("");
+    $id("model-outputs").innerHTML = (d.output_modalities || []).map(function (m) { return chip(m, true); }).join("") || "—";
+    const p = d.pricing || {};
+    $id("model-facts").textContent = "Context " + (d.context_length ? d.context_length.toLocaleString() : "?") + " tokens · max answer " + (d.max_completion_tokens ? d.max_completion_tokens.toLocaleString() : "?") +
+      " · $" + (p.input_per_million != null ? p.input_per_million : "?") + " in / $" + (p.output_per_million != null ? p.output_per_million : "?") + " out per 1M tokens" + (d.knowledge_cutoff ? " · knowledge to " + d.knowledge_cutoff : "");
+    const c = d.capabilities || {};
+    $id("model-caps").innerHTML = [["Answering buyers (text)", c.text], ["Reading buyer images", c.images], ["Reading buyer documents", c.documents], ["Using tools (inquiry, handoff, booking)", c.tools], ["Reasoning control", c.reasoning]]
+      .map(function (x) { return chip((x[1] ? "✓ " : "✗ ") + x[0], !!x[1]); }).join("");
+    $id("model-params").querySelector("tbody").innerHTML = (d.app_parameters || []).map(function (a) {
+      return "<tr><td>" + escapeHtml(a.name) + "</td><td>" + escapeHtml(a.value) + "</td><td style=\"color:" + (a.supported ? "#2a9d8f" : "#e76f51") + "\">" + (a.supported ? "✓ supported" : "✗ " + escapeHtml(a.note || "ignored")) + "</td></tr>";
+    }).join("");
+    $id("model-supported").innerHTML = (d.supported_parameters || []).map(function (x) { return chip(x, true); }).join("") || "—";
+    $id("model-history").querySelector("tbody").innerHTML = (d.history || []).map(function (r) {
+      return "<tr><td>" + escapeHtml(window.PBTime.format(r.at)) + "</td><td>" + escapeHtml(r.model) + (r.from ? '<div class="ops-mono-note">was ' + escapeHtml(r.from) + "</div>" : "") +
+        "</td><td>" + escapeHtml((r.input_modalities || []).join(", ") || "—") + "</td></tr>";
+    }).join("") || '<tr><td colspan="3">No record yet</td></tr>';
+    $id("model-fresh").textContent = "checked " + window.PBTime.timeOnly(new Date(), { seconds: true }) + " GMT+8";
+  }
+  async function loadModel(force) {
+    const res = await adminFetch(API_BASE + "/model" + (force ? "?refresh=1" : ""));
+    if (res.ok) renderModel(res.payload);
+    else { const err = $("#model-error"); if (err) { err.hidden = false; err.textContent = "Could not load the model details (HTTP " + res.status + ")"; } }
+  }
+  async function testModel(kind, btn) {
+    const out = $("#model-test-result"); out.textContent = "Testing " + kind + "…"; if (btn) btn.disabled = true;
+    try {
+      const res = await adminFetch(API_BASE + "/model/test", { method: "POST", body: { kind: kind } });
+      const r = res.payload || {};
+      out.style.color = r.ok ? "#2a9d8f" : "#e76f51";
+      out.textContent = res.ok ? (r.ok ? "✓ " + kind + " works on " + r.model + " (" + r.ms + " ms)" + (r.kind !== "text" ? ": it read “" + r.answer + "”" : "") : "✗ " + kind + " test failed on " + r.model + ": " + (r.error || "unknown error")) : "✗ " + (r.detail || "HTTP " + res.status);
+      loadModel(false);
+    } finally { if (btn) btn.disabled = false; }
+  }
+  function bindModelPanel() {
+    $$("[data-model-test]").forEach(function (b) { b.addEventListener("click", function () { testModel(b.getAttribute("data-model-test"), b); }); });
+    const rb = $("#model-refresh"); if (rb) rb.addEventListener("click", function () { loadModel(true); });
+    loadModel(false);
+  }
+
   document.addEventListener("DOMContentLoaded", function () {
     bindUI();
+    bindModelPanel();
     refreshAll(true);
   });
 })();

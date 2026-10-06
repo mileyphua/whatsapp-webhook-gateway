@@ -37,6 +37,7 @@ except Exception:  # pragma: no cover - dotenv is optional on Render with env in
 import importlib
 import ai_health
 import booking
+import model_info
 import catalog
 import site_links
 import learning
@@ -865,6 +866,7 @@ async def _single_turn_chat(
     messages.extend(session.history)
 
     model = os.getenv("OPENROUTER_MODEL") or OPENROUTER_MODEL_DEFAULT
+    model_info.note_model_used(model)          # a change of model is recorded for the Ops page
     # Tool loop: up to 2 rounds. Petrobind's domain rarely needs more; bounding
     # it prevents runaway loops costing tokens.
     final_reply: Optional[str] = None

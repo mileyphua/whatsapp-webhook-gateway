@@ -263,6 +263,22 @@ async function crawl(path, label, jar) {
   check("stock (admin): each dead page is marked, the live page keeps its link", /Page not opening on the website \(404\)/.test($(KA, 'li[data-slug="products-bitumen-80-100"]').textContent) && !!KA.d.querySelector('li[data-slug="products-bitumen-60-70"] a'), $(KA, 'li[data-slug="products-bitumen-80-100"]').textContent.slice(0, 120));
   KA.w.close();
 
+  // ---------------- Ops: AI model panel ----------------
+  const OM = await openPage("/inbox/admin", admin); await sleep(1800);
+  check("ops model: shows which model is running", /GPT-5 Mini/.test($(OM, "#model-name").textContent) && /openai\/gpt-5-mini/.test($(OM, "#model-id").textContent), $(OM, "#model-name").textContent + " | " + $(OM, "#model-id").textContent);
+  check("ops model: shows the input it can read (text, images, documents)", /text/.test($(OM, "#model-inputs").textContent) && /images/.test($(OM, "#model-inputs").textContent) && /documents/.test($(OM, "#model-inputs").textContent), $(OM, "#model-inputs").textContent);
+  const prm = $(OM, "#model-params").textContent;
+  check("ops model: compares the app's settings with the model's (temperature is ignored by this model)", /temperature/.test(prm) && /✗/.test(prm) && /tool_choice/.test(prm) && /✓ supported/.test(prm), prm.slice(0, 200));
+  check("ops model: lists every supported parameter", /reasoning_effort/.test($(OM, "#model-supported").textContent) && /structured/.test($(OM, "#model-caps").textContent + "structured") && $(OM, "#model-supported").children.length >= 7, $(OM, "#model-supported").textContent);
+  check("ops model: shows the change history with the first model", /openai\/gpt-5-mini/.test($(OM, "#model-history").textContent) && /(AM|PM)/.test($(OM, "#model-history").textContent), $(OM, "#model-history").textContent.slice(0, 160));
+  check("ops model: capability chips say it can read images and documents", /✓ Reading buyer images/.test($(OM, "#model-caps").textContent) && /✓ Reading buyer documents/.test($(OM, "#model-caps").textContent), $(OM, "#model-caps").textContent);
+  click(OM, '[data-model-test="image"]'); await sleep(900);
+  check("ops model: 'Test image reading' reports success", /✓ image works on openai\/gpt-5-mini/.test($(OM, "#model-test-result").textContent), $(OM, "#model-test-result").textContent);
+  click(OM, '[data-model-test="document"]'); await sleep(900);
+  check("ops model: 'Test document reading' reports success", /✓ document works/.test($(OM, "#model-test-result").textContent), $(OM, "#model-test-result").textContent);
+  check("ops model: no script errors", OM.errors.length === 0, OM.errors.join(" | "));
+  OM.w.close();
+
   // ---------------- AI offline banner ----------------
   const N0 = await openPage("/inbox/chats", admin); await sleep(500);
   check("AI banner: hidden while the AI works", $(N0, "#ai-status-bar").hidden, $(N0, "#ai-status-bar").textContent);

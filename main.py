@@ -19,6 +19,7 @@ import ai_health
 import catalog
 import site_links
 import media_rules
+import model_info
 import notify
 import users_store
 import reply_guard
@@ -237,6 +238,15 @@ _NONTEXT_MEDIA_REPLY: dict[str, str] = {
     "unknown": "",
 }
 
+
+
+@app.on_event("startup")
+async def _model_startup() -> None:
+    """Remember which AI model is configured (and when it changes)."""
+    try:
+        asyncio.create_task(model_info.record_change_if_needed(model_info.current_model_id()))
+    except Exception as exc:
+        print(f"[model] could not record the model: {type(exc).__name__}: {exc!s}")
 
 
 @app.on_event("startup")
@@ -4396,6 +4406,36 @@ async def api_inbox_admin_evict_templates(request: Request) -> JSONResponse:
     previous = TEMPLATES_CACHE is not None
     TEMPLATES_CACHE = None
     return JSONResponse(content={"ok": True, "evicted_previous_cache": previous})
+
+
+@app.get("/api/inbox/admin/model")
+async def api_inbox_admin_model(request: Request) -> JSONResponse:
+    """Ops: which AI model is running, what it can take as input, which parameters it supports, the app's compatibility and the change history."""
+    fail = _requires_admin(request)
+    if fail:
+        return fail
+    force = request.query_params.get("refresh") in ("1", "true")
+    d = await model_info.describe(force=force)
+    await model_info.record_change_if_needed(d["model"])
+    return JSONResponse(content={**d, "health": ai_health.current(), "history": await model_info.history(10)})
+
+
+@app.post("/api/inbox/admin/model/test")
+async def api_inbox_admin_model_test(request: Request) -> JSONResponse:
+    """Ops: ask the model something small (text, a picture, a PDF) to prove it works."""
+    fail = _requires_admin(request)
+    if fail:
+        return fail
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    kind = str((body or {}).get("kind") or "text")
+    try:
+        result = await model_info.probe(kind)
+    except ValueError:
+        return JSONResponse(content={"detail": "kind must be text, image or document"}, status_code=422)
+    return JSONResponse(content=result)
 
 
 async def _run_cron_endpoint(handler, path: str) -> Tuple[int, Any]:

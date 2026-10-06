@@ -64,6 +64,53 @@
       </button>
     </section>
 
+    <section class="ops-panel" id="model-panel" aria-labelledby="model-title" style="margin-bottom:16px;">
+      <header class="ops-panel-header">
+        <h2 id="model-title"><span class="ops-panel-accent" style="background:#7b61ff;"></span> AI MODEL · WHAT IS RUNNING AND WHAT IT CAN DO</h2>
+        <span class="ops-panel-refresh" id="model-fresh">—</span>
+      </header>
+      <div id="model-error" class="ops-mono-note" hidden style="color:#e76f51;margin-bottom:8px;"></div>
+      <div style="display:flex;flex-wrap:wrap;gap:24px;align-items:flex-start;">
+        <div style="min-width:240px;flex:1;">
+          <div style="font-size:18px;font-weight:600;" id="model-name">—</div>
+          <div class="ops-mono-note" id="model-id" style="opacity:.75;">—</div>
+          <div style="margin-top:6px;"><span class="ops-chip" id="model-health">—</span></div>
+          <p id="model-desc" style="margin-top:8px;font-size:12px;opacity:.8;max-width:46ch;"></p>
+        </div>
+        <div style="min-width:240px;flex:1;">
+          <div class="ops-mono-note">INPUT IT CAN READ</div>
+          <div id="model-inputs" style="display:flex;flex-wrap:wrap;gap:6px;margin:4px 0 8px;"></div>
+          <div class="ops-mono-note">OUTPUT</div>
+          <div id="model-outputs" style="display:flex;flex-wrap:wrap;gap:6px;margin:4px 0 8px;"></div>
+          <div class="ops-mono-note" id="model-facts">—</div>
+        </div>
+        <div style="min-width:260px;flex:1;">
+          <div class="ops-mono-note">CAN THE BOT USE IT FOR…</div>
+          <div id="model-caps" style="display:flex;flex-wrap:wrap;gap:6px;margin:4px 0 8px;"></div>
+          <div class="ops-mono-note">LIVE TESTS (cost a fraction of a cent)</div>
+          <div style="display:flex;flex-wrap:wrap;gap:6px;margin:4px 0;">
+            <button class="ops-btn ops-btn--ghost" data-model-test="text">TEST TEXT</button>
+            <button class="ops-btn ops-btn--ghost" data-model-test="image">TEST IMAGE READING</button>
+            <button class="ops-btn ops-btn--ghost" data-model-test="document">TEST DOCUMENT READING</button>
+            <button class="ops-btn ops-btn--primary" id="model-refresh">⟳ RE-READ FROM OPENROUTER</button>
+          </div>
+          <div id="model-test-result" class="ops-mono-note" aria-live="polite" style="min-height:18px;"></div>
+        </div>
+      </div>
+      <div style="display:flex;flex-wrap:wrap;gap:24px;margin-top:14px;">
+        <div style="flex:2;min-width:300px;">
+          <div class="ops-mono-note">SETTINGS THE APP SENDS vs WHAT THIS MODEL SUPPORTS</div>
+          <table class="ops-table" id="model-params"><thead><tr><th>Setting</th><th>Value the app sends</th><th>This model</th></tr></thead><tbody></tbody></table>
+          <div class="ops-mono-note" style="margin-top:10px;">ALL PARAMETERS THIS MODEL SUPPORTS</div>
+          <div id="model-supported" style="display:flex;flex-wrap:wrap;gap:6px;margin-top:4px;"></div>
+        </div>
+        <div style="flex:1;min-width:260px;">
+          <div class="ops-mono-note">MODEL CHANGES (newest first)</div>
+          <table class="ops-table" id="model-history"><thead><tr><th>When (GMT+8)</th><th>Model</th><th>Input</th></tr></thead><tbody></tbody></table>
+        </div>
+      </div>
+    </section>
+
     <div class="ops-grid">
       <!-- Panel 1: HEALTH -->
       <article class="ops-panel ops-panel--lg" data-panel="health">

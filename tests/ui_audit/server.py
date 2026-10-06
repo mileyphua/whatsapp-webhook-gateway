@@ -30,6 +30,31 @@ async def _fake_site_check(url):      # the website is NOT reachable from tests:
     return {"ok": url.endswith("/products/bitumen-60-70"), "status": 200 if url.endswith("/products/bitumen-60-70") else 404, "checked_at": 0}
 
 site_links.check = _fake_site_check
+import model_info  # noqa: E402
+
+_GPT5_MINI = {"id": "openai/gpt-5-mini", "name": "OpenAI: GPT-5 Mini", "description": "Compact GPT-5 (audit copy).", "context_length": 400000,
+              "architecture": {"input_modalities": ["text", "image", "file"], "output_modalities": ["text"]},
+              "pricing": {"prompt": "0.00000025", "completion": "0.000002"}, "top_provider": {"max_completion_tokens": 128000, "is_moderated": True},
+              "supported_parameters": ["max_tokens", "reasoning", "reasoning_effort", "response_format", "seed", "tool_choice", "tools"], "knowledge_cutoff": "2024-05-31"}
+
+
+async def _fake_models(force=False):
+    return [_GPT5_MINI]
+
+
+class _FakeModelClient:
+    class chat:
+        class completions:
+            @staticmethod
+            async def create(**kw):
+                import types as _t
+                content = kw["messages"][-1]["content"]
+                answer = "4821" if isinstance(content, list) else "OK"
+                return _t.SimpleNamespace(choices=[_t.SimpleNamespace(message=_t.SimpleNamespace(content=answer))])
+
+
+model_info._models = _fake_models
+model_info._client = lambda: _FakeModelClient()
 import main  # noqa: E402
 import uvicorn  # noqa: E402
 
