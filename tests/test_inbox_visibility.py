@@ -208,6 +208,10 @@ class WebhookToInbox(Base):
 
         async def not_held(_n, _s=None): return None
 
+        async def read_photo(**kw):
+            import media_ai
+            return media_ai.MediaReading(True, "Photo of our site.", "")
+
         def payload(msg):
             return {"object": "whatsapp_business_account", "entry": [{"changes": [{"field": "messages", "value": {
                 "metadata": {"phone_number_id": "PN1"}, "contacts": [{"profile": {"name": "Ali"}, "wa_id": N}], "messages": [msg]}}]}]}
@@ -215,7 +219,7 @@ class WebhookToInbox(Base):
         with mock.patch.object(main, "WHATSAPP_APP_SECRET", ""), mock.patch.object(main, "ACCESS_TOKEN", "tok"), \
                 mock.patch.object(main, "PHONE_NUMBER_ID", "PN1"), mock.patch.object(main.httpx, "AsyncClient", FakeMeta), \
                 mock.patch.object(main.llm_assistant, "handle_incoming_message", handle), mock.patch.object(main, "_claim_is_held_by_other", not_held), \
-                mock.patch.object(main, "DEBOUNCE_SECONDS", 0.05), TestClient(main.app) as c:
+                mock.patch.object(main.media_ai, "understand", read_photo), mock.patch.object(main, "DEBOUNCE_SECONDS", 0.05), TestClient(main.app) as c:
             c.post("/inbox/login", data={"username": "", "password": "x" * 24}, follow_redirects=False)
             c.post("/webhook", json=payload({"id": "wamid.B1", "from": N, "type": "text", "timestamp": str(int(_t.time())), "text": {"body": "Do you sell bitumen?"}}))
             c.post("/webhook", json=payload({"id": "wamid.B2", "from": N, "type": "image", "timestamp": str(int(_t.time())), "image": {"id": "IMGWEB123", "mime_type": "image/jpeg", "caption": "our site"}}))

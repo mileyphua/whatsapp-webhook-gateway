@@ -205,19 +205,20 @@ class WebhookBehaviour(unittest.TestCase):
         self.assertEqual((self.understood["kind"], self.understood["filename"]), ("document", "po.pdf"))
         self.assertIn("po.pdf", self.scheduled[0]["text"]); self.assertEqual(self.canned, [])
 
-    def test_when_the_file_cannot_be_read_the_old_safe_reply_and_a_human_flag_remain(self):
+    def test_when_the_file_cannot_be_read_nothing_is_sent_and_a_person_is_asked_to_take_over(self):
         self.reading = media_ai.MediaReading(False, "", "unsupported_type")
         self.post({"type": "document", "document": {"id": "DOC2", "mime_type": "application/vnd.ms-powerpoint", "filename": "deck.ppt"}})
-        self.assertEqual(len(self.canned), 1); self.assertEqual(self.scheduled, [])
-        self.assertTrue(any("could not read" in t.lower() and "deck.ppt" in t for d, t in self.thread() if d == "system"), self.thread())
+        self.assertEqual(self.canned, []); self.assertEqual(self.scheduled, [])
+        self.assertTrue(any("deck.ppt" in t and "take over" in t.lower() for d, t in self.thread() if d == "system"), self.thread())
 
-    def test_voice_notes_and_video_keep_the_existing_canned_reply(self):
+    def test_voice_notes_and_video_are_not_answered_either(self):
         self.post({"type": "audio", "audio": {"id": "A1", "mime_type": "audio/ogg"}})
-        self.assertEqual(len(self.canned), 1); self.assertIn("voice note", self.canned[0].lower())
-        self.assertFalse(hasattr(self, "understood"))
+        self.assertEqual(self.canned, []); self.assertFalse(hasattr(self, "understood"))
+        self.assertTrue(any("voice note" in t and "take over" in t.lower() for d, t in self.thread() if d == "system"), self.thread())
 
     def test_the_team_email_is_still_limited_to_one_an_hour_for_unread_files(self):
         self.reading = media_ai.MediaReading(False, "", "model_cannot_read")
+        self.main._MEDIA_EMAIL_LAST.clear()
         for i in range(3):
             self.post({"type": "image", "image": {"id": f"I{i}", "mime_type": "image/png"}})
         self.assertEqual(self.main.notify.send_handoff_email.await_count, 1)

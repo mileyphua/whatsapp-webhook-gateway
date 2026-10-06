@@ -107,6 +107,11 @@ class ConversationSession:
     more_info_url: str = ""
     more_info_title: str = ""
     more_info_at: Optional[float] = None
+    # The AI cannot read what the buyer sent (voice note, video, old Word/PowerPoint...): it stays silent for the whole chat
+    # until a person takes over (a person's reply clears this).
+    ai_paused: bool = False
+    ai_paused_reason: str = ""
+    ai_paused_at: Optional[float] = None
     web_search_count: int = 0  # cost guardrail: cap search_industry_info calls per session
     booking_intent_notified: bool = False  # dedup: 1 "buyer wants to book" email per session
 
@@ -530,6 +535,8 @@ def scan_for_followups() -> List[FollowupAction]:
     out: List[FollowupAction] = []
 
     for sess in _SESSIONS.values():
+        if sess.ai_paused:
+            continue          # waiting for a person: no automatic nudge or reminder
         # Booking reminders / human hand-over (see booking_followup_action)
         booking_act = booking_followup_action(sess, now)
         if booking_act is not None:

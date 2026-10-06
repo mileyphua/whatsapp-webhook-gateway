@@ -95,7 +95,7 @@ class Locks(unittest.TestCase):
     def test_lock_is_held_in_the_members_name_and_others_see_it(self):
         mei, admin = self.as_("mei"), self.as_()
         self.assertEqual(self.take(mei).status_code, 200)
-        self.assertEqual(self.status(mei), {"held": True, "mine": True, "held_by": "Mei Ling", "expires_in_secs": 100})
+        self.assertEqual(self.status(mei), {"ai_paused": False, "held": True, "mine": True, "held_by": "Mei Ling", "expires_in_secs": 100})
         seen = self.status(admin)
         self.assertEqual((seen["held"], seen["mine"], seen["held_by"]), (True, False, "Mei Ling"))
         r = self.take(admin)

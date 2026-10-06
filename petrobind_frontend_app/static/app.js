@@ -99,6 +99,7 @@
     const HUMAN_TTL = 300;
     let humanMode = false;
     let lockedBy = null;
+    let aiPaused = false;          // the AI could not read what the buyer sent and stays silent until a person replies
     const claimUrl = `/api/inbox/chats/${encodeURIComponent(E164)}/claim`;
     const modeSwitch = document.getElementById("mode-switch");
     const modeLabel = document.getElementById("mode-label");
@@ -112,6 +113,7 @@
       modeSwitch.disabled = !!lockedBy;
       if (lockedBy) { modeSwitch.className = base + "border-gray-300 bg-gray-100 text-gray-500 cursor-not-allowed"; modeLabel.textContent = "Locked by " + (lockedBy.held_by || "another admin"); modeKnob.style.transform = "none"; }
       else if (humanMode) { modeSwitch.className = base + "border-pb-navy bg-pb-navy text-white"; modeLabel.textContent = "Human replying"; modeKnob.style.transform = "none"; }
+      else if (aiPaused) { modeSwitch.className = base + "border-amber-500 bg-amber-500 text-white"; modeLabel.textContent = "AI paused"; modeKnob.style.transform = "none"; }
       else { modeSwitch.className = base + "border-pb-green bg-pb-green text-white"; modeLabel.textContent = "AI replying"; modeKnob.style.transform = "none"; }
     }
     function applyMode() {
@@ -124,6 +126,9 @@
       } else if (humanMode) {
         setClaimBannerVisible(false);
         setClaimStatus("You are replying. AI is paused for this chat. Switch back to AI when done.", { sendEnabled: true });
+      } else if (aiPaused) {
+        setClaimBannerVisible(false);
+        setClaimStatus("The AI is paused for this chat: it could not read what the buyer sent and will not reply until you do. Switch to Human to take over.", { sendEnabled: false, typeEnabled: true });
       } else {
         setClaimBannerVisible(false);
         setClaimStatus("AI is answering this chat (RAG + LLM). Switch to Human, or just start typing, to take over.", { sendEnabled: false, typeEnabled: true });
@@ -134,6 +139,7 @@
         const r = await inboxFetch(claimUrl);
         const d = await r.json().catch(() => ({}));
         if (!r.ok) { applyMode(); return; }
+        aiPaused = !!d.ai_paused;
         if (d.held && d.mine) { humanMode = true; lockedBy = null; }
         else if (d.held) { humanMode = false; lockedBy = { held_by: d.held_by, expires_in_secs: d.expires_in_secs }; }
         else { humanMode = false; lockedBy = null; }

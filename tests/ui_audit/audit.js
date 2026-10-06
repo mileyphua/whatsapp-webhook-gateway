@@ -90,7 +90,7 @@ async function crawl(path, label, jar) {
   // ---------------- chat list ----------------
   let L = await openPage("/inbox/chats", admin);
   const rows = [...L.d.querySelectorAll("#chat-scroll li")];
-  check("list: both chats are listed", rows.length === 2, rows.length);
+  check("list: all seeded chats are listed", rows.length === 3, rows.length);
   const timeText = ($(L, `li[data-e164="${A}"] time`) || {}).textContent || "";
   check("list: time is GMT+8 12-hour (no 24h clock)", /\d{4}-\d\d-\d\d \d{1,2}:\d\d (AM|PM)$/.test(timeText.trim()), timeText);
   const search = L.d.querySelector('input[type="search"], #chat-search, input[placeholder*="Search"]');
@@ -278,6 +278,16 @@ async function crawl(path, label, jar) {
   check("ops model: 'Test document reading' reports success", /✓ document works/.test($(OM, "#model-test-result").textContent), $(OM, "#model-test-result").textContent);
   check("ops model: no script errors", OM.errors.length === 0, OM.errors.join(" | "));
   OM.w.close();
+
+  // ---------------- AI paused: waiting for a person ----------------
+  const PZ = await openPage("/inbox/chat/60120000003?embed=1", admin); await sleep(900);
+  check("paused chat: the switch says AI paused, not AI replying", /AI paused/.test($(PZ, "#mode-label").textContent), $(PZ, "#mode-label").textContent);
+  check("paused chat: the page tells the person why and what to do", /paused for this chat/.test($(PZ, "#claim-status-text").textContent) && /take over/i.test($(PZ, "#claim-status-text").textContent), $(PZ, "#claim-status-text").textContent);
+  check("paused chat: the inbox note asks a person to take over", /take over this chat and reply/.test($(PZ, "#message-stack").textContent), "no note");
+  PZ.w.close();
+  const HZ = await openPage("/inbox/chats", admin); click(HZ, "#ho-toggle"); await sleep(600);
+  check("paused chat: it is listed under Needs human with the reason", /AI paused/.test($(HZ, "#ho-list").textContent) && /voice note/.test($(HZ, "#ho-list").textContent), $(HZ, "#ho-list").textContent.slice(0, 160));
+  HZ.w.close();
 
   // ---------------- AI offline banner ----------------
   const N0 = await openPage("/inbox/chats", admin); await sleep(500);

@@ -851,6 +851,46 @@ async def verify_webhook(
     )
 
 
+_PAUSE_NOTE_LAST: Dict[str, float] = {}
+
+
+async def _ai_is_paused(phone: str) -> bool:
+    """True while the AI must stay silent in this chat (it could not read something the buyer sent and a person has not taken over)."""
+    sess = _find_session_by_number(phone) or await conversation_store.get_session(phone)
+    return bool(getattr(sess, "ai_paused", False))
+
+
+async def _pause_for_human(sender: str, what: str, why: str = "") -> None:
+    """The AI cannot read what the buyer sent: say NOTHING to the buyer, put the chat in the Needs-human list with a note asking a
+    person to take over, and keep the AI silent in this chat until a person replies."""
+    sess = await conversation_store.get_session(sender)
+    core = f"the buyer sent {what}" + (f" ({why})" if why else "")
+    sess.ai_paused, sess.ai_paused_at = True, time.time()
+    sess.ai_paused_reason = f"AI paused: {core}. A person needs to take over and reply."
+    sess.needs_human_since = sess.needs_human_since or time.time()
+    sess.needs_human_reason = sess.ai_paused_reason[:300]
+    await conversation_store.save_session(sess)
+    note = (f"⚠ {core[0].upper() + core[1:]}, which the AI can't read. The AI is paused for this chat and will not reply to anything until a person "
+            f"takes over. Please take over this chat and reply to the buyer.")
+    await _persist_outbound_safe(e164=sender, direction="system", text=note)
+    try:
+        if time.time() - _MEDIA_EMAIL_LAST.get(sender, 0.0) >= 3600:         # at most one email an hour per buyer
+            _MEDIA_EMAIL_LAST[sender] = time.time()
+            await notify.send_handoff_email(phone_number=sender, reason=sess.ai_paused_reason, partial_inquiry_summary=note,
+                                            relationship_summary=sess.relationship_summary(), recent_transcript=sess.recent_transcript())
+    except Exception as exc:
+        print(f"[PAUSE] handoff email failed: {type(exc).__name__}: {exc!s}")
+
+
+async def _note_while_paused(sender: str, text: Optional[str]) -> None:
+    """The buyer wrote again while the AI is paused: tell the person (at most one note every 10 minutes per chat)."""
+    if time.time() - _PAUSE_NOTE_LAST.get(sender, 0.0) < 600:
+        return
+    _PAUSE_NOTE_LAST[sender] = time.time()
+    await _persist_outbound_safe(e164=sender, direction="system",
+                                 text=f"⚠ The AI is paused for this chat (waiting for a person to take over). The buyer wrote: “{(text or '')[:200]}”")
+
+
 async def _canned_media_flow(message: Dict[str, Any], pnid: str) -> None:
     """The standard handling of a non-text message: a short canned reply asking for product + port (unless a human holds the chat),
     plus a handoff email to the team (at most one an hour per buyer)."""
@@ -959,9 +999,8 @@ async def _handle_buyer_media(message: Dict[str, Any], pnid: str) -> None:
                                     text=media_ai.compose_buyer_text(msg_type, filename, caption, reading.summary))
             return
         why = media_ai.REASON_TEXT.get(reading.reason, reading.reason or "unknown reason")
-        await _persist_outbound_safe(e164=sender, direction="system",
-                                     text=f"📎 AI could not read the {label} ({why}). The standard reply was sent and the chat was flagged for a person to look at it.")
-        await _canned_media_flow(message, pnid)
+        what = "a photo" if msg_type == "image" else (f"the file {filename}" if filename else "a document")
+        await _pause_for_human(sender, what, why)
     except Exception as exc:
         print(f"[MEDIA] handling failed: {type(exc).__name__}: {exc!s}")
 
@@ -1061,6 +1100,8 @@ async def receive_webhook(request: Request) -> JSONResponse:
                     if msg_type in ("image", "document"):
                         # photos and documents are READ by the AI model (in the background so the webhook answers Meta at once)
                         asyncio.create_task(_handle_buyer_media(message, pnid))
+                    elif msg_type in ("audio", "voice", "video"):
+                        await _pause_for_human(str(message.get("from") or ""), "a video" if msg_type == "video" else "a voice note")
                     else:
                         await _canned_media_flow(message, pnid)
                 for st in value.get("statuses", []) or []:
@@ -1169,6 +1210,10 @@ async def send_whatsapp_text(
     correct (most of the gateway is AI-replying). The /api/inbox/chats/{e164}/messages
     human-send endpoint passes sender_direction="human".
     """
+    if sender_direction == "ai" and await _ai_is_paused(to):
+        # last line of defence: whatever route led here, the AI never writes to a chat that is waiting for a person
+        print(f"[AI PAUSED] blocked an AI message to {to!r}")
+        return {"ok": False, "skipped": "ai_paused", "messages": []}
     if not ACCESS_TOKEN:
         raise RuntimeError("WHATSAPP_ACCESS_TOKEN must be set")
     resolved_pnid = phone_number_id or PHONE_NUMBER_ID
@@ -1289,6 +1334,9 @@ async def send_whatsapp_template(
     display_text: Optional[str] = None,
     header_media: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
+    if sender_direction == "ai" and await _ai_is_paused(recipient_e164):
+        print(f"[AI PAUSED] blocked an AI template to {recipient_e164!r}")
+        return {"ok": False, "skipped": "ai_paused", "messages": []}
     if not ACCESS_TOKEN:
         raise RuntimeError("WHATSAPP_ACCESS_TOKEN must be set")
     resolved_pnid = phone_number_id or PHONE_NUMBER_ID
@@ -1504,6 +1552,10 @@ async def _llm_reply(
     falls back to the _echo_reply path so the buyer always gets a 200-receipt
     plus a message back."""
     if not from_number:
+        return
+
+    if await _ai_is_paused(from_number):         # the AI could not read something the buyer sent: say nothing until a person takes over
+        await _note_while_paused(from_number, inbound_text)
         return
 
     # --- claim mutex (additive, no break): if human holds claim, skip actual send ---
@@ -3050,9 +3102,11 @@ async def api_inbox_claim_status(e164: str, request: Request) -> JSONResponse:
     except Exception as exc:
         print(f"[INBOX] claim_status error {e164!r}: {type(exc).__name__}: {exc!s}")
         held = None
+    paused = bool(getattr(_find_session_by_number(e164), "ai_paused", False))
     if not held:
-        return JSONResponse(content={"held": False, "mine": False})
+        return JSONResponse(content={"held": False, "mine": False, "ai_paused": paused})
     return JSONResponse(content={
+        "ai_paused": paused,
         "held": True,
         "mine": bool(my_sid and held.get("session_id") == my_sid),
         "held_by": held.get("held_by"),
@@ -3129,15 +3183,17 @@ def _find_session_by_number(e164: str):
 async def _clear_needs_human(e164: str) -> bool:
     """Mark a chat as handled by a human. Returns True if it was pending."""
     sess = _find_session_by_number(e164)
-    if sess is None or not sess.needs_human_since:
+    if sess is None or not (sess.needs_human_since or sess.ai_paused):
         return False
+    was_pending = bool(sess.needs_human_since)
     sess.needs_human_since = None
     sess.needs_human_reason = ""
+    sess.ai_paused, sess.ai_paused_reason, sess.ai_paused_at = False, "", None     # a person has taken over: the AI may answer again
     try:
         await conversation_store.save_session(sess)
     except Exception as exc:
         print(f"[INBOX] clear needs_human save failed: {type(exc).__name__}: {exc!s}")
-    return True
+    return was_pending
 
 
 @app.get("/api/inbox/handoffs")

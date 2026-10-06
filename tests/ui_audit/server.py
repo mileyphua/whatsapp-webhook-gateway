@@ -165,6 +165,13 @@ async def seed():
     await buyer(A, "", 1.0, "wamid.A2", type="image", image={"id": "IMGAUDIT123", "mime_type": "image/png", "caption": "our site"})
     await buyer(B, "Hi, are you open?", 30.0, "wamid.B1")
     await main._persist_outbound_safe(e164=B, direction="ai", text="Yes, how can I help?", sent_id_from_graph="wamid.AI2")
+    P = "60120000003"                                      # the AI could not read a voice note here: paused until a person replies
+    await buyer(P, "", 1.0, "wamid.P1", type="audio", audio={"id": "AUDAUDIT1", "mime_type": "audio/ogg"})
+    sp = await conversation_store.get_session(P)
+    sp.ai_paused, sp.ai_paused_at = True, now - 3000
+    sp.ai_paused_reason = "AI paused: the buyer sent a voice note. A person needs to take over and reply."
+    sp.needs_human_since, sp.needs_human_reason = now - 3000, sp.ai_paused_reason
+    await main._persist_outbound_safe(e164=P, direction="system", text="⚠ The buyer sent a voice note, which the AI can't read. The AI is paused for this chat and will not reply to anything until a person takes over. Please take over this chat and reply to the buyer.")
     s = await conversation_store.get_session(B)
     s.needs_human_since, s.needs_human_reason = now - 600, "buyer asked for a person"
     for n in (1, 2):
