@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 import feedback_store as fs
+from reply_guard import split_sentences
 
 _rag = importlib.import_module("rag.retrieve")
 
@@ -29,6 +30,9 @@ OVERVIEW_PAGES = {"products-bitumen": "bitumen", "products-bitumen-emulsion": "e
 _BASE_OIL = "products-base-oil-sn150"      # the site has no SN150 page: the scraped "page" is the Contact page, which must stay
 
 
+_PATTERNS: Dict[str, "re.Pattern[str]"] = {}
+
+
 @dataclass(frozen=True)
 class Item:
     slug: str
@@ -42,7 +46,11 @@ class Item:
         return "/products/" in self.url
 
     def pattern(self) -> "re.Pattern[str]":
-        return re.compile(r"(?<![\w/.])(?:" + "|".join(re.escape(a) for a in sorted(self.aliases, key=len, reverse=True)) + r")(?![\w/])", re.I)
+        pat = _PATTERNS.get(self.slug)
+        if pat is None:
+            pat = _PATTERNS[self.slug] = re.compile(
+                r"(?<![\w/.])(?:" + "|".join(re.escape(a) for a in sorted(self.aliases, key=len, reverse=True)) + r")(?![\w/])", re.I)
+        return pat
 
 
 def _family(slug: str) -> str:
@@ -176,3 +184,154 @@ async def snapshot() -> Dict[str, Any]:
         off_total += len(rows) - on_count
         fams.append({"id": fid, "name": name, "total": len(rows), "on_count": on_count, "items": rows})
     return {"families": fams, "off_total": off_total}
+
+
+# ---------------------------------------------------------------- keeping off items out of what the AI says
+FAMILY_WORDS = {
+    "emulsion": re.compile(r"\bemulsions?\b", re.I),
+    "oxidized": re.compile(r"\boxidi[sz]ed\b|\bblown bitumen\b", re.I),
+    "pmb": re.compile(r"\bpolymer[- ]modified\b|\bpmb\b", re.I),
+    "base-oil": re.compile(r"\bbase oils?\b|\bsn ?-?150\b", re.I),
+}
+_UNAVAILABLE = re.compile(r"(not available|unavailable|isn'?t available|aren'?t available|out of stock|not in stock|can'?t supply|don'?t have|do not have|not currently)", re.I)
+_GRADE_TOKEN = re.compile(r"(?<![\w/])(?:[A-Za-z]{1,4}-?\d{1,3}[a-z]?(?:[/-]\d{1,3}[a-z]?)?|\d{2,3}[/-]\d{1,3})(?![\w/])")
+
+
+def fully_off_families(off: List[Item]) -> List[str]:
+    off_slugs = {i.slug for i in off}
+    out = []
+    for fid, _ in FAMILIES:
+        members = [i.slug for i in items() if i.family == fid]
+        if members and all(m in off_slugs for m in members):
+            out.append(fid)
+    return out
+
+
+def asked_for(text: str, off: List[Item]) -> Tuple[List[Item], List[str]]:
+    """What the buyer named that is out of stock: (items by name, whole families by word, e.g. 'oxidized')."""
+    named = mentioned(text, off)
+    fams = [f for f in fully_off_families(off) if f in FAMILY_WORDS and FAMILY_WORDS[f].search(text or "")]
+    return named, fams
+
+
+def names_something_in_stock(text: str, off: List[Item]) -> bool:
+    off_slugs = {i.slug for i in off}
+    return any(i.slug not in off_slugs for i in mentioned(text))
+
+
+def alternatives(item_or_family: Any, off: List[Item], limit: int = 2) -> List[Item]:
+    """In-stock items closest to an unavailable one (neighbours in the same family; otherwise none)."""
+    off_slugs = {i.slug for i in off}
+    fam = item_or_family.family if isinstance(item_or_family, Item) else item_or_family
+    pool = [i for i in items() if i.family == fam]
+    if isinstance(item_or_family, Item):
+        pos = next((n for n, i in enumerate(pool) if i.slug == item_or_family.slug), 0)
+        ranked = sorted([(abs(n - pos), n, i) for n, i in enumerate(pool) if i.slug not in off_slugs and i.has_page], key=lambda t: (t[0], t[1]))
+        return [i for _, _, i in ranked[:limit]]
+    return []
+
+
+def unavailable_reply(named: List[Item], fams: List[str], off: List[Item]) -> Tuple[str, Optional[Item]]:
+    """What the AI says (without calling the model) when the buyer asks for something that is out of stock."""
+    names = [i.title for i in named[:2]] + [FAMILY_NAMES[f].lower() for f in fams if not named]
+    if len(named) > 2:
+        names = [i.title for i in named[:2]] + ["the other grades you named"]
+    if not names:
+        names = ["that"]
+    verb = "isn't" if len(names) == 1 else "aren't"
+    first = f"Sorry, {' and '.join(names)} {verb} available at the moment."
+    alts: List[Item] = []
+    for it in named[:2]:
+        for a in alternatives(it, off):
+            if a not in alts:
+                alts.append(a)
+    alts = alts[:2]
+    if alts:
+        near = " and ".join(a.title for a in alts)
+        return f"{first} {near} {'is' if len(alts) == 1 else 'are'} the closest option{'' if len(alts) == 1 else 's'} we can offer.\n\nWould you like to know more about {alts[0].title}?", alts[0]
+    return f"{first} Is there another product I can help you with?", None
+
+
+def unavailable_note(off: List[Item]) -> str:
+    """System-prompt block: what is out of stock right now."""
+    if not off:
+        return ""
+    whole = fully_off_families(off)
+    parts = [f"ALL of: {FAMILY_NAMES[f]}" for f in whole]
+    for fid, name in FAMILIES:
+        if fid in whole:
+            continue
+        titles = [i.title for i in off if i.family == fid]
+        if titles:
+            parts.append(f"{name}: " + ", ".join(titles))
+    return ("OUT OF STOCK right now (switched off by the sales team): " + "; ".join(parts) + ". "
+            "Never mention, list, compare, offer or recommend these in any reply, and leave them out of every list of grades or products, even if the "
+            "reference material, the company profile above or your own knowledge mentions them. Only if the buyer names one of them, say plainly that it is "
+            "not available at the moment and suggest the closest in-stock alternative.")
+
+
+def _tokens_removed(sentence: str, pats: List["re.Pattern[str]"]) -> str:
+    t = sentence
+    for p in pats:
+        t = p.sub("", t)
+    t = re.sub(r"\s*,\s*(,\s*)+", ", ", t)
+    t = re.sub(r"\(\s*\)", "", t)
+    t = re.sub(r"\b(and|or)\s*,", r"\1", t)
+    t = re.sub(r"\s*,\s*(and|or)\s+(?=[.!?]|$)", "", t)
+    t = re.sub(r",\s*([.!?])", r"\1", t)
+    t = re.sub(r"\s+([,.;!?])", r"\1", t)
+    t = re.sub(r"[ \t]{2,}", " ", t)
+    return re.sub(r"^\s*[,;]\s*", "", t).strip()
+
+
+def scrub_text(text: str, off: List[Item], families_off: Optional[List[str]] = None) -> str:
+    """Remove every trace of out-of-stock items from a piece of text: whole sentences about them, their name inside a list of
+    grades, and the 'related grades' cards on the site pages (headline lines plus that card's description)."""
+    if not text or not off:
+        return text
+    pats = [i.pattern() for i in off]
+    fam_pats = [FAMILY_WORDS[f] for f in (families_off if families_off is not None else fully_off_families(off)) if f in FAMILY_WORDS]
+    anyp = pats + fam_pats
+
+    def hits(s: str) -> bool:
+        return any(p.search(s) for p in anyp)
+
+    if not hits(text):
+        return text
+    paras = re.split(r"\n\s*\n", text)
+    out: List[str] = []
+    skip_description = False
+    for para in paras:
+        if skip_description:
+            skip_description = False
+            if not hits(para) and len(para.split()) >= 8 and "\n" not in para.strip():
+                continue                                    # the description of a card whose headline was removed
+        kept: List[str] = []
+        for ln in para.split("\n"):
+            if not hits(ln):
+                kept.append(ln); continue
+            stripped = ln.strip()
+            label_like = not re.search(r"[.!?]$", stripped) or stripped.upper() == stripped
+            if len(stripped) <= 70 and label_like and not _UNAVAILABLE.search(ln):
+                if stripped.upper() == stripped or stripped.upper().startswith("GRADE "):
+                    skip_description = True                  # a card headline like "GRADE 35/50" / "BITUMEN 35/50"
+                continue                                    # a short label / link line such as "View 35/50 specs"
+            sentences = split_sentences(ln) or [ln]
+            fixed: List[str] = []
+            for sent in sentences:
+                if not hits(sent):
+                    fixed.append(sent); continue
+                if _UNAVAILABLE.search(sent):
+                    fixed.append(sent); continue            # "Sorry, 60/70 isn't available" may name it
+                if len(_GRADE_TOKEN.findall(sent)) >= 3:    # an enumeration of grades: drop only the off one(s)
+                    cleaned = _tokens_removed(sent, pats)
+                    if cleaned and not hits(cleaned):
+                        fixed.append(cleaned)
+                    continue
+                # prose about the off item alone: drop the sentence
+            if fixed:
+                kept.append(" ".join(fixed))
+        joined = "\n".join(kept).strip()
+        if joined:
+            out.append(joined)
+    return "\n\n".join(out)

@@ -25,7 +25,7 @@ import json
 import os
 import re
 import time
-from dataclasses import asdict
+from dataclasses import asdict, replace as _dc_replace
 from typing import Any, Dict, List, Optional
 
 try:
@@ -37,6 +37,7 @@ except Exception:  # pragma: no cover - dotenv is optional on Render with env in
 import importlib
 import ai_health
 import booking
+import catalog
 import learning
 import supabase_client as _sbc
 import reply_guard
@@ -1009,10 +1010,23 @@ def _is_generic_spec_request(text: str) -> bool:
     return bool(text and _SPEC_WORDS.search(text) and not _CONCRETE_PRODUCT.search(text))
 
 
-GENERIC_SPEC_REPLY = (
-    "Happy to go through the specs. Which product are you looking at: Bitumen (for example 60/70), Oxidized Bitumen, "
-    "Bitumen Emulsion, Polymer-Modified Bitumen or Base Oil SN150? Tell me which one and I'll go through every spec."
-)
+def generic_spec_reply(off=None) -> str:
+    """'Which product?' for a spec request that names none. Lists only the product families that are in stock."""
+    off = off or []
+    gone = set(catalog.fully_off_families(off))
+    off_slugs = {i.slug for i in off}
+    names: List[str] = []
+    if "bitumen" not in gone:
+        ex = next((i for i in catalog.items() if i.family == "bitumen" and i.slug not in off_slugs and re.match(r"^Bitumen \d", i.title)), None)
+        names.append(f"Bitumen (for example {ex.title.replace('Bitumen ', '')})" if ex else "Bitumen")
+    for fam, label in (("oxidized", "Oxidized Bitumen"), ("emulsion", "Bitumen Emulsion"), ("pmb", "Polymer-Modified Bitumen"), ("base-oil", "Base Oil SN150")):
+        if fam not in gone:
+            names.append(label)
+    listing = names[0] if len(names) == 1 else ", ".join(names[:-1]) + " or " + names[-1]
+    return f"Happy to go through the specs. Which product are you looking at: {listing}? Tell me which one and I'll go through every spec."
+
+
+GENERIC_SPEC_REPLY = generic_spec_reply()
 
 
 PRICING_LINE = "Hold on, let me check with my sales director about the latest price to confirm."
@@ -1214,8 +1228,12 @@ async def handle_incoming_message(
         session = await get_session(phone_number)
     safe_text = (inbound_text or "").strip()
 
-    # "Yes" to "would you like to know more?": send the page we offered (no AI call).
-    follow = _more_info_followup(session, safe_text)
+    # Items switched Off on the Stock page are out of stock: never retrieved, never mentioned (see catalog.py).
+    off = await catalog.disabled_items()
+    hidden = await catalog.hidden_slugs() if off else set()
+
+    # "Yes" to "would you like to know more?": send the page we offered (no AI call), unless that page has since gone Off.
+    follow = None if any(i.url and i.url == session.more_info_url for i in off) else _more_info_followup(session, safe_text)
     if follow:
         session.more_info_url = ""
         session.append("user", safe_text)
@@ -1225,6 +1243,17 @@ async def handle_incoming_message(
         return follow
 
     # 2. Deterministic handoff: first-tap retrieval + code-side guardrail (PLAN 4.4).
+    if off and safe_text and not reply_guard.asks_for_human(safe_text) and not _looks_like_booking_request(safe_text):
+        named, fams = catalog.asked_for(safe_text, off)
+        if (named or fams) and not catalog.names_something_in_stock(safe_text, off):
+            # The buyer asked for something that is out of stock: say so plainly and offer the closest option (no AI call).
+            reply, alt = catalog.unavailable_reply(named, fams, off)
+            session.more_info_url, session.more_info_title, session.more_info_at = ((alt.url, alt.title, time.time()) if alt else ("", "", None))
+            session.append("user", safe_text)
+            session.append("assistant", reply)
+            if not draft_only:
+                await conversation_store.save_session(session)
+            return reply
     first_turn = session.message_count == 0 and not any(m.get("role") == "assistant" for m in session.history)
     references: List[RetrievedChunk] = []
     if safe_text:
@@ -1232,7 +1261,15 @@ async def handle_incoming_message(
             query = safe_text
             if _is_generic_spec_request(safe_text) and session.inquiry.product:
                 query = f"{session.inquiry.product} {safe_text}"     # "the specs" of what we are already talking about
-            references = _expand_to_full_page(await retrieve(query), safe_text)
+            found = await (retrieve(query, exclude_slugs=hidden) if hidden else retrieve(query))
+            references = _expand_to_full_page(found, safe_text)
+            if off:
+                keep: List[RetrievedChunk] = []
+                for c in references:
+                    clean = catalog.scrub_text(c.chunk_text, off)
+                    if clean.strip():
+                        keep.append(_dc_replace(c, chunk_text=clean))
+                references = keep
         except Exception as exc:  # pragma: no cover
             print(f"[llm] retrieve() call failed: {exc!r}")
             references = []
@@ -1241,10 +1278,11 @@ async def handle_incoming_message(
         # the buyer to a person. Nothing is guessed, nothing is escalated.
         session.more_info_url = ""
         session.append("user", safe_text)
-        session.append("assistant", GENERIC_SPEC_REPLY)
+        generic = generic_spec_reply(off)
+        session.append("assistant", generic)
         if not draft_only:
             await conversation_store.save_session(session)
-        return GENERIC_SPEC_REPLY
+        return generic
     must_handoff = (
         safe_text
         and not references
@@ -1345,6 +1383,9 @@ async def handle_incoming_message(
                 _flag_needs_human(session, f"Buyer asked for a human: {safe_text[:150]}")
     except Exception as exc:
         print(f"[llm] planning/skills skipped: {type(exc).__name__}: {exc!s}")
+
+    if off:
+        extra_system = (extra_system or "") + "\n\n" + catalog.unavailable_note(off)
 
     # Booking follow-up needs to know whether the buyer is interested, undecided or said no (drives the reminders).
     if not draft_only and session.booking_link_shared_at and not session.booking_confirmed_at:
@@ -1457,6 +1498,9 @@ async def handle_incoming_message(
         if ok:
             session.handoff_notified = True
 
+    if off:
+        scrubbed = catalog.scrub_text(cleaned, off)
+        cleaned = scrubbed.strip() or "Which product are you looking at? I can go through what we have in stock."
     cleaned = _strip_repeat_greeting(cleaned, first_turn)
     cleaned = _pricing_line_last(cleaned)
     cleaned = _withhold_link_until_asked(cleaned, safe_text)
