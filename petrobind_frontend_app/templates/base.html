@@ -77,6 +77,8 @@
   {% if not embed %}
   <!-- Human-handoff: banner for the open chat -->
   <div id="ho-bar" hidden role="status" class="px-6 py-2 bg-red-600 text-white text-sm flex flex-wrap items-center justify-between gap-2"></div>
+  <!-- AI offline (e.g. OpenRouter credits used up): tells staff before buyers notice the fallback replies -->
+  <div id="ai-status-bar" hidden role="alert" class="px-6 py-2 bg-amber-400 text-black text-sm font-medium"></div>
   {% endif %}
 
   {% block content %}{% endblock %}
@@ -216,5 +218,22 @@
 
   <script src="/inbox/static/time.js?v={{ asset_v() }}"></script>
   <script src="/inbox/static/app.js?v={{ asset_v() }}"></script>
+  <script>
+  (function () {
+    var bar = document.getElementById("ai-status-bar"); if (!bar) return;
+    function check() {
+      fetch("/api/inbox/ai-status", { credentials: "same-origin" }).then(function (r) { return r.ok ? r.json() : null; }).then(function (j) {
+        if (!j) return;
+        if (j.ok) { bar.hidden = true; return; }
+        bar.textContent = "";
+        var b = document.createElement("strong"); b.textContent = "\u26A0 " + j.title + ". "; bar.appendChild(b);
+        bar.appendChild(document.createTextNode(j.help + " "));
+        if (j.since && window.PBTime) bar.appendChild(document.createTextNode("(since " + window.PBTime.format(j.since) + " " + window.PBTime.LABEL + ")"));
+        bar.hidden = false;
+      }).catch(function () {});
+    }
+    check(); setInterval(function () { if (!document.hidden) check(); }, 30000);
+  })();
+  </script>
 </body>
 </html>

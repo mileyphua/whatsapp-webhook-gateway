@@ -121,6 +121,31 @@ class CannedRepliesDoNotPushACall(Base):
         self.assertIn(self.cal, out)
 
 
+class WebsiteLinkIsAlwaysGivenForInformationRequests(Base):
+    """The model sometimes forgets the page link on an information answer, so the code adds it (deterministically)."""
+    URL = "https://www.petrobindglobal.com/products/bitumen-60-70"
+
+    def test_a_tell_me_more_answer_without_a_link_gets_the_page_link(self):
+        out = self.turn("tell me more about bitumen 60/70", "It is a paving grade used for roads and highways.")
+        self.assertIn(self.URL, out); self.assertEqual(out.count("petrobindglobal.com"), 1)
+
+    def test_no_duplicate_when_the_reply_already_has_a_link(self):
+        out = self.turn("what is bitumen 60/70?", f"It is a paving grade. {self.URL}")
+        self.assertEqual(out.count("petrobindglobal.com"), 1)
+
+    def test_not_added_to_price_booking_or_small_talk(self):
+        for text, reply in (("how much is bitumen 60/70?", "Hold on, let me check with my sales director about the latest price to confirm."),
+                            ("can we schedule a call to tell me more?", "You can book a slot here: https://cal.com/x"),
+                            ("hi there", "Hi, how can I help with your requirement?"),
+                            ("thanks, that's helpful", "You're welcome.")):
+            out = self.turn(text, reply)
+            self.assertNotIn("petrobindglobal.com", out, text)
+
+    def test_not_added_when_the_knowledge_base_had_nothing_relevant(self):
+        out = self.turn("tell me more about bitumen 60/70", "It is a paving grade.", refs=[])
+        self.assertNotIn("petrobindglobal.com/products", out)
+
+
 class LinkFromKnowledgeBase(Base):
     def test_the_reference_block_gives_the_page_url_the_ai_may_link(self):
         out = L._format_references([CHUNK])

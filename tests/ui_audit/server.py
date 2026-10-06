@@ -89,11 +89,27 @@ async def fake_learn(*a, **k):
 learning._llm_json = fake_learn
 
 
+class _Credits(Exception):
+    status_code = 402
+    def __str__(self): return "Error code: 402 - Insufficient credits"
+
+
+@main.app.get("/_ai_fail")
+async def _ai_fail():
+    main.ai_health.record_failure(_Credits()); return {"ok": False}
+
+
+@main.app.get("/_ai_ok")
+async def _ai_ok():
+    main.ai_health.record_success(); return {"ok": True}
+
+
 @main.app.get("/_sent")
 async def _sent():
     return SENT
 
-main.app.router.routes.insert(0, main.app.router.routes.pop())
+for _ in range(3):     # the test routes must sit in front of the app's catch-all route
+    main.app.router.routes.insert(0, main.app.router.routes.pop())
 
 
 SEEDED = []

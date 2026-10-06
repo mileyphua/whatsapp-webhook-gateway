@@ -15,6 +15,7 @@ load_dotenv()
 
 import booking
 import contact_names
+import ai_health
 import media_rules
 import notify
 import users_store
@@ -769,6 +770,7 @@ async def health() -> JSONResponse:
     checks: Dict[str, Any] = {
         "whatsapp_env": bool(ACCESS_TOKEN and PHONE_NUMBER_ID),
         "llm_ready": bool(os.getenv("OPENROUTER_API_KEY") or os.getenv("OPENAI_API_KEY")),
+        "llm_working": bool(ai_health.current()["ok"]),     # False after a model call failed (credits, key, outage) until one succeeds
         "rag_index_ready": rag_ok,
         "supabase_inbox": _sb_enabled(),
         "inbox_login_configured": bool(INBOX_ADMIN_TOKEN),
@@ -3685,6 +3687,7 @@ async def api_inbox_ai_suggestion(e164: str, request: Request) -> JSONResponse:
         })
 
     # 3) Cache miss → run draft_only pipeline
+    started = time.time()
     try:
         suggestion = await llm_assistant.handle_incoming_message(
             phone_number=e164,
@@ -3697,6 +3700,10 @@ async def api_inbox_ai_suggestion(e164: str, request: Request) -> JSONResponse:
             content={"detail": f"LLM pipeline error: {type(exc).__name__}: {exc!s}"},
             status_code=502,
         )
+    health = ai_health.current()
+    if not health["ok"] and (health.get("last_failure") or 0) >= started - 1:
+        # the model failed just now: say so instead of offering a canned draft as if it were an AI answer
+        return JSONResponse(content={"code": "ai_unavailable", "detail": f"{health['title']}. {health['help']}"}, status_code=503)
     if not suggestion:
         suggestion = (
             "Thanks for your message, let me get back to you on that shortly. "
@@ -3709,6 +3716,15 @@ async def api_inbox_ai_suggestion(e164: str, request: Request) -> JSONResponse:
         "last_buyer_wamid": last_buyer_wamid,
         "cached": False,
     })
+
+
+@app.get("/api/inbox/ai-status")
+async def api_inbox_ai_status(request: Request) -> JSONResponse:
+    """Is the AI model answering? Shown as a banner on every inbox page when it is not (e.g. credits used up)."""
+    fail = _requires_inbox_bearer(request)
+    if fail:
+        return fail
+    return JSONResponse(content={**ai_health.current(), "server_now_unix_ts": time.time()})
 
 
 @app.delete("/api/inbox/chats/{e164}/suggestion")
@@ -4104,6 +4120,7 @@ async def api_inbox_admin_dashboard(request: Request) -> JSONResponse:
         checks_p1: Dict[str, Any] = {
             "whatsapp_env": bool(ACCESS_TOKEN and PHONE_NUMBER_ID and VERIFY_TOKEN),
             "llm_ready": _llm_ready,
+            "llm_working": bool(ai_health.current()["ok"]),
             "rag_index_ready": _rag_ready,
             "supabase_inbox": _sb_enabled(),
             "inbox_login_configured": bool(INBOX_ADMIN_TOKEN),

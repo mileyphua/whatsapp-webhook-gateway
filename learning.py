@@ -153,6 +153,7 @@ async def _llm_json(system: str, user: str, *, max_tokens: int, timeout: float) 
     try:
         client = llm_assistant._openrouter_client()
         if client is None:
+            llm_assistant.ai_health.record_failure(kind="missing_key", message="no OpenRouter key")
             return None
         resp = await client.chat.completions.create(
             model=model,
@@ -160,9 +161,11 @@ async def _llm_json(system: str, user: str, *, max_tokens: int, timeout: float) 
             temperature=0.1, max_tokens=max_tokens, timeout=timeout,
             extra_body={"reasoning": {"effort": "low"}},
         )
+        llm_assistant.ai_health.record_success()
         return _json_from(resp.choices[0].message.content or "")
     except Exception as exc:
         print(f"[learning] llm json call failed: {type(exc).__name__}: {exc!s}")
+        llm_assistant.ai_health.record_failure(exc)
         return None
 
 

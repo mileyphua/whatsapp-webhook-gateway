@@ -34,8 +34,10 @@ try:
 except Exception:  # pragma: no cover - dotenv is optional on Render with env inject
     pass
 
+import ai_health
 import booking
 import learning
+import supabase_client as _sbc
 import reply_guard
 import conversation_store
 import notify
@@ -820,6 +822,7 @@ async def _single_turn_chat(
     called_tools: set[str] = set()
     client = _openrouter_client()
     if client is None:
+        ai_health.record_failure(kind="missing_key", message="OPENROUTER_API_KEY / OPENAI_API_KEY not set")
         return None, called_tools  # caller uses canned fallback
 
     # Prepend the system prompt (company identity + zero-hallucination rules).
@@ -864,7 +867,9 @@ async def _single_turn_chat(
             )
         except Exception as exc:
             print(f"[llm] chat.completions call failed (round {round_idx}): {exc!r}")
+            ai_health.record_failure(exc)
             return None, called_tools
+        ai_health.record_success()
         choice = resp.choices[0]
         msg = choice.message
 
@@ -949,6 +954,55 @@ async def _single_turn_chat(
 #        - which Meta payload format is used outside 24h window (template)
 # If any future code breaks these promises — fail the build immediately.
 # -----------------------------------------------------------------------------
+
+PRICING_LINE = "Hold on, let me check with my sales director about the latest price to confirm."
+
+
+async def _alert_ai_unavailable(session, safe_text: str, *, draft_only: bool, pricing: bool) -> None:
+    """The AI could not answer and a fallback reply is about to go to the buyer. Tell people FIRST: put the chat in the
+    human queue, leave a system note in the chat, log it, and email the team (once an hour). Never blocks the reply."""
+    if draft_only:
+        return    # the inbox "AI suggest" pill: the banner and the 503 already tell the person
+    h = ai_health.current()
+    why = h["title"] or "AI replies are unavailable"
+    try:
+        _flag_needs_human(session, (f"Pricing question, sales director to confirm ({why})" if pricing else f"{why}: a fallback reply was sent"))
+        note = f"⚠ {why}. A fallback reply was generated and sent to the buyer instead of an AI answer. {h['help']}"
+        await _sbc.insert_outbound_message(e164=session.phone_number, direction="system", text=note)
+        await _sbc.audit("system", "ai_unavailable", e164=session.phone_number,
+                         detail={"kind": h.get("kind"), "status": h.get("status"), "message": h.get("message"), "buyer_message": safe_text[:200]})
+        if ai_health.should_email(h.get("kind") or "error"):
+            await notify.send_handoff_email(
+                phone_number=session.phone_number,
+                reason=f"AI UNAVAILABLE — {why}",
+                partial_inquiry_summary=f"{h['help']}\n\nError: {h.get('message')}\nBuyer's message: {safe_text[:300]}",
+                relationship_summary=session.relationship_summary(),
+                recent_transcript=session.recent_transcript(),
+            )
+    except Exception as exc:
+        print(f"[llm] could not raise the AI-unavailable alert: {type(exc).__name__}: {exc!s}")
+
+
+_INFO_REQUEST_RE = re.compile(
+    r"\b(tell me more|more (info|information|details?)|learn more|read more|what (is|are)|explain|details?|specs?|specifications?|"
+    r"how (does|do|is|are)|uses?|applications?|packag\w+|certificat\w+)\b", re.I)
+
+
+def _add_read_more_link(reply: str, buyer_text: str, references: List[RetrievedChunk]) -> str:
+    """An information answer should point to the matching website page. The model sometimes forgets, so add it:
+    only for information requests (not price, booking or small talk), only when the knowledge base had a relevant
+    page, and never twice."""
+    if not reply or not references or "petrobindglobal.com" in reply or "cal.com" in reply:
+        return reply
+    if _looks_like_pricing_question(buyer_text) or _looks_like_booking_request(buyer_text) or not _INFO_REQUEST_RE.search(buyer_text or ""):
+        return reply
+    if "sales director" in reply.lower():
+        return reply
+    top = references[0]
+    if not getattr(top, "url", "") or getattr(top, "similarity", 0) < 0.45:
+        return reply
+    return f"{reply.rstrip()}\n\nRead more on our website: {top.url}"
+
 
 def _booking_link_for(session, message: Optional[str] = None) -> str:
     """Cal.com link that carries this buyer's WhatsApp number (and name/email if known), so the
@@ -1142,9 +1196,13 @@ async def handle_incoming_message(
         text = None
 
     if text is None:
-        # Fallback path: LLM unavailable or failed. Notify sales (once) + give
-        # the buyer a friendly, specific next-step message.
-        if _looks_like_booking_request(safe_text) and booking.is_configured() and not session.booking_link_shared_at:
+        # Fallback path: LLM unavailable or failed. Tell people FIRST (inbox note, human queue, banner, email), then
+        # give the buyer a short, safe message. A price question always goes to the sales director / a human.
+        pricing = _looks_like_pricing_question(safe_text)
+        await _alert_ai_unavailable(session, safe_text, draft_only=draft_only, pricing=pricing)
+        if pricing:
+            fallback = PRICING_LINE
+        elif _looks_like_booking_request(safe_text) and booking.is_configured() and not session.booking_link_shared_at:
             fallback = (
                 "Let me get back to you on this shortly. If you'd like to "
                 "talk it through, you can pick a time with our team here: "
@@ -1226,6 +1284,8 @@ async def handle_incoming_message(
         if ok:
             session.handoff_notified = True
 
+    cleaned = _add_read_more_link(cleaned, safe_text, references)
+
     # Bump the Q&A counter if we sent info but no inquiry/booking progress.
     inquiry_before = session.inquiry.completeness_score()
     if (
@@ -1236,6 +1296,10 @@ async def handle_incoming_message(
     ):
         session.freeform_questions_answered += 1
 
+    if not cleaned.strip() and _looks_like_pricing_question(safe_text):
+        cleaned = PRICING_LINE                                  # the model said nothing to a price question
+        if not draft_only:
+            _flag_needs_human(session, "Pricing question: sales director to confirm")
     cleaned = cleaned.strip() or "Thanks, we'll be in touch shortly."
     # Append only if the last assistant history entry isn't already this reply
     # (tool loop may have appended an empty-content message we don't want to overwrite).

@@ -110,13 +110,14 @@
       return;
     }
     const order = [
-      "whatsapp_env", "llm_ready", "rag_index_ready", "supabase_inbox",
+      "whatsapp_env", "llm_ready", "llm_working", "rag_index_ready", "supabase_inbox",
       "inbox_login_configured", "booking_configured", "email_configured",
       "redis_scan_available", "followups_configured",
     ];
     const nameMap = {
       whatsapp_env: "WhatsApp Cloud API Env",
       llm_ready: "LLM (OpenRouter gpt-5-mini)",
+      llm_working: "LLM answering (credits / key OK)",
       rag_index_ready: "RAG Bitumen Index",
       supabase_inbox: "Supabase Inbox Mirror",
       inbox_login_configured: "Inbox Admin Login Config",

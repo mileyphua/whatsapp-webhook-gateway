@@ -219,6 +219,26 @@ async function crawl(path, label, jar) {
   const lo = await fetch(BASE + "/inbox/logout", { redirect: "manual", headers: { cookie: mei.getCookieStringSync(BASE) } });
   check("logout: signs out and returns to the login page", lo.status === 302 && /login/.test(lo.headers.get("location") || ""), lo.status + " " + lo.headers.get("location"));
 
+  // ---------------- AI offline banner ----------------
+  const N0 = await openPage("/inbox/chats", admin); await sleep(500);
+  check("AI banner: hidden while the AI works", $(N0, "#ai-status-bar").hidden, $(N0, "#ai-status-bar").textContent);
+  N0.w.close();
+  await fetch(BASE + "/_ai_fail");
+  const N1 = await openPage("/inbox/chats", admin); await sleep(700);
+  const bar = $(N1, "#ai-status-bar");
+  check("AI banner: shown to staff when OpenRouter credits are used up, with what to do", !bar.hidden && /credits are used up/.test(bar.textContent) && /openrouter\.ai\/settings\/credits/.test(bar.textContent) && /GMT\+8/.test(bar.textContent), bar.hidden + " " + bar.textContent);
+  const ops = await openPage("/inbox/admin", admin); await sleep(1500);
+  check("AI banner: also shown on the Ops page, and its check turns red", !$(ops, "#ai-status-bar").hidden && /LLM answering/.test(ops.d.body.textContent), "bar hidden=" + $(ops, "#ai-status-bar").hidden);
+  ops.w.close();
+  const memb = await openPage("/inbox/chats", await login("mei", "mei-password-1")); await sleep(600);
+  check("AI banner: team members see it too", !$(memb, "#ai-status-bar").hidden, "hidden");
+  memb.w.close();
+  await fetch(BASE + "/_ai_ok");
+  N1.w.close();
+  const N2 = await openPage("/inbox/chats", admin); await sleep(500);
+  check("AI banner: disappears once the AI answers again", $(N2, "#ai-status-bar").hidden, $(N2, "#ai-status-bar").textContent);
+  N2.w.close();
+
   // ---------------- learning: which feedback is it learning from? ----------------
   const G = await openPage("/inbox/learning", admin); await sleep(600);
   const waitCards = G.d.querySelectorAll("#waiting > div");
