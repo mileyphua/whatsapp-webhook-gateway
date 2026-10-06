@@ -464,6 +464,19 @@ Behaviour:
     'available for a call', 'want to talk 1:1', 'schedule a meeting' or
     similar scheduling intent, call share_booking_link to get the real
     Cal.com URL and include it in your reply.
+  - Specs first: when the buyer asks for specs, specifications, properties or
+    a datasheet, answer them yourself FIRST from the retrieved reference
+    material (the technical numbers there are fine to share; only the price is
+    withheld) and give that page's URL to read more. If they did not say
+    which product, ask which one in a single line. Never answer a spec
+    question with only 'let me check with the sales director' or 'a colleague
+    will get back to you'; that is only for something genuinely not in the
+    reference material. If the same message also asks for the price, give the
+    specs first and then the required pricing line.
+  - The introduction ('Hi, this is Jane from PetroBind Global, how can we
+    help you with your requirement today?') is for the very first reply of a
+    brand-new chat only. In any later reply, even if the buyer says 'hi'
+    again, never introduce yourself again: just answer.
   - Information questions: when the buyer asks for information or more detail
     ('tell me more', what is X, specs, uses, packaging, certifications, how it
     works), answer from the retrieved reference material and point them to the
@@ -955,6 +968,48 @@ async def _single_turn_chat(
 # If any future code breaks these promises — fail the build immediately.
 # -----------------------------------------------------------------------------
 
+_GREETING_RE = re.compile(r"(?:(?:hi|hello|hey)[^A-Za-z.!?\n]*)?this is jane\b[^.!?\n]*[.!?]\s*", re.I)
+_INVITE_RE = re.compile(r"how (?:can|may) (?:we|i) help (?:you )?with your requirement today\??\s*", re.I)
+
+
+def _strip_repeat_greeting(reply: str, first_turn: bool) -> str:
+    """'Hi, this is Jane from PetroBind Global. How can we help you with your requirement today?' is only for the very
+    start of a chat. Anywhere later (even if the buyer says 'hi' again) it is removed; a bare greeting becomes a short hello."""
+    if first_turn or not reply:
+        return reply
+    out = _INVITE_RE.sub("", _GREETING_RE.sub("", reply))
+    out = re.sub(r"[ \t]+\n", "\n", out)
+    out = re.sub(r"\n{3,}", "\n\n", out).strip()
+    return out or "Hi! What can I help you with?"
+
+
+def _pricing_line_last(reply: str) -> str:
+    """Specs first, price line second: when the model opens with the sales-director line and then gives details, put
+    the details first (a reply that is only the pricing line is left alone)."""
+    paras = [p for p in re.split(r"\n\s*\n", reply or "") if p.strip()]
+    if len(paras) >= 2 and paras[0].strip().lower().startswith("hold on, let me check with my sales director"):
+        paras = [paras[1], paras[0]] + paras[2:]
+        return "\n\n".join(p.strip() for p in paras)
+    return reply
+
+
+_SPEC_WORDS = re.compile(r"\b(specs?|specifications?|data ?sheets?|tds|pds|coa|more info(?:rmation)?|more details?|details|properties)\b", re.I)
+_CONCRETE_PRODUCT = re.compile(
+    r"(bitumen|asphalt|emulsion|oxidi[sz]ed|polymer|rubber|base oil|sn ?150|\b\d{2,3}/\d{2,3}\b|\bvg ?-?\d+|\bcss|\bhfms|\bcrs|\bcms|\brs-?\d|\bms-?\d|\bss-?\d|\bqs-?\d|\br\d{2}/\d{2}|\bpmb\b)", re.I)
+
+
+def _is_generic_spec_request(text: str) -> bool:
+    """'I need to know more about the specs first': a spec request that does not say which product."""
+    return bool(text and _SPEC_WORDS.search(text) and not _CONCRETE_PRODUCT.search(text))
+
+
+GENERIC_SPEC_REPLY = (
+    "Happy to go through the specs. Which product are you looking at: Bitumen (for example 60/70), Oxidized Bitumen, "
+    "Bitumen Emulsion, Polymer-Modified Bitumen or Base Oil SN150?\n\n"
+    f"You can also see them all here: {WEBSITE_URL}/products/bitumen"
+)
+
+
 PRICING_LINE = "Hold on, let me check with my sales director about the latest price to confirm."
 
 
@@ -1066,13 +1121,25 @@ async def handle_incoming_message(
     safe_text = (inbound_text or "").strip()
 
     # 2. Deterministic handoff: first-tap retrieval + code-side guardrail (PLAN 4.4).
+    first_turn = session.message_count == 0 and not any(m.get("role") == "assistant" for m in session.history)
     references: List[RetrievedChunk] = []
     if safe_text:
         try:
-            references = await retrieve(safe_text)
+            query = safe_text
+            if _is_generic_spec_request(safe_text) and session.inquiry.product:
+                query = f"{session.inquiry.product} {safe_text}"     # "the specs" of what we are already talking about
+            references = await retrieve(query)
         except Exception as exc:  # pragma: no cover
             print(f"[llm] retrieve() call failed: {exc!r}")
             references = []
+    if safe_text and not references and index_is_ready() and _is_generic_spec_request(safe_text) and not _looks_like_pricing_question(safe_text):
+        # A spec request that does not say which product: ask which one (and link the products page) instead of sending
+        # the buyer to a person. Nothing is guessed, nothing is escalated.
+        session.append("user", safe_text)
+        session.append("assistant", GENERIC_SPEC_REPLY)
+        if not draft_only:
+            await conversation_store.save_session(session)
+        return GENERIC_SPEC_REPLY
     must_handoff = (
         safe_text
         and not references
@@ -1284,6 +1351,8 @@ async def handle_incoming_message(
         if ok:
             session.handoff_notified = True
 
+    cleaned = _strip_repeat_greeting(cleaned, first_turn)
+    cleaned = _pricing_line_last(cleaned)
     cleaned = _add_read_more_link(cleaned, safe_text, references)
 
     # Bump the Q&A counter if we sent info but no inquiry/booking progress.

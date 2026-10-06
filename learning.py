@@ -49,7 +49,7 @@ BUILTIN_SKILLS: List[Dict[str, Any]] = [
     {
         "id": "builtin-hand-over", "builtin": True, "always": False, "status": "active",
         "name": "Hand over to a human",
-        "description": "Use when the buyer asks for a person, a call or a manager, wants to negotiate or confirm price, contract or payment terms, is upset or frustrated, or the question cannot be answered from the reference material.",
+        "description": "Use when the buyer asks for a person, a call or a manager, wants to negotiate or confirm price, contract or payment terms, is upset or frustrated, or the question cannot be answered from the reference material (a spec request for a product we have references for CAN be answered, so don't hand those over).",
         "instructions": (
             "Say, in one short natural sentence, that a colleague will pick this up on this chat. Don't promise a time and don't guess "
             "facts, because a wrong answer costs more trust than a short wait. For price questions follow the company profile's pricing wording. "
@@ -173,7 +173,7 @@ _PLANNER_SYSTEM = """\
 You plan a WhatsApp reply for Petrobind's sales assistant BEFORE it is written. Think about the buyer; do not write the reply.
 Return ONLY JSON: {"intent": str, "needs_human": bool, "human_reason": str, "skills": [str], "points": [str], "avoid": [str], "tone": str, "booking_intent": str}
 - intent: what the buyer actually wants right now, in one short phrase.
-- needs_human: true if the buyer asks for a person/call/manager, wants to negotiate or confirm price/contract/terms, is upset, or it cannot be answered safely from the reference titles.
+- needs_human: true if the buyer asks for a person/call/manager, wants to negotiate or confirm price/contract/terms, is upset, or it cannot be answered safely from the reference titles. A request for specs, a datasheet, COA or product properties is not a reason to set needs_human when the reference titles cover that product (the assistant answers it); if the buyer did not say which product, the assistant just asks which one.
 - skills: ids from the skill catalog whose "Use when" matches this message (0-3). Only ids from the catalog.
 - points: 1-3 things the reply should cover, in order.
 - avoid: exact sentences/openers already used in the recent assistant replies that must not be repeated.
