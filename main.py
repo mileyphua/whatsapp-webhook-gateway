@@ -18,6 +18,7 @@ import contact_names
 import ai_health
 import catalog
 import site_links
+import media_ai
 import media_rules
 import model_info
 import notify
@@ -850,6 +851,121 @@ async def verify_webhook(
     )
 
 
+async def _canned_media_flow(message: Dict[str, Any], pnid: str) -> None:
+    """The standard handling of a non-text message: a short canned reply asking for product + port (unless a human holds the chat),
+    plus a handoff email to the team (at most one an hour per buyer)."""
+    msg_type = message.get("type")
+    wamid = message.get("id")
+    canned = _NONTEXT_MEDIA_REPLY.get(msg_type)
+    summary_extra = ""
+    if canned:
+        # --- claim mutex (additive, no break): if human holds claim, skip canned reply ---
+        # NOTE: Handoff email still fires below this block so the human
+        # sees the inbound media alert; only the canned text auto-reply to
+        # the buyer is suppressed.
+        media_from = message.get("from")
+        held = await _claim_is_held_by_other(media_from) if media_from else None
+        if held:
+            print(
+                f"[MEDIA ACK SKIP — human holds claim] type={msg_type!r} "
+                f"from={media_from!r} held_by={held.get('held_by')!r}"
+            )
+            asyncio.create_task(_persist_outbound_safe(
+                e164=media_from or "",
+                direction="system",
+                text=(
+                    f"[AI skipped media-canned send (claim held by {held.get('held_by')}): "
+                    f"Inbound {msg_type} received. Canned would have said: "
+                    f"{canned[:300]}{'…' if len(canned) > 300 else ''}]"
+                ),
+                reply_to_wamid=wamid,
+            ))
+            summary_extra = (
+                f"Buyer sent a WhatsApp {msg_type} message (msg_id={wamid}). "
+                f"Canned auto-reply SKIPPED (chat held by {held.get('held_by')}). "
+                f"Please reply to them manually in the shared inbox."
+            )
+        else:
+            try:
+                res = await send_whatsapp_text(
+                    to=media_from,
+                    text=canned,
+                    phone_number_id=pnid,
+                    preview_url=False,
+                    sender_direction="ai",
+                )
+                sent_id = (res.get("messages") or [{}])[0].get("id")
+                print(
+                    f"[MEDIA ACK OK] type={msg_type!r} from={media_from!r} "
+                    f"sent_id={sent_id}"
+                )
+                summary_extra = (
+                    f"Buyer sent a WhatsApp {msg_type} message. We auto-replied "
+                    f"asking for product+port. Buyer original message_id={wamid}"
+                )
+            except Exception as exc:
+                print(f"[MEDIA ACK FAIL] type={msg_type!r} error={exc!r}")
+                summary_extra = (
+                    f"Buyer sent a WhatsApp {msg_type} message (msg_id={wamid}). "
+                    f"AUTO-REPLY FAILED with {exc!r} — please reach out manually."
+                )
+        # Also send a handoff email so a human sees the inbound media now (at most once an hour per
+        # buyer: someone sending ten photos must not flood the team's mailbox).
+        try:
+            media_from = message.get("from") or ""
+            if time.time() - _MEDIA_EMAIL_LAST.get(media_from, 0.0) < 3600:
+                raise _MediaEmailThrottled()
+            _MEDIA_EMAIL_LAST[media_from] = time.time()
+            media_sess = await conversation_store.get_session(media_from) if media_from else None
+            await notify.send_handoff_email(
+                phone_number=media_from,
+                reason=(
+                    f"Inbound {msg_type} message received (no auto-processing)."
+                ),
+                partial_inquiry_summary=summary_extra,
+                relationship_summary=media_sess.relationship_summary() if media_sess else None,
+                recent_transcript=media_sess.recent_transcript() if media_sess else None,
+            )
+        except _MediaEmailThrottled:
+            print(f"[MEDIA HANDOFF EMAIL SKIP] already emailed about {message.get('from')!r} in the last hour")
+        except Exception as exc:
+            print(f"[MEDIA HANDOFF EMAIL FAIL] {exc!r}")
+    else:
+        print(
+            f"[MEDIA SILENT] type={msg_type!r} from={message.get('from')!r} "
+            f"-> no reply (sticker / reaction / interactive button-text will arrive "
+            f"as a separate text message if needed)."
+        )
+
+
+async def _handle_buyer_media(message: Dict[str, Any], pnid: str) -> None:
+    """A buyer sent a photo or a document: read it with the AI model, put what it says into the conversation (the AI then answers
+    as usual) and leave a note for the team. If it can't be read, fall back to the standard reply and flag it."""
+    msg_type = str(message.get("type") or "")
+    sender = str(message.get("from") or "")
+    blob = message.get(msg_type) or {}
+    filename = str(blob.get("filename") or "")
+    caption = str(blob.get("caption") or "")
+    label = "image" if msg_type == "image" else (f"document {filename}" if filename else "document")
+    try:
+        reading = await media_ai.understand(kind=msg_type, media_id=str(blob.get("id") or ""), mime=str(blob.get("mime_type") or ""), filename=filename, caption=caption)
+    except Exception as exc:
+        print(f"[MEDIA] understanding crashed: {type(exc).__name__}: {exc!s}")
+        reading = media_ai.MediaReading(False, "", "model_error")
+    try:
+        if reading.ok:
+            await _persist_outbound_safe(e164=sender, direction="system", text=f"📎 AI read the {label}: {reading.summary}")
+            _schedule_batched_reply(from_number=sender, phone_number_id=pnid, reply_to_message_id=message.get("id"),
+                                    text=media_ai.compose_buyer_text(msg_type, filename, caption, reading.summary))
+            return
+        why = media_ai.REASON_TEXT.get(reading.reason, reading.reason or "unknown reason")
+        await _persist_outbound_safe(e164=sender, direction="system",
+                                     text=f"📎 AI could not read the {label} ({why}). The standard reply was sent and the chat was flagged for a person to look at it.")
+        await _canned_media_flow(message, pnid)
+    except Exception as exc:
+        print(f"[MEDIA] handling failed: {type(exc).__name__}: {exc!s}")
+
+
 @app.post("/webhook")
 async def receive_webhook(request: Request) -> JSONResponse:
     content_type = request.headers.get("content-type", "")
@@ -942,86 +1058,11 @@ async def receive_webhook(request: Request) -> JSONResponse:
 
                     # P0.2 Non-text inbound media messages.
                     _process_message(message)
-                    canned = _NONTEXT_MEDIA_REPLY.get(msg_type)
-                    summary_extra = ""
-                    if canned:
-                        # --- claim mutex (additive, no break): if human holds claim, skip canned reply ---
-                        # NOTE: Handoff email still fires below this block so the human
-                        # sees the inbound media alert; only the canned text auto-reply to
-                        # the buyer is suppressed.
-                        media_from = message.get("from")
-                        held = await _claim_is_held_by_other(media_from) if media_from else None
-                        if held:
-                            print(
-                                f"[MEDIA ACK SKIP — human holds claim] type={msg_type!r} "
-                                f"from={media_from!r} held_by={held.get('held_by')!r}"
-                            )
-                            asyncio.create_task(_persist_outbound_safe(
-                                e164=media_from or "",
-                                direction="system",
-                                text=(
-                                    f"[AI skipped media-canned send (claim held by {held.get('held_by')}): "
-                                    f"Inbound {msg_type} received. Canned would have said: "
-                                    f"{canned[:300]}{'…' if len(canned) > 300 else ''}]"
-                                ),
-                                reply_to_wamid=wamid,
-                            ))
-                            summary_extra = (
-                                f"Buyer sent a WhatsApp {msg_type} message (msg_id={wamid}). "
-                                f"Canned auto-reply SKIPPED (chat held by {held.get('held_by')}). "
-                                f"Please reply to them manually in the shared inbox."
-                            )
-                        else:
-                            try:
-                                res = await send_whatsapp_text(
-                                    to=media_from,
-                                    text=canned,
-                                    phone_number_id=pnid,
-                                    preview_url=False,
-                                    sender_direction="ai",
-                                )
-                                sent_id = (res.get("messages") or [{}])[0].get("id")
-                                print(
-                                    f"[MEDIA ACK OK] type={msg_type!r} from={media_from!r} "
-                                    f"sent_id={sent_id}"
-                                )
-                                summary_extra = (
-                                    f"Buyer sent a WhatsApp {msg_type} message. We auto-replied "
-                                    f"asking for product+port. Buyer original message_id={wamid}"
-                                )
-                            except Exception as exc:
-                                print(f"[MEDIA ACK FAIL] type={msg_type!r} error={exc!r}")
-                                summary_extra = (
-                                    f"Buyer sent a WhatsApp {msg_type} message (msg_id={wamid}). "
-                                    f"AUTO-REPLY FAILED with {exc!r} — please reach out manually."
-                                )
-                        # Also send a handoff email so a human sees the inbound media now (at most once an hour per
-                        # buyer: someone sending ten photos must not flood the team's mailbox).
-                        try:
-                            media_from = message.get("from") or ""
-                            if time.time() - _MEDIA_EMAIL_LAST.get(media_from, 0.0) < 3600:
-                                raise _MediaEmailThrottled()
-                            _MEDIA_EMAIL_LAST[media_from] = time.time()
-                            media_sess = await conversation_store.get_session(media_from) if media_from else None
-                            await notify.send_handoff_email(
-                                phone_number=media_from,
-                                reason=(
-                                    f"Inbound {msg_type} message received (no auto-processing)."
-                                ),
-                                partial_inquiry_summary=summary_extra,
-                                relationship_summary=media_sess.relationship_summary() if media_sess else None,
-                                recent_transcript=media_sess.recent_transcript() if media_sess else None,
-                            )
-                        except _MediaEmailThrottled:
-                            print(f"[MEDIA HANDOFF EMAIL SKIP] already emailed about {message.get('from')!r} in the last hour")
-                        except Exception as exc:
-                            print(f"[MEDIA HANDOFF EMAIL FAIL] {exc!r}")
+                    if msg_type in ("image", "document"):
+                        # photos and documents are READ by the AI model (in the background so the webhook answers Meta at once)
+                        asyncio.create_task(_handle_buyer_media(message, pnid))
                     else:
-                        print(
-                            f"[MEDIA SILENT] type={msg_type!r} from={message.get('from')!r} "
-                            f"-> no reply (sticker / reaction / interactive button-text will arrive "
-                            f"as a separate text message if needed)."
-                        )
+                        await _canned_media_flow(message, pnid)
                 for st in value.get("statuses", []) or []:
                     _process_status(st)
                 for event in value.get("contacts", []) or []:

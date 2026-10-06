@@ -14,7 +14,7 @@ class Countdown(unittest.TestCase):
         r = subprocess.run(["node", os.path.join(HERE, "countdown_check.js")], capture_output=True, text=True, timeout=30)
         self.assertEqual(r.returncode, 0, r.stderr)
         out = json.loads(r.stdout.strip().splitlines()[-1])
-        self.assertEqual(out["open"][0], "⏱ 01:02:05 left to reply")         # counts down as HH:MM:SS
+        self.assertRegex(out["open"][0], r"^⏱ 01:02:0[3-5] left to reply$")      # counts down as HH:MM:SS (a second may tick over while it runs)
         self.assertEqual(out["open"][1], "1h 2m")                              # the banner's text follows it
         self.assertEqual(out["open"][2], 0)                                    # still open: composer untouched
         self.assertEqual(out["expired"][0], "⏱ window closed · templates only")

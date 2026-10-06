@@ -133,10 +133,11 @@ async def record_change_if_needed(model_id: str) -> Optional[Dict[str, Any]]:
     if rows and rows[0].get("model") == model_id:
         return None
     shaped = _shape(model_id, _lookup(await _models(), model_id))
-    rec = {"model": model_id, "from": rows[0]["model"] if rows else "", "at": time.time(), "input_modalities": shaped["input_modalities"],
+    at = max(time.time(), (rows[0].get("at", 0) + 0.001) if rows else 0)       # strictly increasing: two quick changes never share a key
+    rec = {"model": model_id, "from": rows[0]["model"] if rows else "", "at": at, "input_modalities": shaped["input_modalities"],
            "output_modalities": shaped["output_modalities"], "supported_parameters": shaped["supported_parameters"],
            "context_length": shaped["context_length"], "found": shaped["found"]}
-    await fs._hset(HISTORY, str(int(rec["at"] * 1000)), rec)
+    await fs._hset(HISTORY, str(int(rec["at"] * 1_000_000)), rec)
     try:
         await _sb.audit("system", "ai_model_changed", detail={"model": model_id, "from": rec["from"], "inputs": rec["input_modalities"]})
     except Exception:
