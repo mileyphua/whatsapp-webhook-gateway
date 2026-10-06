@@ -6,19 +6,21 @@ import sys
 import tempfile
 import time
 
-for k in ("UPSTASH_REDIS_REST_URL", "UPSTASH_REDIS_REST_TOKEN", "SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY"):
-    os.environ[k] = ""
+for k in ("UPSTASH_REDIS_REST_URL", "UPSTASH_REDIS_REST_TOKEN", "SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY", "RENDER_INBOX_URL"):
+    os.environ[k] = ""          # never touch the live Redis / Supabase / Render that the developer's .env points at
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 sys.path.insert(0, ROOT)
 tmp = tempfile.mkdtemp(prefix="ui_audit_")
 
-import contact_names, feedback_store, supabase_client as sb, users_store, conversation_store  # noqa: E402
+import supabase_client as sb  # noqa: E402  (first: set its private files before anything else loads the real ones)
+sb._AUDIT_FILE = os.path.join(tmp, "audit.jsonl")
+sb._LOCAL_OUTBOUND_FILE = os.path.join(tmp, "outbound.json")
+sb._LOCAL_OUTBOUND.clear()
+import learning, contact_names, feedback_store, users_store, conversation_store  # noqa: E402
 users_store._REDIS_URL = users_store._REDIS_TOKEN = ""
 users_store._FILE = os.path.join(tmp, "users.json")
 contact_names._FILE = os.path.join(tmp, "names.json")
 feedback_store._FILE = os.path.join(tmp, "learning.json")
-sb._AUDIT_FILE = os.path.join(tmp, "audit.jsonl")
-sb._LOCAL_OUTBOUND_FILE = os.path.join(tmp, "outbound.json")
 sb.ENABLED = False
 
 import main  # noqa: E402
@@ -79,6 +81,14 @@ async def fake_handle(**kw):
 main.llm_assistant.handle_incoming_message = fake_handle
 
 
+async def fake_learn(*a, **k):
+    return {"skills": [{"name": "Pricing questions", "always": False, "description": "Buyer asks how much something costs.",
+                        "instructions": "Ask for quantity and destination first, because price depends on both."}],
+            "knowledge_checks": ["Check VG30 lead time"]}
+
+learning._llm_json = fake_learn
+
+
 @main.app.get("/_sent")
 async def _sent():
     return SENT
@@ -109,6 +119,9 @@ async def seed():
     await main._persist_outbound_safe(e164=B, direction="ai", text="Yes, how can I help?", sent_id_from_graph="wamid.AI2")
     s = await conversation_store.get_session(B)
     s.needs_human_since, s.needs_human_reason = now - 600, "buyer asked for a person"
+    for n in (1, 2):
+        await feedback_store.add_feedback(e164=A, ai_text=f"Audit AI reply {n}: the price is $500.", buyer_text=f"audit price question {n}?",
+                                          rating="down", note="Do not quote prices", better_reply="Depends on volume.", actor="Admin")
     try:
         await users_store.create_user(username="mei", name="Mei Ling", password="mei-password-1")
     except ValueError:

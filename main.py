@@ -239,8 +239,14 @@ _NONTEXT_MEDIA_REPLY: dict[str, str] = {
 @app.on_event("startup")
 async def _local_sync_startup() -> None:
     """A local server hands any not-yet-confirmed sent messages to Render (no-op on Render itself)."""
+    _sb.arm_forwarding(True)
     if not _sb.ENABLED and _sb.local_unsynced_count():
         asyncio.create_task(_sb.sync_pending_local())
+
+
+@app.on_event("shutdown")
+async def _local_sync_shutdown() -> None:
+    _sb.arm_forwarding(False)
 
 
 @app.on_event("startup")
@@ -3403,12 +3409,18 @@ async def api_inbox_learning(request: Request) -> JSONResponse:
     if fail:
         return fail
     stored = await feedback_store.list_skills()
+    feedback = await feedback_store.list_feedback()
+    by_id = {f["id"]: f for f in feedback}
+    for sk in stored:     # show the ratings each learned skill came from
+        srcs = [learning.feedback_summary(by_id[i]) for i in (sk.get("source_ids") or []) if i in by_id]
+        sk["source_count"], sk["sources"] = len(sk.get("source_ids") or []), srcs[:8]
     skills = [dict(b, proposal=None) for b in learning.BUILTIN_SKILLS] + stored
     return JSONResponse(content={
         "stats": await learning.stats(),
         "skills": skills,
         "knowledge": [l for l in await feedback_store.list_lessons() if l.get("kind") == "knowledge"],
-        "recent_feedback": (await feedback_store.list_feedback())[:50],
+        "waiting": [learning.feedback_summary(f) for f in feedback if not f.get("processed")],
+        "recent_feedback": feedback[:50],
     })
 
 

@@ -111,13 +111,14 @@ class LocalhostForwardsToRender(unittest.TestCase):
         self._en = sb.ENABLED; sb.ENABLED = False
         self._st = sb._LOCAL_OUTBOUND_FILE; sb._LOCAL_OUTBOUND_FILE = tempfile.mktemp(suffix=".json"); sb._LOCAL_OUTBOUND.clear()
         sb._RENDER_COOKIE = None
+        sb.arm_forwarding(True)
         self._p = [mock.patch.dict(os.environ, {"RENDER_INBOX_URL": "https://render.example", "INBOX_ADMIN_TOKEN": "tok-123456"}),
                    mock.patch.object(sb.httpx, "AsyncClient", FakeRender)]
         for p in self._p: p.start()
 
     def tearDown(self):
         for p in self._p: p.stop()
-        sb.ENABLED = self._en
+        sb.ENABLED = self._en; sb.arm_forwarding(False)
         if os.path.exists(sb._LOCAL_OUTBOUND_FILE): os.remove(sb._LOCAL_OUTBOUND_FILE)
         sb._LOCAL_OUTBOUND_FILE = self._st; sb._LOCAL_OUTBOUND.clear(); sb._RENDER_COOKIE = None
 
@@ -161,6 +162,12 @@ class LocalhostForwardsToRender(unittest.TestCase):
             self.send(sid="wamid.NOPE")
             self.assertEqual(sb.local_unsynced_count(), 0)
         self.assertEqual(FakeRender.calls, [])
+
+    def test_nothing_is_forwarded_unless_a_real_server_has_started(self):
+        """Tests and scripts import this module with the developer's .env loaded: they must never reach the live database."""
+        sb.arm_forwarding(False)
+        self.send(sid="wamid.TEST")
+        self.assertEqual(FakeRender.calls, []); self.assertEqual(sb.local_unsynced_count(), 0)
 
     def test_a_server_with_supabase_writes_directly_and_never_forwards(self):
         sb.ENABLED = True

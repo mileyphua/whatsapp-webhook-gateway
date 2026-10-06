@@ -264,9 +264,19 @@ if not ENABLED:
 # ---------------------------------------------------------------------------------------------------------------
 _RENDER_COOKIE: Optional[str] = None
 _FORWARD_DIRECTIONS = ("human", "ai")
+# Forwarding is only switched on by a REAL running server (startup event), never by tests or scripts that merely import
+# this module with the developer's .env loaded: otherwise their test messages would be written to the live database.
+_FORWARD_ARMED = False
+
+
+def arm_forwarding(on: bool = True) -> None:
+    global _FORWARD_ARMED
+    _FORWARD_ARMED = bool(on)
 
 
 def _render_url() -> str:
+    if not _FORWARD_ARMED:
+        return ""
     return (os.getenv("RENDER_INBOX_URL") or "").strip().rstrip("/")
 
 

@@ -219,6 +219,24 @@ async function crawl(path, label, jar) {
   const lo = await fetch(BASE + "/inbox/logout", { redirect: "manual", headers: { cookie: mei.getCookieStringSync(BASE) } });
   check("logout: signs out and returns to the login page", lo.status === 302 && /login/.test(lo.headers.get("location") || ""), lo.status + " " + lo.headers.get("location"));
 
+  // ---------------- learning: which feedback is it learning from? ----------------
+  const G = await openPage("/inbox/learning", admin); await sleep(600);
+  const waitCards = G.d.querySelectorAll("#waiting > div");
+  check("learning: the waiting list shows the ratings that have not been learned from yet", waitCards.length === 3 && /audit price question/.test(G.d.querySelector("#waiting").textContent) && /Waiting to be learned from\s*\(3\)/.test(G.d.querySelector("#waiting-section").textContent), G.d.querySelector("#waiting-section").textContent.slice(0, 120));
+  check("learning: the table marks them as waiting", [...G.d.querySelectorAll("#recent td")].filter((t) => t.textContent === "Waiting").length === 3, "no Waiting cells");
+  click(G, "#learn-btn"); await sleep(1200);
+  const res = $(G, "#learn-result");
+  check("learning: clicking Learn shows a result panel", !res.hidden && /Just learned from 3 ratings/.test(res.textContent), res.textContent.slice(0, 120));
+  check("learning: the panel lists the exact feedback it read", /audit price question 1\?/.test(res.textContent) && /audit price question 2\?/.test(res.textContent) && /Do not quote prices/.test(res.textContent), res.textContent.slice(0, 300));
+  check("learning: the panel names the skill and the knowledge check that came out", /New skill: Pricing questions/.test(res.textContent) && /Check VG30 lead time/.test(res.textContent), res.textContent);
+  check("learning: the waiting list is now empty", G.d.querySelectorAll("#waiting > div").length === 1 && /Nothing waiting/.test(G.d.querySelector("#waiting").textContent), G.d.querySelector("#waiting").textContent);
+  check("learning: the table now says Learned", [...G.d.querySelectorAll("#recent td")].filter((t) => /Learned/.test(t.textContent)).length === 3, "no Learned cells");
+  const sk = [...G.d.querySelectorAll("#skills details summary")].find((x) => /Learned from 3 ratings/.test(x.textContent));
+  check("learning: the new skill shows the ratings it came from", !!sk && /audit price question/.test(sk.parentElement.textContent), "no sources");
+  click(G, "#learn-result button"); check("learning: Close hides the panel", $(G, "#learn-result").hidden, "still shown");
+  check("learning page: no script errors", G.errors.length === 0, G.errors.join(" | "));
+  G.w.close();
+
   for (const [path, label] of [["/inbox/team", "Team page"], ["/inbox/learning", "Learning page"], ["/inbox/logs", "Logs page"], ["/inbox/admin", "Ops page"], ["/inbox/guide", "Guide page"], ["/inbox/architecture", "Architecture page"]]) await crawl(path, label, admin);
 
   const O = await openPage("/inbox/admin", admin); await sleep(1200);

@@ -256,15 +256,28 @@ async def distill() -> Dict[str, Any]:
         _distill_running = False
 
 
+def feedback_summary(i: Dict[str, Any]) -> Dict[str, Any]:
+    """The parts of one rating a person needs to recognise it (shown on the Skills & learning page)."""
+    return {"id": i.get("id"), "ts": i.get("ts"), "e164": i.get("e164", ""), "rating": i.get("rating"),
+            "buyer_text": i.get("buyer_text", ""), "ai_text": i.get("ai_text", ""), "tags": i.get("tags") or [],
+            "note": i.get("note", ""), "better_reply": i.get("better_reply", "")}
+
+
+DISTILL_BATCH = 40     # ratings read per click; the rest stay "waiting" for the next click (never marked learned unread)
+
+
 async def _distill_once() -> Dict[str, Any]:
     fb = [i for i in await fs.list_feedback() if not i.get("processed")]
+    empty = {"processed": 0, "new_skills": 0, "updated_skills": 0, "items": [], "skills_touched": [], "knowledge": [], "remaining": 0}
     if not fb:
-        return {"ok": True, "processed": 0, "new_skills": 0, "updated_skills": 0, "note": "No new feedback to learn from."}
+        return {"ok": True, **empty, "note": "No new feedback to learn from."}
+    batch = fb[:DISTILL_BATCH]
+    items = [feedback_summary(i) for i in batch]
     stored = [s for s in await fs.list_skills() if s.get("status") != "disabled"]
     builtin_names = [b["name"] for b in BUILTIN_SKILLS]
     existing = "\n".join(f"- {s['name']} | when: {s['description']} | do: {s['instructions']}" for s in stored) or "(none)"
     lines = []
-    for i in fb[:40]:
+    for i in batch:
         bits = [f"[{i['rating'].upper()}]", f"Buyer: {i.get('buyer_text','')[:250]}", f"Reply: {i.get('ai_text','')[:350]}"]
         if i.get("tags"):
             bits.append("Tags: " + ", ".join(i["tags"]))
@@ -277,11 +290,13 @@ async def _distill_once() -> Dict[str, Any]:
             "Feedback:\n\n" + "\n\n".join(lines))
     out = await _llm_json(_DISTILL_SYSTEM, user, max_tokens=1400, timeout=45.0)
     if not isinstance(out, dict):
-        return {"ok": False, "processed": 0, "new_skills": 0, "updated_skills": 0, "note": "The AI could not summarise the feedback right now. Try again."}
-    src = [i["id"] for i in fb]
+        return {"ok": False, **empty, "items": items, "remaining": len(fb),
+                "note": "The AI could not summarise the feedback right now. Nothing was marked as learned. Try again."}
+    src = [i["id"] for i in batch]
     by_name = {_norm_name(s["name"]): s for s in stored}
     taken = {_norm_name(n) for n in builtin_names}
     new = upd = 0
+    touched: List[Dict[str, Any]] = []
     for sk in [x for x in (out.get("skills") or []) if isinstance(x, dict)][:4]:
         name, desc, instr = str(sk.get("name") or ""), str(sk.get("description") or ""), str(sk.get("instructions") or "")
         key = _norm_name(name)
@@ -289,16 +304,22 @@ async def _distill_once() -> Dict[str, Any]:
             continue
         try:
             if key in by_name:
-                if await fs.propose_skill_update(by_name[key]["id"], description=desc, instructions=instr, always=bool(sk.get("always")), source_ids=src):
+                before = by_name[key].get("proposal")
+                res = await fs.propose_skill_update(by_name[key]["id"], description=desc, instructions=instr, always=bool(sk.get("always")), source_ids=src)
+                if res and res.get("proposal") and res.get("proposal") != before:
                     upd += 1
+                    touched.append({"id": by_name[key]["id"], "name": by_name[key]["name"], "action": "updated"})
             else:
-                await fs.create_skill(name=name, description=desc, instructions=instr, always=bool(sk.get("always")), status="pending", source_ids=src)
+                created = await fs.create_skill(name=name, description=desc, instructions=instr, always=bool(sk.get("always")), status="pending", source_ids=src)
                 new += 1
+                touched.append({"id": created["id"], "name": created["name"], "action": "new"})
         except ValueError:
             continue
-    await fs.add_lessons([{"text": str(t), "kind": "knowledge"} for t in (out.get("knowledge_checks") or [])][:5], src)
+    knowledge = [str(t) for t in (out.get("knowledge_checks") or [])][:5]
+    await fs.add_lessons([{"text": t, "kind": "knowledge"} for t in knowledge], src)
     await fs.mark_processed(src)
-    return {"ok": True, "processed": len(fb), "new_skills": new, "updated_skills": upd}
+    return {"ok": True, "processed": len(batch), "new_skills": new, "updated_skills": upd, "items": items,
+            "skills_touched": touched, "knowledge": knowledge, "remaining": len(fb) - len(batch)}
 
 
 # --------------------------------------------------------------------- stats
