@@ -59,7 +59,7 @@ const calls = (p, re) => p.net.filter((n) => re.test(n.method + " " + n.url));
 const sent = async () => (await (await fetch(BASE + "/_sent")).json());
 
 async function pagesLoad(jar, who) {
-  for (const [path, label] of [["/inbox/chats", "Inbox"], ["/inbox/learning", "Learning"], ["/inbox/logs", "Logs"], ["/inbox/team", "Team"], ["/inbox/architecture", "Architecture"], ["/inbox/admin", "Ops"], ["/inbox/guide", "Guide"]]) {
+  for (const [path, label] of [["/inbox/chats", "Inbox"], ["/inbox/learning", "Learning"], ["/inbox/stock", "Stock"], ["/inbox/logs", "Logs"], ["/inbox/team", "Team"], ["/inbox/architecture", "Architecture"], ["/inbox/admin", "Ops"], ["/inbox/guide", "Guide"]]) {
     const p = await openPage(path, jar);
     const bad = p.net.filter((n) => n.status >= 500 || (n.status >= 400 && n.status !== 401 && n.status !== 403 && n.status !== 404));
     check(`${who}: ${label} page opens with no script errors`, p.errors.length === 0 && bad.length === 0, p.errors.concat(bad.map((b) => b.method + b.url + " " + b.status)).join(" | "));
@@ -219,6 +219,39 @@ async function crawl(path, label, jar) {
   const lo = await fetch(BASE + "/inbox/logout", { redirect: "manual", headers: { cookie: mei.getCookieStringSync(BASE) } });
   check("logout: signs out and returns to the login page", lo.status === 302 && /login/.test(lo.headers.get("location") || ""), lo.status + " " + lo.headers.get("location"));
 
+  // ---------------- Stock page ----------------
+  const K = await openPage("/inbox/stock", admin); await sleep(800);
+  const rowsK = [...K.d.querySelectorAll("#stock-families li")];
+  check("stock: lists all 50 items in 5 families", rowsK.length === 50 && K.d.querySelectorAll("#stock-families section").length === 5, rowsK.length);
+  check("stock: summary shows everything in stock", /50 of 50 in stock · 0 off/.test($(K, "#stock-summary").textContent), $(K, "#stock-summary").textContent);
+  const sw = $(K, 'li[data-slug="products-bitumen-60-70"] button[role=switch]');
+  check("stock: each item has an accessible switch that starts On", sw && sw.getAttribute("aria-checked") === "true", sw && sw.outerHTML.slice(0, 120));
+  click(K, sw); await sleep(700);
+  check("stock: clicking a switch saves it (PUT) and shows it Off", calls(K, /PUT \/api\/inbox\/catalog\/item\/products-bitumen-60-70/).some((c) => c.status === 200) && $(K, 'li[data-slug="products-bitumen-60-70"] button[role=switch]').getAttribute("aria-checked") === "false" && /49 of 50 in stock · 1 off/.test($(K, "#stock-summary").textContent), JSON.stringify(calls(K, /catalog/)));
+  check("stock: an Off item says since when and by whom (GMT+8)", /Off since .* GMT\+8 by Petrobind Admin/.test($(K, 'li[data-slug="products-bitumen-60-70"]').textContent), $(K, 'li[data-slug="products-bitumen-60-70"]').textContent.slice(0, 160));
+  setVal(K, "#stock-search", "css-1h"); await sleep(150);
+  check("stock: search narrows the list", K.d.querySelectorAll("#stock-families li").length === 1 && /CSS-1h/.test($(K, "#stock-families").textContent), K.d.querySelectorAll("#stock-families li").length);
+  setVal(K, "#stock-search", "");
+  $(K, "#stock-filter-off").checked = true; $(K, "#stock-filter-off").dispatchEvent(new K.w.Event("change")); await sleep(150);
+  check("stock: 'only Off' shows just the switched-off item", K.d.querySelectorAll("#stock-families li").length === 1 && /60\/70/.test($(K, "#stock-families").textContent), K.d.querySelectorAll("#stock-families li").length);
+  K.w.close();
+  const K2 = await openPage("/inbox/stock", admin); await sleep(700);
+  check("stock: the switch is still Off after reloading the page", $(K2, 'li[data-slug="products-bitumen-60-70"] button[role=switch]').getAttribute("aria-checked") === "false", "reverted");
+  const famBtns = [...K2.d.querySelectorAll("#stock-families section")][2].querySelectorAll("button:not([role=switch])");
+  click(K2, famBtns[1]); await sleep(150);
+  check("stock: 'All off' asks to confirm first and changes nothing yet", /Confirm/.test([...K2.d.querySelectorAll("#stock-families section")][2].textContent) && !calls(K2, /PUT \/api\/inbox\/catalog\/family/).length, "no confirm step");
+  click(K2, [...K2.d.querySelectorAll("#stock-families section")][2].querySelectorAll("button:not([role=switch])")[1]); await sleep(900);
+  check("stock: confirming switches the whole family off", calls(K2, /PUT \/api\/inbox\/catalog\/family\/oxidized/).some((c) => c.status === 200) && /0 of 19 in stock/.test([...K2.d.querySelectorAll("#stock-families section")][2].textContent), JSON.stringify(calls(K2, /family/)));
+  click(K2, [...K2.d.querySelectorAll("#stock-families section")][2].querySelectorAll("button:not([role=switch])")[0]); await sleep(900);
+  check("stock: 'All on' brings the family back", /19 of 19 in stock/.test([...K2.d.querySelectorAll("#stock-families section")][2].textContent), "not restored");
+  const bk = await fetch(BASE + "/api/inbox/catalog/item/products-bitumen-60-70", { method: "PUT", headers: { "content-type": "application/json", cookie: admin.getCookieStringSync(BASE) }, body: JSON.stringify({ on: true }) });
+  check("stock: (cleanup) item switched back on", bk.status === 200, bk.status);
+  check("stock page: no script errors", K2.errors.length === 0, K2.errors.join(" | "));
+  K2.w.close();
+  const memS = await login("mei", "mei-password-1");
+  const rS = await fetch(BASE + "/inbox/stock", { redirect: "manual", headers: { cookie: memS.getCookieStringSync(BASE) } });
+  check("stock: team members are sent back to the inbox", rS.status === 302 && /\/inbox\/chats/.test(rS.headers.get("location") || ""), rS.status);
+
   // ---------------- AI offline banner ----------------
   const N0 = await openPage("/inbox/chats", admin); await sleep(500);
   check("AI banner: hidden while the AI works", $(N0, "#ai-status-bar").hidden, $(N0, "#ai-status-bar").textContent);
@@ -257,7 +290,7 @@ async function crawl(path, label, jar) {
   check("learning page: no script errors", G.errors.length === 0, G.errors.join(" | "));
   G.w.close();
 
-  for (const [path, label] of [["/inbox/team", "Team page"], ["/inbox/learning", "Learning page"], ["/inbox/logs", "Logs page"], ["/inbox/admin", "Ops page"], ["/inbox/guide", "Guide page"], ["/inbox/architecture", "Architecture page"]]) await crawl(path, label, admin);
+  for (const [path, label] of [["/inbox/team", "Team page"], ["/inbox/learning", "Learning page"], ["/inbox/stock", "Stock page"], ["/inbox/logs", "Logs page"], ["/inbox/admin", "Ops page"], ["/inbox/guide", "Guide page"], ["/inbox/architecture", "Architecture page"]]) await crawl(path, label, admin);
 
   const O = await openPage("/inbox/admin", admin); await sleep(1200);
   const imp = $(O, '.ops-act[data-action="import-history"]');

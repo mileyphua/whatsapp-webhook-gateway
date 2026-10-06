@@ -16,6 +16,7 @@ load_dotenv()
 import booking
 import contact_names
 import ai_health
+import catalog
 import media_rules
 import notify
 import users_store
@@ -3619,6 +3620,66 @@ async def web_inbox_team(request: Request) -> Response:
     if resp:
         return resp
     return _render_template("team.html", **ctx)
+
+
+# ---------------------------------------------------------------- Stock: which items the AI may talk about
+@app.get("/inbox/stock")
+async def web_inbox_stock(request: Request) -> Response:
+    resp, ctx = _logged_in_page_ctx(request)
+    if resp:
+        return resp
+    return _render_template("stock.html", **ctx)
+
+
+@app.get("/api/inbox/catalog")
+async def api_inbox_catalog(request: Request) -> JSONResponse:
+    fail = _requires_admin(request)
+    if fail:
+        return fail
+    return JSONResponse(content=await catalog.snapshot())
+
+
+async def _read_on_flag(request: Request) -> Optional[bool]:
+    try:
+        body = await request.json()
+    except Exception:
+        return None
+    on = body.get("on") if isinstance(body, dict) else None
+    return on if isinstance(on, bool) else None
+
+
+@app.put("/api/inbox/catalog/item/{slug}")
+async def api_inbox_catalog_item(slug: str, request: Request) -> JSONResponse:
+    """Switch one item on (in stock) or off (the AI never mentions it)."""
+    fail = _requires_admin(request)
+    if fail:
+        return fail
+    on = await _read_on_flag(request)
+    if on is None:
+        return JSONResponse(content={"detail": "'on' must be true or false"}, status_code=422)
+    item = catalog.by_slug().get(slug)
+    if item is None:
+        return JSONResponse(content={"detail": "unknown item"}, status_code=404)
+    who = _identity(request)[1]
+    entry = await catalog.set_item(slug, on, who)
+    asyncio.create_task(_sb.audit(who, "catalog_toggle", detail={"item": item.title, "on": on}))
+    return JSONResponse(content={"ok": True, "slug": slug, "title": item.title, **entry})
+
+
+@app.put("/api/inbox/catalog/family/{family}")
+async def api_inbox_catalog_family(family: str, request: Request) -> JSONResponse:
+    fail = _requires_admin(request)
+    if fail:
+        return fail
+    on = await _read_on_flag(request)
+    if on is None:
+        return JSONResponse(content={"detail": "'on' must be true or false"}, status_code=422)
+    if family not in catalog.FAMILY_NAMES:
+        return JSONResponse(content={"detail": "unknown family"}, status_code=404)
+    who = _identity(request)[1]
+    n = await catalog.set_family(family, on, who)
+    asyncio.create_task(_sb.audit(who, "catalog_toggle", detail={"item": catalog.FAMILY_NAMES[family] + " (all)", "on": on, "count": n}))
+    return JSONResponse(content={"ok": True, "family": family, "on": on, "changed": n})
 
 
 @app.get("/inbox/learning")

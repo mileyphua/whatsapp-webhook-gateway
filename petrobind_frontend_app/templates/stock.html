@@ -1,0 +1,108 @@
+{% extends "base.html" %}
+{% block title %}Stock — Petrobind Inbox{% endblock %}
+{% block content %}
+<main class="flex-1 overflow-y-auto bg-gray-50">
+  <div class="max-w-5xl mx-auto px-4 md:px-8 py-6 space-y-5">
+
+    <header class="flex flex-wrap items-end justify-between gap-3">
+      <div>
+        <h1 class="text-xl font-semibold">Stock</h1>
+        <p class="text-sm text-gray-600 max-w-3xl">Every product in the AI's knowledge base. Switch an item <b>Off</b> when it is out of stock:
+          the AI stops mentioning, offering or recommending it (it only says it is unavailable, and suggests an alternative, if a buyer asks for it by name).
+          Changes apply to the next reply, within seconds.</p>
+      </div>
+      <div id="stock-summary" class="text-sm text-gray-700 font-medium" aria-live="polite"></div>
+    </header>
+
+    <section class="bg-white border border-gray-200 rounded-lg p-3 flex flex-wrap items-center gap-3" aria-label="Filter">
+      <label class="flex-1 min-w-[12rem]"><span class="sr-only">Search items</span>
+        <input id="stock-search" type="search" placeholder="Search, e.g. 60/70, CSS-1h, oxidized" class="w-full border border-gray-300 rounded px-3 py-1.5 text-sm"></label>
+      <label class="flex items-center gap-2 text-sm text-gray-700"><input id="stock-filter-off" type="checkbox"> Show only items that are Off</label>
+    </section>
+    <div id="stock-note" class="text-sm text-red-700" role="status" aria-live="polite" hidden></div>
+
+    <div id="stock-families" class="space-y-5"><div class="text-sm text-gray-500">Loading…</div></div>
+  </div>
+</main>
+
+<script>
+(function () {
+  var $ = function (id) { return document.getElementById(id); };
+  function el(tag, cls, text) { var e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; }
+  var data = null, armed = {};
+
+  function api(path, method, body) {
+    return fetch("/api/inbox/catalog" + path, { method: method || "GET", credentials: "same-origin", headers: { "Content-Type": "application/json" }, body: body ? JSON.stringify(body) : undefined })
+      .then(function (r) { if (r.status === 401) { location.href = "/inbox/login"; throw new Error("session ended"); }
+        return r.json().then(function (j) { if (!r.ok) throw new Error(j.detail || "failed"); return j; }); });
+  }
+  function note(msg) { var n = $("stock-note"); n.textContent = msg || ""; n.hidden = !msg; }
+
+  function setItem(row, on) {
+    var before = row.on; row.on = on; render(); note("");
+    api("/item/" + encodeURIComponent(row.slug), "PUT", { on: on }).then(function (j) { row.by = j.by; row.ts = j.ts; render(); })
+      .catch(function (e) { row.on = before; render(); note("Could not change " + row.title + ": " + e.message); });
+  }
+  function setFamily(fam, on) {
+    var before = fam.items.map(function (r) { return r.on; }); fam.items.forEach(function (r) { r.on = on; }); render(); note("");
+    api("/family/" + encodeURIComponent(fam.id), "PUT", { on: on }).then(function () { return load(); })
+      .catch(function (e) { fam.items.forEach(function (r, i) { r.on = before[i]; }); render(); note("Could not change " + fam.name + ": " + e.message); });
+  }
+
+  function familyBox(fam, q, onlyOff) {
+    var rows = fam.items.filter(function (r) { return (!q || r.title.toLowerCase().indexOf(q) !== -1) && (!onlyOff || !r.on); });
+    if (!rows.length) return null;
+    var onCount = fam.items.filter(function (r) { return r.on; }).length;
+    var box = el("section", "bg-white border border-gray-200 rounded-lg"); box.setAttribute("aria-label", fam.name);
+    var head = el("div", "flex flex-wrap items-center justify-between gap-2 px-4 py-3 border-b border-gray-100");
+    var left = el("div"); left.appendChild(el("h2", "text-sm font-semibold", fam.name));
+    left.appendChild(el("div", "text-xs " + (onCount === fam.items.length ? "text-green-700" : "text-amber-700"), onCount + " of " + fam.items.length + " in stock"));
+    head.appendChild(left);
+    var acts = el("div", "flex gap-2");
+    function actBtn(label, cls, fn) { var b = el("button", "px-3 py-1 rounded-md text-xs border " + cls, label); b.type = "button"; b.addEventListener("click", fn); return b; }
+    acts.appendChild(actBtn("All on", "border-gray-300 hover:bg-gray-50", function () { setFamily(fam, true); }));
+    var offLabel = armed[fam.id] ? "Confirm: switch all " + fam.items.length + " off" : "All off";
+    acts.appendChild(actBtn(offLabel, armed[fam.id] ? "border-red-600 bg-red-600 text-white" : "border-gray-300 hover:bg-gray-50", function () {
+      if (!armed[fam.id]) { armed[fam.id] = true; render(); setTimeout(function () { armed[fam.id] = false; render(); }, 4000); return; }
+      armed[fam.id] = false; setFamily(fam, false);
+    }));
+    head.appendChild(acts); box.appendChild(head);
+    var list = el("ul", "divide-y divide-gray-100");
+    rows.forEach(function (r) {
+      var li = el("li", "flex items-center justify-between gap-3 px-4 py-2 " + (r.on ? "" : "bg-red-50")); li.setAttribute("data-slug", r.slug);
+      var info = el("div", "min-w-0");
+      var name = el("div", "text-sm " + (r.on ? "text-gray-900" : "text-gray-500 line-through"), r.title); info.appendChild(name);
+      var meta = [];
+      if (!r.on && r.ts) meta.push("Off since " + window.PBTime.format(r.ts) + " " + window.PBTime.LABEL + (r.by ? " by " + r.by : ""));
+      if (r.url) { var a = el("a", "text-xs text-pb-navy underline", "View page ↗"); a.href = r.url; a.target = "_blank"; a.rel = "noopener"; var sub = el("div", "text-xs text-gray-500"); if (meta.length) sub.appendChild(document.createTextNode(meta.join(" · ") + " · ")); sub.appendChild(a); info.appendChild(sub); }
+      else if (meta.length) info.appendChild(el("div", "text-xs text-gray-500", meta.join(" · ")));
+      li.appendChild(info);
+      var sw = el("button", "relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition " + (r.on ? "bg-green-500" : "bg-gray-300"));
+      sw.type = "button"; sw.setAttribute("role", "switch"); sw.setAttribute("aria-checked", String(r.on)); sw.setAttribute("aria-label", r.title + (r.on ? ": in stock" : ": out of stock"));
+      sw.title = r.on ? "In stock: click to switch Off" : "Out of stock: click to switch On";
+      var knob = el("span", "inline-block h-5 w-5 rounded-full bg-white shadow transform transition " + (r.on ? "translate-x-5" : "translate-x-0.5")); sw.appendChild(knob);
+      sw.addEventListener("click", function () { setItem(r, !r.on); });
+      li.appendChild(el("div", "flex items-center gap-2")).appendChild(el("span", "text-xs w-16 text-right " + (r.on ? "text-green-700" : "text-red-700"), r.on ? "In stock" : "Off"));
+      li.lastChild.appendChild(sw);
+      list.appendChild(li);
+    });
+    box.appendChild(list); return box;
+  }
+
+  function render() {
+    if (!data) return;
+    var q = ($("stock-search").value || "").trim().toLowerCase(), onlyOff = $("stock-filter-off").checked;
+    var total = 0, off = 0; data.families.forEach(function (f) { f.items.forEach(function (r) { total++; if (!r.on) off++; }); });
+    $("stock-summary").textContent = (total - off) + " of " + total + " in stock · " + off + " off";
+    var box = $("stock-families"); box.textContent = "";
+    var shown = 0;
+    data.families.forEach(function (f) { var b = familyBox(f, q, onlyOff); if (b) { box.appendChild(b); shown++; } });
+    if (!shown) box.appendChild(el("div", "bg-white border border-dashed border-gray-300 rounded-lg p-6 text-center text-sm text-gray-500", onlyOff && !q ? "Everything is in stock." : "No item matches."));
+  }
+  function load() { return api("").then(function (j) { data = j; render(); }).catch(function (e) { $("stock-families").textContent = "Could not load the list: " + e.message; }); }
+  $("stock-search").addEventListener("input", render);
+  $("stock-filter-off").addEventListener("change", render);
+  load();
+})();
+</script>
+{% endblock %}

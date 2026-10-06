@@ -22,6 +22,7 @@
         {% for href, title, desc in [
           ("/inbox/chats", "Inbox", "One row per buyer number. Search, ⋮ menu to name or delete a chat, click to open the conversation on the right. Switch AI | Human at the top right of a chat."),
           ("/inbox/learning", "Skills & learning", "The AI's skills: each says when it applies and what to do. Rate replies with 👍 / 👎 in any chat and feedback is grouped into new or improved skills that you approve. Shows reply quality over time."),
+          ("/inbox/stock", "Stock", "Every product in the knowledge base with an On / Off switch. Switch an item Off when it is out of stock: the AI stops mentioning, offering or recommending it (it only says it is unavailable if a buyer asks for it by name). Switch a whole family at once."),
           ("/inbox/logs", "Logs", "Audit trail of logins, takeovers, human replies, chat deletions (with a saved transcript) and history imports."),
           ("/inbox/architecture", "Architecture", "Node diagram of the full stack: WhatsApp → webhook → RAG → LLM → send, plus the human path. Click a node for details and its page."),
           ("/inbox/admin", "Ops console", "Live backend state: health checks, Redis sessions, claims, scheduled sends, template cache. Buttons to force scans and import history."),
