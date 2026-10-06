@@ -53,6 +53,7 @@ class RetrievedChunk:
     chunk_text: str
     similarity: float
     chunk_index: int
+    page_slug: str = ""
 
 
 _index: list[dict] | None = None
@@ -127,6 +128,7 @@ async def retrieve(
     *,
     top_k: int = DEFAULT_TOP_K,
     min_similarity: float = MIN_SIMILARITY,
+    exclude_slugs: "frozenset[str] | set[str] | None" = None,
 ) -> List[RetrievedChunk]:
     """Return top-k semantically-similar chunks for a user query.
 
@@ -164,6 +166,8 @@ async def retrieve(
         if s < min_similarity:
             break
         c = _index[pos]
+        if exclude_slugs and c.get("page_slug") in exclude_slugs:
+            continue          # an item switched off on the Stock page: never retrieved
         out.append(
             RetrievedChunk(
                 url=c.get("url", ""),
@@ -171,6 +175,7 @@ async def retrieve(
                 chunk_text=c.get("chunk_text", ""),
                 similarity=s,
                 chunk_index=int(pos),
+                page_slug=c.get("page_slug", ""),
             )
         )
         if len(out) >= top_k:
@@ -184,3 +189,22 @@ async def retrieve(
     else:
         print(f"[RAG] query={query[:80]!r} NO HITS above threshold {min_similarity}")
     return out
+
+
+def page_chunks(url: str) -> List[RetrievedChunk]:
+    """Every chunk of one page, in reading order (so a spec answer can see the whole spec table)."""
+    load_index_if_needed()
+    rows = [(i, c) for i, c in enumerate(_index or []) if c.get("url") == url]
+    rows.sort(key=lambda ic: int(ic[1].get("chunk_index_within_page", 0) or 0))
+    return [RetrievedChunk(url=c.get("url", ""), title=c.get("title", ""), chunk_text=c.get("chunk_text", ""),
+                           similarity=1.0, chunk_index=i, page_slug=c.get("page_slug", "")) for i, c in rows]
+
+
+def all_pages() -> List[dict]:
+    """One entry per knowledge-base page: {slug, url, title, chunks}."""
+    load_index_if_needed()
+    pages: dict = {}
+    for c in _index or []:
+        p = pages.setdefault(c.get("page_slug", ""), {"slug": c.get("page_slug", ""), "url": c.get("url", ""), "title": c.get("title", ""), "chunks": 0})
+        p["chunks"] += 1
+    return list(pages.values())

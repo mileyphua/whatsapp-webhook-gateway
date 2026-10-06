@@ -87,7 +87,7 @@ class SpecsAreAnsweredFirst(Base):
     def test_a_vague_spec_request_asks_which_product_and_links_the_products_page(self):
         out, s = self.turn("I need to know more about the specs first", "unused", refs=[], history=MID_CHAT, message_count=1)
         low = out.lower()
-        self.assertIn("which product", low); self.assertIn("https://www.petrobindglobal.com/products", out)
+        self.assertIn("which product", low); self.assertIn("every spec", low)
         for bad in ("sales director", "check on that", "quick call", "cal.com", "get back to you"):
             self.assertNotIn(bad, low)
         self.assertIsNone(s.needs_human_since); self.assertEqual(self.emails, [])

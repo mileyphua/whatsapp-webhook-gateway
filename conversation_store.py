@@ -103,6 +103,10 @@ class ConversationSession:
     handoff_notified: bool = False
     followed_up_at: Optional[float] = None  # for Part 3.3 cron follow-ups
     freeform_questions_answered: int = 0  # Part 5.2 Q&A cap
+    # The page we just offered ("Would you like to know more about 60/70?"): sent when the buyer says yes.
+    more_info_url: str = ""
+    more_info_title: str = ""
+    more_info_at: Optional[float] = None
     web_search_count: int = 0  # cost guardrail: cap search_industry_info calls per session
     booking_intent_notified: bool = False  # dedup: 1 "buyer wants to book" email per session
 

@@ -34,6 +34,7 @@ try:
 except Exception:  # pragma: no cover - dotenv is optional on Render with env inject
     pass
 
+import importlib
 import ai_health
 import booking
 import learning
@@ -46,6 +47,7 @@ from conversation_store import ConversationSession, get_session
 # RAG retrieval module. Startup loads rag/index.json into memory.
 import rag
 from rag import RetrievedChunk, index_is_ready, load_index_if_needed, retrieve
+_rag_mod = importlib.import_module("rag.retrieve")      # (the package re-exports a function named retrieve)
 
 # OpenAI-compatible client for OpenRouter (the chat platform used by the *model*,
 # not embeddings). Base URL + API key both pulled from env.
@@ -364,11 +366,9 @@ Behaviour:
     covered, you may try search_industry_info before falling back. If a
     Petrobind-specific fact still isn't answerable after that, call
     request_sales_handoff (is_pricing=false) rather than guess.
-  - When discussing a specific product, include its source URL ONCE inside your
-    reply, but only if the retrieved chunk actually has one (some products
-    don't have a live page yet). If a chunk's source_url is empty, just
-    answer from its facts and don't mention a link at all, never invent one
-    or point to a different product's page.
+  - Do not paste website links in your answers (the system sends the product
+    page when the buyer says they want to know more, or asks for the link).
+    Never invent a link, and never point to a different product's page.
   - Be a guide, not just a Q&A machine: when a buyer asks something, actually
     help them find what they're looking for, don't just answer the narrowest
     literal reading of the question and stop. If the reference material
@@ -467,22 +467,28 @@ Behaviour:
   - Specs first: when the buyer asks for specs, specifications, properties or
     a datasheet, answer them yourself FIRST from the retrieved reference
     material (the technical numbers there are fine to share; only the price is
-    withheld) and give that page's URL to read more. If they did not say
-    which product, ask which one in a single line. Never answer a spec
-    question with only 'let me check with the sales director' or 'a colleague
-    will get back to you'; that is only for something genuinely not in the
-    reference material. If the same message also asks for the price, give the
-    specs first and then the required pricing line.
+    withheld). Cover every property in the reference material, not just one or
+    two: one per line in the form 'Label: value' (for example 'Penetration at
+    25 C: 60-70 dmm'), no bullet symbols and no blank lines between them, so it
+    reads as one clean block. Then end with ONE engaging question such as
+    'Would you like to know more about this grade, for example applications,
+    packaging or the COA/PDS?'. If they did not say which product, ask which
+    one in a single line. Never answer a spec question with only 'let me check
+    with the sales director' or 'a colleague will get back to you'; that is only
+    for something genuinely not in the reference material. If the same message
+    also asks for the price, give the specs first and then the required
+    pricing line.
   - The introduction ('Hi, this is Jane from PetroBind Global, how can we
     help you with your requirement today?') is for the very first reply of a
     brand-new chat only. In any later reply, even if the buyer says 'hi'
     again, never introduce yourself again: just answer.
   - Information questions: when the buyer asks for information or more detail
     ('tell me more', what is X, specs, uses, packaging, certifications, how it
-    works), answer from the retrieved reference material and point them to the
-    matching page on the Petrobind website to read more: include that page's
-    source URL once (only the exact URL given in the reference block, never an
-    invented one). Do NOT offer a call, a quote request, a time slot or the
+    works), answer completely from the retrieved reference material, then end
+    with one engaging question asking whether they would like to know more
+    (applications, packaging, COA/PDS). Do not paste a website link in your
+    answer: the system sends the page automatically when the buyer says yes or
+    asks for the link. Do NOT offer a call, a quote request, a time slot or the
     sales director on information questions, however many of them the buyer
     asks in a row; keep helping with the next answer instead. Only when the
     buyer themselves signals they want to proceed (asks the price, asks for a
@@ -1005,8 +1011,7 @@ def _is_generic_spec_request(text: str) -> bool:
 
 GENERIC_SPEC_REPLY = (
     "Happy to go through the specs. Which product are you looking at: Bitumen (for example 60/70), Oxidized Bitumen, "
-    "Bitumen Emulsion, Polymer-Modified Bitumen or Base Oil SN150?\n\n"
-    f"You can also see them all here: {WEBSITE_URL}/products/bitumen"
+    "Bitumen Emulsion, Polymer-Modified Bitumen or Base Oil SN150? Tell me which one and I'll go through every spec."
 )
 
 
@@ -1043,20 +1048,109 @@ _INFO_REQUEST_RE = re.compile(
     r"how (does|do|is|are)|uses?|applications?|packag\w+|certificat\w+)\b", re.I)
 
 
-def _add_read_more_link(reply: str, buyer_text: str, references: List[RetrievedChunk]) -> str:
-    """An information answer should point to the matching website page. The model sometimes forgets, so add it:
-    only for information requests (not price, booking or small talk), only when the knowledge base had a relevant
-    page, and never twice."""
-    if not reply or not references or "petrobindglobal.com" in reply or "cal.com" in reply:
+_KNOW_MORE_Q = re.compile(r"(know more|more (details?|information|about)|full (page|data ?sheet|specs?)|\bcoa\b|\bpds\b|data ?sheet|the (page|link))", re.I)
+_LINK_ASK = re.compile(r"\b(link|url|website|web ?site|web ?page|site|page)\b", re.I)
+_PETRO_URL = re.compile(r"https?://(?:www\.)?petrobindglobal\.com\S*", re.I)
+_LEAD_IN = re.compile(r"^(?:source|more|read|see|details?|here|link|you can|find|full|check|visit|website|page|url)\b", re.I)
+_YES_WORDS = {"yes", "yeah", "yep", "yup", "sure", "ok", "okay", "please", "pls", "definitely", "of", "course", "sounds", "good", "go", "ahead",
+              "alright", "absolutely", "thanks", "thank", "you", "send", "it", "me", "the", "link", "page", "details", "detail", "info", "information",
+              "more", "tell", "know", "about", "this", "that", "would", "like", "i", "id", "want", "to", "great", "website", "can", "could", "full", "and", "do"}
+_YES_KEY = {"yes", "yeah", "yep", "yup", "sure", "ok", "okay", "please", "pls", "definitely", "go", "send", "link", "more", "website", "details",
+            "detail", "absolutely", "alright", "sounds"}
+
+
+def _is_affirmative(text: str) -> bool:
+    """'yes', 'sure please', 'tell me more', 'send the link': only words of agreement, nothing else (so 'I want 500 tonnes'
+    is never mistaken for a yes)."""
+    words = re.findall(r"[a-z']+", (text or "").lower().replace("i'd", "id"))
+    return bool(words) and len(words) <= 8 and all(w in _YES_WORDS for w in words) and any(w in _YES_KEY for w in words)
+
+
+_NO = re.compile(r"\b(no|not|later|don'?t|do not|nope|nah|never|stop)\b", re.I)
+MORE_INFO_TTL = 2 * 3600
+
+
+def _is_product_page(url: str) -> bool:
+    u = (url or "").rstrip("/")
+    return "/products/" in u and not u.endswith(("/bitumen", "/bitumen-emulsion", "/oxidized-bitumen"))
+
+
+def _product_name(chunk) -> str:
+    return (getattr(chunk, "title", "") or "").split(" Supplier")[0].strip()
+
+
+def _expand_to_full_page(references: List[RetrievedChunk], buyer_text: str) -> List[RetrievedChunk]:
+    """A spec / detail request must see the WHOLE grade page (the spec table lives in a different chunk from the
+    headline), otherwise the answer comes out with one or two properties."""
+    if not references or not _INFO_REQUEST_RE.search(buyer_text or ""):
+        return references
+    top = references[0]
+    if "/products/" not in (top.url or ""):
+        return references
+    try:
+        page = _rag_mod.page_chunks(top.url)
+    except Exception:
+        return references
+    if not (1 <= len(page) <= 5):          # overview pages are long: keep normal retrieval for them
+        return references
+    return page + [r for r in references if r.url != top.url][:1]
+
+
+def _withhold_link_until_asked(reply: str, buyer_text: str) -> str:
+    """The website page is sent when the buyer says they want to know more (or asks for it), not pasted into the
+    first answer. Removes a petrobindglobal.com link (and a lead-in like 'More details here:') the model added."""
+    if not reply or _LINK_ASK.search(buyer_text or "") or not _PETRO_URL.search(reply):
+        return reply
+    out: List[str] = []
+    for ln in reply.split("\n"):
+        if _PETRO_URL.search(ln):
+            rest = _PETRO_URL.sub("", ln).strip(" :-\u2013\u2014.,;()")
+            if not rest or (len(re.findall(r"\w+", rest)) <= 7 and _LEAD_IN.match(rest)):
+                continue
+            ln = re.sub(r"\s*\(?\s*" + _PETRO_URL.pattern + r"\s*\)?", "", ln).rstrip()
+        out.append(ln)
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(out)).strip()
+
+
+def _add_know_more_offer(reply: str, buyer_text: str, references: List[RetrievedChunk], session) -> str:
+    """Information answers end with an engaging 'would you like to know more?' and the chat remembers which page that
+    refers to, so a 'yes' can be answered with the link. Not for price, booking or small talk."""
+    session.more_info_url = ""
+    if not reply or not references:
         return reply
     if _looks_like_pricing_question(buyer_text) or _looks_like_booking_request(buyer_text) or not _INFO_REQUEST_RE.search(buyer_text or ""):
         return reply
-    if "sales director" in reply.lower():
+    if "sales director" in reply.lower() or "cal.com" in reply:
         return reply
     top = references[0]
     if not getattr(top, "url", "") or getattr(top, "similarity", 0) < 0.45:
         return reply
-    return f"{reply.rstrip()}\n\nRead more on our website: {top.url}"
+    name = _product_name(top) if _is_product_page(top.url) else ""
+    paras = [p for p in re.split(r"\n\s*\n", reply.strip()) if p.strip()]
+    last = (paras[-1] if paras else reply).strip()
+    if last.endswith("?"):
+        if not _KNOW_MORE_Q.search(last):
+            return reply                       # it already asks something else (e.g. which port): don't stack questions
+    else:
+        offer = (f"Would you like to know more about {name} (applications, packaging, COA/PDS)?" if name
+                 else "Would you like me to send the page with more detail on this?")
+        reply = f"{reply.rstrip()}\n\n{offer}"
+    session.more_info_url, session.more_info_title, session.more_info_at = top.url, name, time.time()
+    return reply
+
+
+def _more_info_followup(session, buyer_text: str) -> Optional[str]:
+    """The buyer said yes to 'would you like to know more?': send the page we offered (no AI call needed)."""
+    url = getattr(session, "more_info_url", "")
+    at = getattr(session, "more_info_at", None)
+    if not url or not at or time.time() - at > MORE_INFO_TTL:
+        return None
+    t = (buyer_text or "").strip()
+    if not t or _NO.search(t) or not _is_affirmative(t):
+        return None
+    title = getattr(session, "more_info_title", "") or "this"
+    return (f"Here is the full page for {title}: {url}\n\n"
+            "It has the specs, applications and packaging in one place. Is there anything specific you'd like me to go through?")
 
 
 def _booking_link_for(session, message: Optional[str] = None) -> str:
@@ -1120,6 +1214,16 @@ async def handle_incoming_message(
         session = await get_session(phone_number)
     safe_text = (inbound_text or "").strip()
 
+    # "Yes" to "would you like to know more?": send the page we offered (no AI call).
+    follow = _more_info_followup(session, safe_text)
+    if follow:
+        session.more_info_url = ""
+        session.append("user", safe_text)
+        session.append("assistant", follow)
+        if not draft_only:
+            await conversation_store.save_session(session)
+        return follow
+
     # 2. Deterministic handoff: first-tap retrieval + code-side guardrail (PLAN 4.4).
     first_turn = session.message_count == 0 and not any(m.get("role") == "assistant" for m in session.history)
     references: List[RetrievedChunk] = []
@@ -1128,13 +1232,14 @@ async def handle_incoming_message(
             query = safe_text
             if _is_generic_spec_request(safe_text) and session.inquiry.product:
                 query = f"{session.inquiry.product} {safe_text}"     # "the specs" of what we are already talking about
-            references = await retrieve(query)
+            references = _expand_to_full_page(await retrieve(query), safe_text)
         except Exception as exc:  # pragma: no cover
             print(f"[llm] retrieve() call failed: {exc!r}")
             references = []
     if safe_text and not references and index_is_ready() and _is_generic_spec_request(safe_text) and not _looks_like_pricing_question(safe_text):
         # A spec request that does not say which product: ask which one (and link the products page) instead of sending
         # the buyer to a person. Nothing is guessed, nothing is escalated.
+        session.more_info_url = ""
         session.append("user", safe_text)
         session.append("assistant", GENERIC_SPEC_REPLY)
         if not draft_only:
@@ -1151,6 +1256,7 @@ async def handle_incoming_message(
     if must_handoff:
         # Bypass the LLM entirely. Escalate to a human so the model cannot be
         # tempted to guess about a question whose answer didn't match the KB.
+        session.more_info_url = ""
         print(f"[llm] CODE-SIDE HANDOFF for {phone_number}: no retrieval hits on product question {safe_text[:100]!r}")
         if not draft_only:
             _flag_needs_human(session, f"No knowledge-base match: {safe_text[:200]}")
@@ -1353,7 +1459,8 @@ async def handle_incoming_message(
 
     cleaned = _strip_repeat_greeting(cleaned, first_turn)
     cleaned = _pricing_line_last(cleaned)
-    cleaned = _add_read_more_link(cleaned, safe_text, references)
+    cleaned = _withhold_link_until_asked(cleaned, safe_text)
+    cleaned = _add_know_more_offer(cleaned, safe_text, references, session)
 
     # Bump the Q&A counter if we sent info but no inquiry/booking progress.
     inquiry_before = session.inquiry.completeness_score()

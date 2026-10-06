@@ -75,17 +75,19 @@ class PromptGuidesToTheWebsiteNotToACall(Base):
         self.assertNotIn("pivot toward a next step", p)
         self.assertNotIn("Freeform Q&A cap", p)
 
-    def test_information_questions_get_the_page_link_and_no_call_offer(self):
+    def test_information_questions_get_a_full_answer_a_know_more_question_and_no_call_offer(self):
         p = self.prompt().lower()
         self.assertIn("information questions", p)
-        self.assertIn("read more", p)
+        self.assertIn("would like to know more", p)
+        self.assertIn("do not paste a website link", p)
         self.assertIn("do not offer a call", p)
 
     def test_the_offer_is_reserved_for_a_buyer_who_wants_to_proceed(self):
         p = self.prompt().lower()
         self.assertIn("only when the buyer", p)
+        start = p.index("information questions: when")
         for signal in ("price", "quote", "book"):
-            self.assertIn(signal, p[p.index("information questions"):p.index("information questions") + 1800])
+            self.assertIn(signal, p[start:start + 1800])
 
     def test_a_detailed_buyer_is_not_pushed_to_booking_without_asking(self):
         p = self.prompt()
@@ -121,17 +123,18 @@ class CannedRepliesDoNotPushACall(Base):
         self.assertIn(self.cal, out)
 
 
-class WebsiteLinkIsAlwaysGivenForInformationRequests(Base):
-    """The model sometimes forgets the page link on an information answer, so the code adds it (deterministically)."""
+class LinkOnlyWhenTheBuyerWantsMore(Base):
+    """The page link is sent after the buyer says yes to 'would you like to know more?' (see test_know_more), not pasted
+    into the first answer, and never into price, booking or small-talk replies."""
     URL = "https://www.petrobindglobal.com/products/bitumen-60-70"
 
-    def test_a_tell_me_more_answer_without_a_link_gets_the_page_link(self):
+    def test_a_tell_me_more_answer_has_a_know_more_question_not_a_link(self):
         out = self.turn("tell me more about bitumen 60/70", "It is a paving grade used for roads and highways.")
-        self.assertIn(self.URL, out); self.assertEqual(out.count("petrobindglobal.com"), 1)
+        self.assertNotIn("petrobindglobal.com", out); self.assertIn("know more", out.lower())
 
-    def test_no_duplicate_when_the_reply_already_has_a_link(self):
+    def test_a_link_the_model_added_is_removed(self):
         out = self.turn("what is bitumen 60/70?", f"It is a paving grade. {self.URL}")
-        self.assertEqual(out.count("petrobindglobal.com"), 1)
+        self.assertNotIn("petrobindglobal.com", out); self.assertIn("paving grade", out)
 
     def test_not_added_to_price_booking_or_small_talk(self):
         for text, reply in (("how much is bitumen 60/70?", "Hold on, let me check with my sales director about the latest price to confirm."),
@@ -139,11 +142,11 @@ class WebsiteLinkIsAlwaysGivenForInformationRequests(Base):
                             ("hi there", "Hi, how can I help with your requirement?"),
                             ("thanks, that's helpful", "You're welcome.")):
             out = self.turn(text, reply)
-            self.assertNotIn("petrobindglobal.com", out, text)
+            self.assertNotIn("petrobindglobal.com", out, text); self.assertNotIn("know more", out.lower(), text)
 
     def test_not_added_when_the_knowledge_base_had_nothing_relevant(self):
         out = self.turn("tell me more about bitumen 60/70", "It is a paving grade.", refs=[])
-        self.assertNotIn("petrobindglobal.com/products", out)
+        self.assertNotIn("know more", out.lower())
 
 
 class LinkFromKnowledgeBase(Base):
