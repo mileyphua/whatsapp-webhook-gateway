@@ -37,6 +37,7 @@ MEMBER_API = [
     ("GET", "/api/inbox/me", None),
     ("GET", "/api/inbox/chats", None),
     ("GET", "/api/inbox/chats/60123456789/messages", None),
+    ("GET", "/api/inbox/chats/60123456789/summary", None),
     ("GET", "/api/inbox/chats/60123456789/claim", None),
     ("POST", "/api/inbox/chats/60123456789/claim", {"ttl_seconds": 60}),
     ("DELETE", "/api/inbox/chats/60123456789/claim", None),

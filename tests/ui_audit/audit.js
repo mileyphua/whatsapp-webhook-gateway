@@ -168,6 +168,20 @@ async function crawl(path, label, jar) {
   check("thread: countdown runs from the buyer's last message", /left to reply/.test($(T, "#hdr-countdown").textContent), $(T, "#hdr-countdown").textContent);
   check("thread: window banner says OPEN", /OPEN/.test($(T, "#window-status-banner").textContent), $(T, "#window-status-banner").textContent);
   check("thread: reply box and Attach are enabled while the window is open", !$(T, "#human-text-input").disabled && !$(T, "#attach-btn").disabled, "textarea.disabled=" + $(T, "#human-text-input").disabled);
+  // lead summary panel: shows the record, can be hidden and shown again, and the choice is remembered
+  {
+    const panel = $(T, "#lead-panel"), tog = $(T, "#lead-toggle");
+    check("summary: the Lead summary button and panel exist", !!panel && !!tog, "missing");
+    if (panel && tog) {
+      if (panel.hidden) { click(T, tog); await sleep(500); }
+      check("summary: the panel shows the lead record from the server", !panel.hidden && calls(T, /GET \/api\/inbox\/chats\/60120000001\/summary/).some((c) => c.status === 200) && /Stage/.test($(T, "#lead-body").textContent) && /Product/.test($(T, "#lead-body").textContent), $(T, "#lead-body").textContent.slice(0, 120));
+      check("summary: it says what was talked about", /What was talked about/.test($(T, "#lead-body").textContent), $(T, "#lead-body").textContent.slice(0, 120));
+      click(T, tog); check("summary: the button hides the panel", panel.hidden, "still visible");
+      click(T, tog); await sleep(400); check("summary: the button shows it again", !panel.hidden, "still hidden");
+      click(T, "#lead-close"); check("summary: ✕ hides it", panel.hidden, "still visible");
+      check("summary: hiding is remembered", T.w.localStorage.getItem("pb_lead_panel") === "0", T.w.localStorage.getItem("pb_lead_panel"));
+    }
+  }
   check("thread: 👍/👎 exist under the AI message", !!$(T, ".fb-up") && !!$(T, ".fb-down"), "missing");
   click(T, ".fb-up"); await sleep(600);
   check("thread: 👍 is recorded", calls(T, /POST \/api\/inbox\/feedback/).some((c) => c.status === 200), JSON.stringify(calls(T, /feedback/)));

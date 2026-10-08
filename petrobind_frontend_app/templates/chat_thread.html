@@ -56,6 +56,12 @@
         </div>
       </div>
       <div class="flex flex-col items-end gap-1">
+        <button type="button" id="lead-toggle" aria-expanded="false" aria-controls="lead-panel"
+                class="embed-hide inline-flex items-center gap-1.5 rounded-full border border-gray-300 bg-white px-3 py-1 text-xs font-medium text-gray-700 hover:bg-gray-50 transition">
+          <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4"/></svg>
+          <span id="lead-toggle-label">Lead summary</span>
+          <span id="lead-badge" hidden class="inline-block min-w-[1.1rem] rounded-full bg-amber-500 px-1 text-center text-[10px] font-bold text-white"></span>
+        </button>
         <button type="button" id="mode-switch" role="switch" aria-checked="false" aria-label="Who replies: AI or Human"
                 class="inline-flex items-center gap-2 rounded-full border border-gray-300 pl-1 pr-3 py-1 text-sm font-medium transition">
           <span id="mode-knob" class="inline-block w-5 h-5 rounded-full bg-white shadow transition"></span>
@@ -287,6 +293,27 @@
       </div>
     </div>
   </section>
+
+  <!-- RIGHT: lead summary (show / hide) -->
+  <aside id="lead-panel" hidden aria-label="Lead summary"
+         class="embed-hide fixed inset-y-0 right-0 z-30 w-[90vw] sm:w-[380px] lg:static lg:z-auto lg:w-[360px] lg:shrink-0 flex flex-col border-l border-gray-200 bg-white shadow-xl lg:shadow-none">
+    <div class="flex items-center justify-between gap-2 px-4 py-3 border-b border-gray-200 bg-gray-50">
+      <div>
+        <div class="text-sm font-semibold text-gray-900">Lead summary</div>
+        <div id="lead-updated" class="text-[11px] text-gray-500">Loading…</div>
+      </div>
+      <div class="flex items-center gap-1">
+        <button type="button" id="lead-refresh" class="rounded-md px-2 py-1 text-xs text-gray-600 hover:bg-gray-200" title="Refresh now">Refresh</button>
+        <button type="button" id="lead-close" class="rounded-md px-2 py-1 text-lg leading-none text-gray-500 hover:bg-gray-200" aria-label="Hide lead summary">&times;</button>
+      </div>
+    </div>
+    <div id="lead-body" class="flex-1 overflow-y-auto px-4 py-3 text-sm text-gray-800 space-y-4">
+      <div class="text-xs text-gray-500">Loading…</div>
+    </div>
+    <div class="px-4 py-2 border-t border-gray-100 text-[10px] leading-snug text-gray-400">
+      Built from this chat with fixed rules, no AI guessing. A value shows “unknown” until the buyer says it.
+    </div>
+  </aside>
 </div>
 
 <script>

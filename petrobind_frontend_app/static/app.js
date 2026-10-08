@@ -90,6 +90,121 @@
     }
 
     // ------------------------------------------------------------------
+    // Lead summary panel: what the buyer wants and where the chat stands. Show/hide is remembered per browser.
+    // Everything from the server is written with textContent (buyer text is untrusted).
+    // ------------------------------------------------------------------
+    (function leadSummary() {
+      const panel = document.getElementById("lead-panel");
+      const toggle = document.getElementById("lead-toggle");
+      const body = document.getElementById("lead-body");
+      if (!panel || !toggle || !body) return;
+      const STAGE = { new_lead: "New lead", exploring: "Exploring", qualified_lead: "Qualified lead", ready_to_order: "Ready to order", call_booked: "Call booked" };
+      const INTENT = { bitumen_purchase: "Wants to buy bitumen", product_information: "Wants product information", documents_request: "Wants documents / certificates", call_request: "Wants a call", greeting_only: "Only said hello" };
+      const TONE = { short_business: "Short and businesslike", conversational: "Conversational", detailed: "Detailed", formal: "Formal" };
+      let timer = null, lastOpen = false;
+
+      function el(tag, cls, text) { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; }
+      function row(label, value, mono) {
+        const r = el("div", "flex justify-between gap-3 py-1 border-b border-gray-100 last:border-0");
+        r.appendChild(el("dt", "text-gray-500 shrink-0", label));
+        const v = el("dd", "text-right font-medium break-words min-w-0 " + (value === "unknown" ? "text-gray-400 font-normal" : "text-gray-900") + (mono ? " font-mono text-xs" : ""), value);
+        r.appendChild(v);
+        return r;
+      }
+      function section(title) { const s = el("section"); s.appendChild(el("h3", "text-[11px] font-bold uppercase tracking-wider text-gray-500 mb-1.5", title)); return s; }
+
+      function render(sum) {
+        body.textContent = "";
+        const need = sum.needs_human_confirmation || [];
+        const s1 = section("Needs a person to confirm");
+        if (need.length) {
+          const ul = el("ul", "space-y-1.5 rounded-lg border border-amber-200 bg-amber-50 p-2.5 text-amber-900");
+          need.forEach(function (t) { const li = el("li", "flex gap-1.5"); li.appendChild(el("span", "", "⚠")); li.appendChild(el("span", "min-w-0 break-words", t)); ul.appendChild(li); });
+          s1.appendChild(ul);
+        } else { s1.appendChild(el("div", "rounded-lg border border-green-200 bg-green-50 p-2.5 text-green-800 text-xs", "Nothing waiting for a person right now.")); }
+        body.appendChild(s1);
+
+        const s2 = section("Where we got to");
+        s2.appendChild(el("p", "leading-relaxed break-words", sum.remark || ""));
+        body.appendChild(s2);
+
+        const s3 = section("Lead record");
+        const dl = el("dl", "text-[13px]");
+        dl.appendChild(row("Stage", STAGE[sum.relationship_stage] || sum.relationship_stage));
+        dl.appendChild(row("What they want", INTENT[sum.customer_intent] || sum.customer_intent));
+        dl.appendChild(row("Product", sum.product_interest));
+        dl.appendChild(row("Quantity", sum.quantity));
+        dl.appendChild(row("Destination", sum.destination));
+        dl.appendChild(row("Terms (incoterm)", sum.incoterm));
+        dl.appendChild(row("Packaging", sum.packaging));
+        dl.appendChild(row("Company", sum.company));
+        dl.appendChild(row("Contact", sum.contact));
+        dl.appendChild(row("Asked for price", sum.price_requested ? "Yes" : "No"));
+        dl.appendChild(row("Documents sent", sum.technical_docs_sent ? "Yes" : "No"));
+        dl.appendChild(row("Next step", sum.next_best_action_text ? sum.next_best_action_text.charAt(0).toUpperCase() + sum.next_best_action_text.slice(1) : sum.next_best_action));
+        dl.appendChild(row("Buyer’s style", TONE[sum.tone] || sum.tone));
+        dl.appendChild(row("Buyer messages", String(sum.buyer_messages || 0)));
+        s3.appendChild(dl);
+        body.appendChild(s3);
+
+        const s4 = section("What was talked about");
+        const topics = sum.topics || [];
+        if (!topics.length) { s4.appendChild(el("div", "text-xs text-gray-500", "No buyer messages yet.")); }
+        else {
+          const ol = el("ol", "space-y-2");
+          topics.forEach(function (t) {
+            const li = el("li", "rounded-lg border border-gray-200 p-2");
+            li.appendChild(el("div", "text-[11px] font-semibold text-pb-navy", t.topic));
+            li.appendChild(el("div", "text-xs text-gray-900 break-words", "Buyer: " + t.buyer));
+            li.appendChild(el("div", "text-xs break-words " + (t.by ? "text-gray-600" : "text-amber-700"),
+              t.by ? ((t.by === "human" ? "Person: " : "AI: ") + t.reply) : "No reply yet"));
+            ol.appendChild(li);
+          });
+          s4.appendChild(ol);
+        }
+        body.appendChild(s4);
+
+        const badge = document.getElementById("lead-badge");
+        if (badge) { badge.hidden = !need.length; badge.textContent = String(need.length); }
+        const upd = document.getElementById("lead-updated");
+        if (upd) upd.textContent = "Updated " + (window.PBTime ? window.PBTime.timeOnly(window.PBTime.now()) : "just now") + " (GMT+8)";
+      }
+
+      async function load() {
+        try {
+          const r = await inboxFetch(`/api/inbox/chats/${encodeURIComponent(E164)}/summary`);
+          if (!r.ok) throw new Error("HTTP " + r.status);
+          const j = await r.json();
+          render(j.summary || {});
+        } catch (e) {
+          body.textContent = "";
+          body.appendChild(el("div", "text-xs text-red-700", "Could not load the summary (" + (e && e.message || e) + ")."));
+        }
+      }
+      function setOpen(open, remember) {
+        lastOpen = open;
+        panel.hidden = !open;
+        toggle.setAttribute("aria-expanded", String(open));
+        const lbl = document.getElementById("lead-toggle-label");
+        if (lbl) lbl.textContent = open ? "Hide summary" : "Lead summary";
+        if (remember) { try { localStorage.setItem("pb_lead_panel", open ? "1" : "0"); } catch (e) {} }
+        if (timer) { clearInterval(timer); timer = null; }
+        if (open) { load(); timer = setInterval(function () { if (!document.hidden) load(); }, 30000); }
+      }
+      toggle.addEventListener("click", function () { setOpen(!lastOpen, true); });
+      const close = document.getElementById("lead-close");
+      if (close) close.addEventListener("click", function () { setOpen(false, true); });
+      const refresh = document.getElementById("lead-refresh");
+      if (refresh) refresh.addEventListener("click", load);
+      let saved = null;
+      try { saved = localStorage.getItem("pb_lead_panel"); } catch (e) {}
+      const wide = window.matchMedia && window.matchMedia("(min-width: 1024px)").matches;
+      setOpen(saved === "1" || (saved === null && wide && !document.body.classList.contains("embed")), false);
+      // a new message in the thread changes the summary: refresh when the message count changes
+      window.__refreshLeadSummary = function () { if (lastOpen) load(); };
+    })();
+
+    // ------------------------------------------------------------------
     // Fn 1. Reply-mode switch: AI (default) <-> Human.
     //   AI    = no claim; RAG+LLM answers the buyer.
     //   Human = this admin holds the claim; AI is paused. The claim is kept
@@ -531,7 +646,10 @@
         const resp = await inboxFetch(`/api/inbox/chats/${encodeURIComponent(E164)}/messages?limit=300`);
         if (!resp.ok) return;
         const data = await resp.json();
-        (data.messages || []).forEach(showServerMessage);
+        const list = data.messages || [];
+        list.forEach(showServerMessage);
+        if (pollThread.seen !== undefined && list.length !== pollThread.seen && window.__refreshLeadSummary) window.__refreshLeadSummary();
+        pollThread.seen = list.length;   // a new message changes the lead summary
       } catch (_) { /* next tick retries */ }
     }
     setInterval(function () { if (!document.hidden) pollThread(); }, 3000);

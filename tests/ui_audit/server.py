@@ -8,6 +8,7 @@ import time
 
 for k in ("UPSTASH_REDIS_REST_URL", "UPSTASH_REDIS_REST_TOKEN", "SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY", "RENDER_INBOX_URL"):
     os.environ[k] = ""          # never touch the live Redis / Supabase / Render that the developer's .env points at
+os.environ["OPENROUTER_MODEL"] = "openai/gpt-5-mini"   # the fake model list below describes this model, whatever .env says
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 sys.path.insert(0, ROOT)
 tmp = tempfile.mkdtemp(prefix="ui_audit_")

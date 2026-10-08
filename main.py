@@ -27,6 +27,7 @@ import reply_guard
 import feedback_store
 import learning
 import conversation_store
+import lead_summary
 import httpx
 import llm_assistant
 import scheduler
@@ -2863,6 +2864,36 @@ async def api_inbox_thread_messages(e164: str, request: Request) -> JSONResponse
             status_code=502,
         )
     return JSONResponse(content={"e164": e164, "messages": msgs})
+
+
+@app.get("/api/inbox/chats/{e164}/summary")
+async def api_inbox_chat_summary(e164: str, request: Request) -> JSONResponse:
+    """Plain-language lead summary of one chat (admin and team members). Rules only, no AI call, nothing is created."""
+    fail = _requires_inbox_bearer(request)
+    if fail:
+        return fail
+    try:
+        msgs = await _sb.thread_messages(e164, limit=300)
+        if not msgs and not _sb.ENABLED:
+            msgs = await _history_thread(e164)
+    except Exception as exc:
+        print(f"[INBOX] summary {e164!r} error: {type(exc).__name__}: {exc!s}")
+        return JSONResponse(content={"detail": f"Database error: {type(exc).__name__}"}, status_code=502)
+    sess = _find_session_by_number(e164)
+    if sess is None:
+        try:
+            sess = await conversation_store._redis_load(e164)   # read-only: never creates a session
+        except Exception:
+            sess = None
+    inquiry = sess.inquiry.as_dict() if sess is not None else {}
+    state = {
+        "needs_human_since": getattr(sess, "needs_human_since", None),
+        "needs_human_reason": getattr(sess, "needs_human_reason", ""),
+        "ai_paused": getattr(sess, "ai_paused", False),
+        "ai_paused_reason": getattr(sess, "ai_paused_reason", ""),
+        "booking_confirmed": bool(getattr(sess, "booking_confirmed_at", None)),
+    }
+    return JSONResponse(content={"e164": e164, "summary": lead_summary.build(msgs, inquiry=inquiry, state=state)})
 
 
 async def _claim_gate_for_send(e164: str, my_session_id: str, my_name: str) -> Optional[JSONResponse]:
