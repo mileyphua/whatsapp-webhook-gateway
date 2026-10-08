@@ -258,6 +258,42 @@ async function crawl(path, label, jar) {
   check("stock: confirming switches the whole family off", calls(K2, /PUT \/api\/inbox\/catalog\/family\/oxidized/).some((c) => c.status === 200) && /0 of 19 in stock/.test([...K2.d.querySelectorAll("#stock-families section")][2].textContent), JSON.stringify(calls(K2, /family/)));
   click(K2, [...K2.d.querySelectorAll("#stock-families section")][2].querySelectorAll("button:not([role=switch])")[0]); await sleep(900);
   check("stock: 'All on' brings the family back", /19 of 19 in stock/.test([...K2.d.querySelectorAll("#stock-families section")][2].textContent), "not restored");
+  // ---------------- documents: add a PDF, correct the AI's notes, try it, remove it ----------------
+  {
+    const Dc = await openPage("/inbox/documents", admin); await sleep(500);
+    check("documents: page opens with the upload box, the list and the Try box", !!$(Dc, "#doc-upload-input") && !!$(Dc, "#doc-list") && !!$(Dc, "#doc-try-input"), "missing");
+    check("documents: an empty library says so", /No documents yet/.test($(Dc, "#doc-list").textContent), $(Dc, "#doc-list").textContent);
+    click(Dc, "#doc-upload-btn"); await sleep(100);
+    check("documents: Add PDF without a file asks to choose one", /Choose a PDF/.test($(Dc, "#doc-upload-note").textContent), $(Dc, "#doc-upload-note").textContent);
+    const inp = $(Dc, "#doc-upload-input"); const pdf = new File([Buffer.from("%PDF-1.7\n" + "x".repeat(300))], "datasheet.pdf", { type: "application/pdf" });
+    Object.defineProperty(inp, "files", { value: [pdf], configurable: true });
+    click(Dc, "#doc-upload-btn"); await sleep(1500);
+    check("documents: Add PDF uploads it (201)", calls(Dc, /POST \/api\/inbox\/documents$/).some((c) => c.status === 201), JSON.stringify(calls(Dc, /documents/)));
+    const card = $(Dc, "#doc-list article");
+    check("documents: the card shows what the AI wrote and that it is Ready", !!card && /Ready/.test(card.textContent) && card.querySelector(".doc-title").value === "Audit Datasheet 60/70" && /60\/70 datasheet/.test(card.querySelector(".doc-sendwhen").value), card && card.textContent.slice(0, 160));
+    check("documents: the card shows who added it and when in GMT+8", !!card && /added by Petrobind Admin/.test(card.textContent) && /GMT\+8/.test(card.textContent), card && card.textContent.slice(0, 200));
+    check("documents: View PDF points at the stored file", !!card && /\/api\/inbox\/documents\/[0-9a-f]+\/file$/.test(card.querySelector("a").getAttribute("href")), card && card.querySelector("a").getAttribute("href"));
+    check("documents: Save is disabled until something changes", card.querySelector(".doc-save").disabled, "enabled");
+    card.querySelector(".doc-sendwhen").value = "Only when asked twice"; card.querySelector(".doc-sendwhen").dispatchEvent(new Dc.w.Event("input", { bubbles: true }));
+    check("documents: editing enables Save", !card.querySelector(".doc-save").disabled, "still disabled");
+    click(Dc, card.querySelector(".doc-save")); await sleep(900);
+    check("documents: Save stores the correction (PUT)", calls(Dc, /PUT \/api\/inbox\/documents\//).some((c) => c.status === 200), JSON.stringify(calls(Dc, /PUT/)));
+    const Dc2 = await openPage("/inbox/documents", admin); await sleep(600);
+    check("documents: the correction is still there after reloading", $(Dc2, "#doc-list .doc-sendwhen").value === "Only when asked twice", $(Dc2, "#doc-list .doc-sendwhen") && $(Dc2, "#doc-list .doc-sendwhen").value);
+    setVal(Dc2, "#doc-try-input", "can you send me the datasheet for 60/70?"); click(Dc2, "#doc-try-btn"); await sleep(800);
+    check("documents: Try it shows the reply and the PDF it would attach", /Audit suggested reply/.test($(Dc2, "#doc-try-result").textContent) && /would attach: Audit Datasheet 60\/70/.test($(Dc2, "#doc-try-result").textContent), $(Dc2, "#doc-try-result").textContent);
+    setVal(Dc2, "#doc-try-input", "what is your name?"); click(Dc2, "#doc-try-btn"); await sleep(800);
+    check("documents: Try it says when no PDF would be attached", /No PDF would be attached/.test($(Dc2, "#doc-try-result").textContent), $(Dc2, "#doc-try-result").textContent);
+    const en = $(Dc2, "#doc-list .doc-enabled"); en.checked = false; en.dispatchEvent(new Dc2.w.Event("change", { bubbles: true }));
+    click(Dc2, $(Dc2, "#doc-list .doc-save")); await sleep(900);
+    setVal(Dc2, "#doc-try-input", "can you send me the datasheet for 60/70?"); click(Dc2, "#doc-try-btn"); await sleep(800);
+    check("documents: switching a PDF off stops the AI using it", /No PDF would be attached/.test($(Dc2, "#doc-try-result").textContent), $(Dc2, "#doc-try-result").textContent);
+    const delBtn = $(Dc2, "#doc-list .doc-delete"); click(Dc2, delBtn); await sleep(100);
+    check("documents: Remove asks to confirm first", /Click again/.test(delBtn.textContent) && !calls(Dc2, /DELETE/).length, delBtn.textContent);
+    click(Dc2, delBtn); await sleep(900);
+    check("documents: confirming removes it", calls(Dc2, /DELETE \/api\/inbox\/documents\//).some((c) => c.status === 200) && /No documents yet/.test($(Dc2, "#doc-list").textContent), $(Dc2, "#doc-list").textContent);
+    check("documents: no script errors", Dc.errors.length === 0 && Dc2.errors.length === 0, Dc.errors.concat(Dc2.errors).join(" | "));
+  }
   const bk = await fetch(BASE + "/api/inbox/catalog/item/products-bitumen-60-70", { method: "PUT", headers: { "content-type": "application/json", cookie: admin.getCookieStringSync(BASE) }, body: JSON.stringify({ on: true }) });
   check("stock: (cleanup) item switched back on", bk.status === 200, bk.status);
   check("stock page: no script errors", K2.errors.length === 0, K2.errors.join(" | "));

@@ -27,6 +27,7 @@ import reply_guard
 import feedback_store
 import learning
 import conversation_store
+import documents
 import lead_summary
 import httpx
 import llm_assistant
@@ -1285,8 +1286,12 @@ async def send_whatsapp_media(
     reply_to_message_id: Optional[str] = None,
     sent_by: Optional[str] = None,
     phone_number_id: Optional[str] = None,
+    sender_direction: str = "human",   # "ai" when the assistant attaches a PDF from the library
 ) -> Dict[str, Any]:
     """Send an image/document: upload it to WhatsApp (/media) to get an id, then send a message pointing at that id."""
+    if sender_direction == "ai" and await _ai_is_paused(to):
+        print(f"[AI PAUSED] blocked an AI attachment to {to!r}")
+        return {"ok": False, "skipped": "ai_paused", "messages": []}
     if not ACCESS_TOKEN:
         raise RuntimeError("WHATSAPP_ACCESS_TOKEN must be set")
     pnid = phone_number_id or PHONE_NUMBER_ID
@@ -1314,7 +1319,7 @@ async def send_whatsapp_media(
         if 200 <= r.status_code < 300:
             sent_id = (body.get("messages") or [{}])[0].get("id") if body else None
             await _persist_outbound_safe(
-                e164=to, direction="human", text=caption or f"📎 {filename}", reply_to_wamid=reply_to_message_id,
+                e164=to, direction=sender_direction, text=caption or f"📎 {filename}", reply_to_wamid=reply_to_message_id,
                 sent_id_from_graph=sent_id, sent_by=sent_by, media_type=kind,
                 media_meta={"filename": filename, "mime": mime, "size": len(data), "media_id": media_id},
             )
@@ -1542,6 +1547,32 @@ async def _debounced_flush(from_number: str, generation: int) -> None:
     )
 
 
+async def _send_queued_documents(phone: str, phone_number_id: Optional[str]) -> None:
+    """Send the PDF(s) the AI chose to attach (documents.py), right after its text reply. Never raises."""
+    sess = conversation_store._SESSIONS.get(phone)
+    if sess is None or not sess.docs_to_send:
+        return
+    ids, sess.docs_to_send = list(sess.docs_to_send), []
+    if await _ai_is_paused(phone) or await _claim_is_held_by_other(phone):
+        return
+    for doc_id in ids:
+        try:
+            doc = await documents.get(doc_id)
+            data = await documents.read_bytes(doc_id)
+            if not doc or not data or not doc.get("enabled"):
+                continue
+            await send_whatsapp_media(to=phone, kind="document", data=data, mime="application/pdf", filename=doc["filename"],
+                                      phone_number_id=phone_number_id or PHONE_NUMBER_ID, sender_direction="ai")
+            sess.docs_sent.append(doc_id)
+            await documents.mark_sent(doc_id)
+        except Exception as exc:
+            print(f"[DOCUMENT SEND FAIL] to={phone!r} doc={doc_id!r} error={type(exc).__name__}: {exc!s}")
+    try:
+        await conversation_store.save_session(sess)
+    except Exception as exc:
+        print(f"[DOCUMENT SEND] could not save session for {phone!r}: {exc!r}")
+
+
 async def _llm_reply(
     *,
     from_number: str,
@@ -1587,6 +1618,9 @@ async def _llm_reply(
         )
 
     if held:
+        _held_sess = conversation_store._SESSIONS.get(from_number)
+        if _held_sess is not None:
+            _held_sess.docs_to_send = []          # the AI said nothing, so it attaches nothing
         print(
             f"[AI SKIP — human holds claim] to={from_number!r} held_by={held.get('held_by')!r} "
             f"expires_in={held.get('expires_in_secs')}s reply_preview={reply_text[:200]!r}"
@@ -1623,6 +1657,8 @@ async def _llm_reply(
                 sender_direction="ai",
             )
             sent_ok += 1
+        if sent_ok:
+            await _send_queued_documents(from_number, phone_number_id)
         messages = result.get("messages") or []
         sent_id = messages[0].get("id") if messages else None
         sess = conversation_store._SESSIONS.get(from_number)
@@ -3759,6 +3795,143 @@ async def web_inbox_team(request: Request) -> Response:
     if resp:
         return resp
     return _render_template("team.html", **ctx)
+
+
+# ---------------------------------------------------------------- Documents: PDFs the AI may send (documents.py)
+def _doc_public(doc: Dict[str, Any]) -> Dict[str, Any]:
+    """What the browser may see: the details, never the long text the AI works from."""
+    return {k: doc.get(k) for k in ("id", "filename", "title", "summary", "send_when", "topics", "status", "error", "enabled",
+                                    "size", "uploaded_by", "uploaded_at", "times_sent")}
+
+
+@app.get("/inbox/documents")
+async def web_inbox_documents(request: Request) -> Response:
+    resp, ctx = _logged_in_page_ctx(request, admin_only=False)       # admin and team members both manage the library
+    if resp:
+        return resp
+    return _render_template("documents.html", **ctx)
+
+
+@app.get("/api/inbox/documents")
+async def api_inbox_documents(request: Request) -> JSONResponse:
+    fail = _requires_inbox_bearer(request)
+    if fail:
+        return fail
+    return JSONResponse(content={"documents": [_doc_public(d) for d in await documents.list_docs()],
+                                 "max_mb": documents.MAX_BYTES // (1024 * 1024),
+                                 "can_read_pdf": await model_info.can_read("document")})
+
+
+@app.post("/api/inbox/documents")
+async def api_inbox_documents_add(request: Request, background: BackgroundTasks) -> JSONResponse:
+    fail = _requires_inbox_bearer(request)
+    if fail:
+        return fail
+    try:
+        declared = int(request.headers.get("content-length") or 0)
+    except ValueError:
+        declared = 0
+    if declared > documents.MAX_BYTES + 1024 * 1024:
+        return JSONResponse(content={"detail": f"The PDF is too large (limit {documents.MAX_BYTES // (1024 * 1024)} MB)."}, status_code=413)
+    try:
+        form = await request.form()
+    except Exception:
+        return JSONResponse(content={"detail": "Could not read the upload."}, status_code=422)
+    upload = form.get("file")
+    if upload is None or not hasattr(upload, "read"):
+        return JSONResponse(content={"detail": "Choose a PDF file to add."}, status_code=422)
+    data = await upload.read(documents.MAX_BYTES + 1)
+    _, name = _identity(request)
+    try:
+        doc = await documents.add(filename=getattr(upload, "filename", "") or "", data=data, uploaded_by=name)
+    except documents.DocumentRejected as exc:
+        return JSONResponse(content={"detail": str(exc)}, status_code=422)
+    background.add_task(documents.process, doc["id"])           # the AI reads it after the answer is sent; the page polls
+    asyncio.create_task(_sb.audit(actor=name, action="document_added", e164="", detail={"id": doc["id"], "filename": doc["filename"], "bytes": len(data)}))
+    return JSONResponse(content={"document": _doc_public(doc)}, status_code=201)
+
+
+@app.put("/api/inbox/documents/{doc_id}")
+async def api_inbox_documents_edit(doc_id: str, request: Request) -> JSONResponse:
+    fail = _requires_inbox_bearer(request)
+    if fail:
+        return fail
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse(content={"detail": "Invalid JSON body"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse(content={"detail": "Invalid JSON body"}, status_code=400)
+    if "title" in body and not str(body.get("title") or "").strip():
+        return JSONResponse(content={"detail": "The document needs a title."}, status_code=422)
+    doc = await documents.update(doc_id, **{k: body.get(k) for k in documents.EDITABLE if k in body})
+    if doc is None:
+        return JSONResponse(content={"detail": "Document not found"}, status_code=404)
+    return JSONResponse(content={"document": _doc_public(doc)})
+
+
+@app.delete("/api/inbox/documents/{doc_id}")
+async def api_inbox_documents_delete(doc_id: str, request: Request) -> JSONResponse:
+    fail = _requires_inbox_bearer(request)
+    if fail:
+        return fail
+    doc = await documents.get(doc_id)
+    if doc is None:
+        return JSONResponse(content={"detail": "Document not found"}, status_code=404)
+    _, name = _identity(request)
+    is_admin = (_auth_info(request) or {}).get("role") == "admin"
+    if not (is_admin or doc.get("uploaded_by") == name):
+        return JSONResponse(content={"detail": "Only the admin or the person who added it can remove it."}, status_code=403)
+    await documents.delete(doc_id)
+    asyncio.create_task(_sb.audit(actor=name, action="document_removed", e164="", detail={"id": doc_id, "filename": doc.get("filename")}))
+    return JSONResponse(content={"ok": True})
+
+
+@app.post("/api/inbox/documents/{doc_id}/reprocess")
+async def api_inbox_documents_reprocess(doc_id: str, request: Request, background: BackgroundTasks) -> JSONResponse:
+    fail = _requires_inbox_bearer(request)
+    if fail:
+        return fail
+    if await documents.get(doc_id) is None:
+        return JSONResponse(content={"detail": "Document not found"}, status_code=404)
+    background.add_task(documents.process, doc_id, True)       # keeps whatever a person already corrected
+    return JSONResponse(content={"ok": True})
+
+
+@app.get("/api/inbox/documents/{doc_id}/file")
+async def api_inbox_documents_file(doc_id: str, request: Request) -> Response:
+    fail = _requires_inbox_bearer(request)
+    if fail:
+        return fail
+    doc = await documents.get(doc_id)
+    data = await documents.read_bytes(doc_id) if doc else None
+    if not doc or data is None:
+        return JSONResponse(content={"detail": "Document not found"}, status_code=404)
+    return Response(content=data, media_type="application/pdf",
+                    headers={"Content-Disposition": f'inline; filename="{doc["filename"]}"', "X-Content-Type-Options": "nosniff"})
+
+
+@app.post("/api/inbox/documents/test")
+async def api_inbox_documents_test(request: Request) -> JSONResponse:
+    """Try it: what would the AI answer to this buyer message, and would it attach a PDF? Nothing is sent or saved."""
+    fail = _requires_inbox_bearer(request)
+    if fail:
+        return fail
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    message = str((body or {}).get("message") or "").strip()[:500]
+    if not message:
+        return JSONResponse(content={"detail": "Type a buyer message to try."}, status_code=422)
+    trace: Dict[str, Any] = {}
+    reply = await llm_assistant.handle_incoming_message(phone_number="library-test", inbound_text=message, draft_only=True, trace=trace)
+    docs = []
+    for doc_id in trace.get("documents") or []:
+        d = await documents.get(doc_id)
+        if d:
+            docs.append({"id": d["id"], "title": d["title"], "filename": d["filename"]})
+    return JSONResponse(content={"reply": reply, "documents": docs})
 
 
 # ---------------------------------------------------------------- Stock: which items the AI may talk about

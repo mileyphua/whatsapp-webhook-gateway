@@ -39,6 +39,7 @@ import ai_health
 import booking
 import model_info
 import catalog
+import documents
 import site_links
 import learning
 import supabase_client as _sbc
@@ -182,6 +183,25 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
         },
     },
 ]
+
+
+# Offered only when the team has added PDFs to the library (see documents.py): the AI decides when to attach one.
+SEND_DOCUMENT_TOOL: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "send_document",
+        "description": (
+            "Attach one PDF from the document library to your reply. Use it only when the buyer asks for that kind of document, or it "
+            "clearly is the best answer to their question, following the document's 'send when' note. Never for prices. The PDF is "
+            "sent right after your message, so in your message say briefly what it covers; do not paste a link."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {"document_id": {"type": "string", "description": "The id of the document, exactly as listed."}},
+            "required": ["document_id"],
+        },
+    },
+}
 
 
 # -------------------------- SYSTEM PROMPT -----------------------------------
@@ -817,6 +837,18 @@ async def _run_tool(name: str, args: dict, *, session: ConversationSession, draf
                 "Reminder: this is general industry context only, never present it as "
                 "Petrobind's own official spec, availability, or price."
             )
+        if name == "send_document":
+            doc_id = str(args.get("document_id") or "")
+            doc = next((d for d in await documents.enabled_docs() if d["id"] == doc_id), None)
+            if doc is None:
+                return "Tool result: send_document — that document is not available. Do not call it again; answer without a document."
+            if doc_id in session.docs_sent:
+                return f"Tool result: send_document — {doc['title']!r} was already sent in this chat. Do not send it again; just refer to it."
+            if session.docs_to_send:
+                return "Tool result: send_document — only one document can be attached per reply. Mention it, and offer the other one if they want it."
+            session.docs_to_send.append(doc_id)
+            return (f"Tool result: send_document succeeded. {doc['title']!r} will be attached right after your message. "
+                    "Say in one short sentence what it covers. Do not paste a link or its text.")
         if name == "share_booking_link":
             link = _booking_link_for(session, args.get("message"))
             # Remember WHEN we shared the link so conversation_store's follow-up
@@ -868,6 +900,15 @@ async def _single_turn_chat(
         "content": _format_references(references),
     }
     messages.append(ref_block)
+    tools = list(TOOL_DEFINITIONS)
+    try:
+        library = await documents.enabled_docs()
+    except Exception as exc:
+        print(f"[llm] document library unavailable: {type(exc).__name__}: {exc!s}")
+        library = []
+    if library:
+        tools.append(SEND_DOCUMENT_TOOL)
+        messages.append({"role": "system", "content": documents.prompt_block(library, session.docs_sent)})
     messages.append({"role": "system", "content": _format_buyer_memory(session)})
     if extra_system:
         messages.append({"role": "system", "content": extra_system})
@@ -883,7 +924,7 @@ async def _single_turn_chat(
             resp = await client.chat.completions.create(
                 model=model,
                 messages=messages,
-                tools=TOOL_DEFINITIONS,
+                tools=tools,
                 tool_choice="auto",
                 temperature=0.15,
                 max_tokens=900,
@@ -1199,6 +1240,7 @@ async def handle_incoming_message(
     phone_number: str,
     inbound_text: str,
     draft_only: bool = False,
+    trace: Optional[Dict[str, Any]] = None,
 ) -> str:
     """Entry point called by the FastAPI webhook. Always returns a reply string.
 
@@ -1237,6 +1279,7 @@ async def handle_incoming_message(
         setattr(session, "_draft_only", True)
     else:
         session = await get_session(phone_number)
+        session.docs_to_send = []        # never carry an unsent PDF over from an earlier turn
     safe_text = (inbound_text or "").strip()
 
     # Items switched Off on the Stock page are out of stock: never retrieved, never mentioned (see catalog.py).
@@ -1291,6 +1334,14 @@ async def handle_incoming_message(
         except Exception as exc:  # pragma: no cover
             print(f"[llm] retrieve() call failed: {exc!r}")
             references = []
+    if safe_text:
+        # Facts from the team's PDFs that cover this question count as reference material too (so a question only a PDF
+        # answers is not sent to a person as "no match").
+        try:
+            for c in documents.relevant_chunks(safe_text, await documents.enabled_docs()):
+                references = list(references) + [RetrievedChunk(url="", title=c["title"], chunk_text=c["chunk_text"], similarity=0.5, chunk_index=0)]
+        except Exception as exc:
+            print(f"[llm] document facts skipped: {type(exc).__name__}: {exc!s}")
     if safe_text and not references and index_is_ready() and _is_generic_spec_request(safe_text) and not _looks_like_pricing_question(safe_text):
         # A spec request that does not say which product: ask which one (and link the products page) instead of sending
         # the buyer to a person. Nothing is guessed, nothing is escalated.
@@ -1426,6 +1477,9 @@ async def handle_incoming_message(
     except Exception as exc:
         print(f"[llm] turn exception: {exc!r}")
         text = None
+
+    if trace is not None:
+        trace["documents"] = list(session.docs_to_send)          # what a draft would attach (a draft never sends)
 
     if text is None:
         # Fallback path: LLM unavailable or failed. Tell people FIRST (inbox note, human queue, banner, email), then

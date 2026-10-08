@@ -41,3 +41,4 @@ htmlcov/
 .ai_learning.json
 .inbox_users.json
 .local_outbound.json
+.documents/

@@ -1,0 +1,205 @@
+{% extends "base.html" %}
+{% block title %}Documents — Petrobind Inbox{% endblock %}
+{% block content %}
+<main class="flex-1 overflow-y-auto bg-gray-50">
+  <div class="max-w-5xl mx-auto px-4 md:px-8 py-6 space-y-5">
+
+    <header>
+      <h1 class="text-xl font-semibold">Documents</h1>
+      <p class="text-sm text-gray-600 max-w-3xl">Add PDFs (datasheets, brochures, certificates). The AI reads each one once and writes down
+        <b>what it covers</b> and <b>when to send it</b>. In a chat it then decides for itself whether to attach the PDF, or to answer from what the PDF says.
+        Check the AI's notes, correct them if needed, and switch off any PDF you do not want sent. Prices still only ever come from the sales director.</p>
+    </header>
+
+    <div id="doc-model-warning" class="rounded-lg border border-amber-300 bg-amber-50 text-amber-900 text-sm p-3" role="alert" hidden>
+      The AI model currently in use cannot read PDFs, so new PDFs cannot be read until the model is changed.
+    </div>
+
+    <section class="bg-white border border-gray-200 rounded-lg p-4 space-y-2" aria-label="Add a PDF">
+      <div class="flex flex-wrap items-center gap-3">
+        <input id="doc-upload-input" type="file" accept="application/pdf,.pdf" class="text-sm">
+        <button id="doc-upload-btn" type="button" class="px-4 py-1.5 rounded-md bg-pb-navy text-white text-sm font-medium hover:bg-slate-900 disabled:opacity-50">Add PDF</button>
+        <span id="doc-upload-note" class="text-sm text-gray-600" role="status" aria-live="polite"></span>
+      </div>
+      <p class="text-xs text-gray-500">PDF files only, up to <span id="doc-max-mb">8</span> MB. Do not add files that contain prices unless you want the AI to be able to share them.</p>
+    </section>
+
+    <section class="bg-white border border-gray-200 rounded-lg p-4 space-y-2" aria-label="Try it">
+      <h2 class="text-sm font-semibold">Try it</h2>
+      <p class="text-xs text-gray-500">Type what a buyer might write. You will see the answer the AI would give and whether it would attach a PDF. Nothing is sent to anyone.</p>
+      <div class="flex flex-wrap gap-2">
+        <input id="doc-try-input" type="text" maxlength="500" placeholder="e.g. Can you send me the datasheet for 60/70?" class="flex-1 min-w-[14rem] border border-gray-300 rounded px-3 py-1.5 text-sm">
+        <button id="doc-try-btn" type="button" class="px-4 py-1.5 rounded-md bg-pb-green text-white text-sm font-medium hover:bg-pb-greenDark disabled:opacity-50">Try</button>
+      </div>
+      <div id="doc-try-result" class="text-sm space-y-1" aria-live="polite" hidden></div>
+    </section>
+
+    <div id="doc-note" class="text-sm text-red-700" role="status" aria-live="polite" hidden></div>
+    <div id="doc-list" class="space-y-3"><div class="text-sm text-gray-500">Loading…</div></div>
+  </div>
+</main>
+
+<script>
+(function () {
+  var $ = function (id) { return document.getElementById(id); };
+  function el(tag, cls, text) { var e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; }
+  var IS_ADMIN = {{ 'true' if is_admin else 'false' }};
+  var ME = {{ admin_name | tojson }};
+  var cards = {};          // id -> { box, print, dirty }
+  var timer = null;
+
+  function api(path, method, body, isForm) {
+    var opts = { method: method || "GET", credentials: "same-origin" };
+    if (body) { if (isForm) opts.body = body; else { opts.headers = { "Content-Type": "application/json" }; opts.body = JSON.stringify(body); } }
+    return fetch("/api/inbox/documents" + path, opts).then(function (r) {
+      if (r.status === 401) { location.href = "/inbox/login"; throw new Error("session ended"); }
+      return r.json().then(function (j) { if (!r.ok) throw new Error(j.detail || ("failed (" + r.status + ")")); return j; });
+    });
+  }
+  function note(msg) { var n = $("doc-note"); n.textContent = msg || ""; n.hidden = !msg; }
+  function size(n) { return n > 1048576 ? (n / 1048576).toFixed(1) + " MB" : Math.max(1, Math.round(n / 1024)) + " KB"; }
+  function fingerprint(d) { return JSON.stringify([d.title, d.summary, d.send_when, d.enabled, d.status, d.error, d.times_sent, d.topics]); }
+
+  var STATUS = {
+    processing: ["Reading…", "bg-blue-100 text-blue-800"],
+    ready: ["Ready", "bg-green-100 text-green-800"],
+    failed: ["Could not read", "bg-red-100 text-red-800"]
+  };
+
+  function field(label, hint, input) {
+    var w = el("label", "block");
+    w.appendChild(el("span", "block text-xs font-semibold text-gray-700", label));
+    if (hint) w.appendChild(el("span", "block text-[11px] text-gray-500 mb-0.5", hint));
+    w.appendChild(input);
+    return w;
+  }
+
+  function buildCard(d) {
+    var box = el("article", "bg-white border border-gray-200 rounded-lg p-4 space-y-3");
+    box.setAttribute("data-doc-id", d.id);
+    var st = STATUS[d.status] || STATUS.failed;
+
+    var top = el("div", "flex flex-wrap items-center gap-2");
+    var title = el("input", "doc-title flex-1 min-w-[12rem] border border-gray-300 rounded px-2 py-1 text-sm font-semibold");
+    title.type = "text"; title.maxLength = 120; title.value = d.title || ""; title.setAttribute("aria-label", "Document title");
+    top.appendChild(title);
+    top.appendChild(el("span", "doc-status text-xs px-2 py-0.5 rounded-full " + st[1], st[0]));
+    box.appendChild(top);
+
+    var when = (window.PBTime ? window.PBTime.format(d.uploaded_at) : d.uploaded_at) + " (GMT+8)";
+    box.appendChild(el("div", "text-xs text-gray-500", d.filename + " · " + size(d.size) + " · added by " + (d.uploaded_by || "unknown") + " · " + when +
+      " · sent to buyers " + (d.times_sent || 0) + " time" + ((d.times_sent || 0) === 1 ? "" : "s")));
+
+    if (d.status === "failed") box.appendChild(el("div", "doc-error text-sm rounded border border-red-200 bg-red-50 text-red-800 p-2", d.error || "The AI could not read this PDF."));
+
+    var summary = el("textarea", "doc-summary w-full border border-gray-300 rounded px-2 py-1 text-sm"); summary.rows = 2; summary.maxLength = 600; summary.value = d.summary || "";
+    var sendWhen = el("textarea", "doc-sendwhen w-full border border-gray-300 rounded px-2 py-1 text-sm"); sendWhen.rows = 2; sendWhen.maxLength = 400; sendWhen.value = d.send_when || "";
+    if (d.status === "processing") { summary.disabled = sendWhen.disabled = title.disabled = true; }
+    box.appendChild(field("What it covers", "Written by the AI. Edit it if it is wrong.", summary));
+    box.appendChild(field("When the AI sends it", "Written by the AI. This is the rule the AI follows when deciding to attach it.", sendWhen));
+    if (d.topics && d.topics.length) {
+      var chips = el("div", "flex flex-wrap gap-1");
+      chips.appendChild(el("span", "text-[11px] text-gray-500 mr-1", "Buyers asking about:"));
+      d.topics.forEach(function (t) { chips.appendChild(el("span", "text-[11px] px-2 py-0.5 rounded-full bg-gray-100 text-gray-700", t)); });
+      box.appendChild(chips);
+    }
+
+    var foot = el("div", "flex flex-wrap items-center gap-3");
+    var sw = el("label", "flex items-center gap-2 text-sm text-gray-800");
+    var cb = el("input", "doc-enabled"); cb.type = "checkbox"; cb.checked = !!d.enabled; cb.disabled = d.status !== "ready";
+    sw.appendChild(cb); sw.appendChild(el("span", "", d.status === "ready" ? "The AI may use this PDF" : "Not available to the AI yet"));
+    foot.appendChild(sw);
+    var view = el("a", "text-sm text-pb-navy underline", "View PDF"); view.href = "/api/inbox/documents/" + encodeURIComponent(d.id) + "/file"; view.target = "_blank"; view.rel = "noopener";
+    foot.appendChild(view);
+    var save = el("button", "doc-save px-3 py-1 rounded-md bg-pb-navy text-white text-sm disabled:opacity-40", "Save changes"); save.type = "button"; save.disabled = true;
+    foot.appendChild(save);
+    if (d.status !== "processing") {
+      var retry = el("button", "doc-retry px-3 py-1 rounded-md border border-gray-300 text-sm hover:bg-gray-50", d.status === "failed" ? "Try reading again" : "Read again"); retry.type = "button";
+      retry.title = "The AI reads the PDF again. Anything you edited is kept.";
+      retry.addEventListener("click", function () {
+        retry.disabled = true; note("");
+        api("/" + encodeURIComponent(d.id) + "/reprocess", "POST").then(function () { return load(); }).catch(function (e) { retry.disabled = false; note("Could not start reading: " + e.message); });
+      });
+      foot.appendChild(retry);
+    }
+    if (IS_ADMIN || d.uploaded_by === ME) {
+      var del = el("button", "doc-delete ml-auto px-3 py-1 rounded-md border border-red-300 text-red-700 text-sm hover:bg-red-50", "Remove"); del.type = "button";
+      var armedDel = false;
+      del.addEventListener("click", function () {
+        if (!armedDel) { armedDel = true; del.textContent = "Click again to remove"; setTimeout(function () { armedDel = false; del.textContent = "Remove"; }, 4000); return; }
+        del.disabled = true;
+        api("/" + encodeURIComponent(d.id), "DELETE").then(function () { return load(); }).catch(function (e) { del.disabled = false; note("Could not remove it: " + e.message); });
+      });
+      foot.appendChild(del);
+    }
+    box.appendChild(foot);
+
+    var rec = { box: box, print: fingerprint(d), dirty: false };
+    function markDirty() { rec.dirty = true; save.disabled = false; }
+    [title, summary, sendWhen].forEach(function (i) { i.addEventListener("input", markDirty); });
+    cb.addEventListener("change", markDirty);
+    save.addEventListener("click", function () {
+      save.disabled = true; note("");
+      api("/" + encodeURIComponent(d.id), "PUT", { title: title.value, summary: summary.value, send_when: sendWhen.value, enabled: cb.checked })
+        .then(function () { rec.dirty = false; return load(); })
+        .catch(function (e) { save.disabled = false; note("Could not save: " + e.message); });
+    });
+    cards[d.id] = rec;
+    return rec;
+  }
+
+  function render(list) {
+    var host = $("doc-list");
+    if (!list.length) { host.textContent = ""; host.appendChild(el("div", "rounded-lg border border-dashed border-gray-300 bg-white p-6 text-sm text-gray-500 text-center", "No documents yet. Add a PDF above and the AI will read it.")); cards = {}; return; }
+    var ids = list.map(function (d) { return d.id; });
+    Object.keys(cards).forEach(function (id) { if (ids.indexOf(id) === -1) { if (cards[id].box.parentNode) cards[id].box.parentNode.removeChild(cards[id].box); delete cards[id]; } });
+    var first = host.firstElementChild;
+    if (first && !first.getAttribute("data-doc-id")) host.removeChild(first);
+    list.forEach(function (d, i) {
+      var rec = cards[d.id];
+      if (rec && (rec.dirty || rec.print === fingerprint(d))) return;                // never overwrite what someone is typing
+      var fresh = buildCard(d);
+      if (rec && rec.box.parentNode) rec.box.parentNode.replaceChild(fresh.box, rec.box);
+      else host.insertBefore(fresh.box, host.children[i] || null);
+    });
+  }
+
+  function load() {
+    return api("").then(function (j) {
+      $("doc-max-mb").textContent = j.max_mb; $("doc-model-warning").hidden = !!j.can_read_pdf;
+      render(j.documents);
+      var busy = j.documents.some(function (d) { return d.status === "processing"; });
+      if (busy && !timer) timer = setInterval(load, 3000);
+      if (!busy && timer) { clearInterval(timer); timer = null; }
+    }).catch(function (e) { note("Could not load the documents: " + e.message); });
+  }
+
+  $("doc-upload-btn").addEventListener("click", function () {
+    var f = $("doc-upload-input").files && $("doc-upload-input").files[0];
+    if (!f) { $("doc-upload-note").textContent = "Choose a PDF first."; return; }
+    var fd = new FormData(); fd.append("file", f, f.name);
+    $("doc-upload-btn").disabled = true; $("doc-upload-note").textContent = "Uploading…"; note("");
+    api("", "POST", fd, true).then(function () {
+      $("doc-upload-note").textContent = "Added. The AI is reading it now…"; $("doc-upload-input").value = ""; return load();
+    }).catch(function (e) { $("doc-upload-note").textContent = ""; note("Could not add it: " + e.message); })
+      .then(function () { $("doc-upload-btn").disabled = false; });
+  });
+
+  $("doc-try-btn").addEventListener("click", function () {
+    var msg = $("doc-try-input").value.trim(); var out = $("doc-try-result");
+    if (!msg) return;
+    $("doc-try-btn").disabled = true; out.hidden = false; out.textContent = "Asking the AI…";
+    api("/test", "POST", { message: msg }).then(function (j) {
+      out.textContent = "";
+      var a = el("div", "rounded bg-green-50 border border-green-100 p-2 whitespace-pre-wrap"); a.appendChild(el("div", "text-[11px] font-bold uppercase text-green-800", "AI would reply")); a.appendChild(document.createTextNode(j.reply || "(no reply)")); out.appendChild(a);
+      out.appendChild(el("div", "text-sm " + (j.documents.length ? "text-green-800 font-medium" : "text-gray-600"),
+        j.documents.length ? "📎 It would attach: " + j.documents.map(function (d) { return d.title; }).join(", ") : "No PDF would be attached to this reply."));
+    }).catch(function (e) { out.textContent = "Could not try it: " + e.message; })
+      .then(function () { $("doc-try-btn").disabled = false; });
+  });
+  $("doc-try-input").addEventListener("keydown", function (e) { if (e.key === "Enter") $("doc-try-btn").click(); });
+
+  load();
+})();
+</script>
+{% endblock %}

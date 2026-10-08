@@ -108,7 +108,22 @@ class FakeWhatsApp:
 main.httpx.AsyncClient = FakeWhatsApp
 
 
+import documents  # noqa: E402
+
+documents._DIR = os.path.join(tmp, "documents")
+
+
+async def _fake_digest(data, filename):       # the AI reading a PDF is replaced by a fixed answer
+    return {"title": "Audit Datasheet 60/70", "summary": "Typical properties of Bitumen 60/70.",
+            "send_when": "When a buyer asks for the 60/70 datasheet.", "topics": ["60/70", "datasheet"], "facts": "Penetration 60-70 dmm."}
+
+documents._digest = _fake_digest
+
+
 async def fake_handle(**kw):
+    if kw.get("trace") is not None:           # the library's "Try it" box: pretend the AI attaches the first document for a datasheet request
+        docs = await documents.enabled_docs()
+        kw["trace"]["documents"] = [docs[0]["id"]] if docs and "datasheet" in (kw.get("inbound_text") or "").lower() else []
     return "Audit suggested reply."
 
 main.llm_assistant.handle_incoming_message = fake_handle

@@ -112,6 +112,9 @@ class ConversationSession:
     ai_paused: bool = False
     ai_paused_reason: str = ""
     ai_paused_at: Optional[float] = None
+    # PDFs from the library: the AI queues one with the send_document tool; main sends it right after the text reply.
+    docs_to_send: List[str] = field(default_factory=list)
+    docs_sent: List[str] = field(default_factory=list)   # never send the same PDF twice in one chat
     web_search_count: int = 0  # cost guardrail: cap search_industry_info calls per session
     booking_intent_notified: bool = False  # dedup: 1 "buyer wants to book" email per session
 
